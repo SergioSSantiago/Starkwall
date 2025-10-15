@@ -23,6 +23,16 @@ const controllerOpts = {
             entrypoint: 'create_post',
             description: 'Create a new post on the canvas',
           },
+          {
+            name: 'Set Post Price',
+            entrypoint: 'set_post_price',
+            description: 'Set a price to sell your post',
+          },
+          {
+            name: 'Buy Post',
+            entrypoint: 'buy_post',
+            description: 'Buy a post that is for sale',
+          },
         ],
       },
     },

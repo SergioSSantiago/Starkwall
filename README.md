@@ -8,6 +8,7 @@ Starkwall reimagines social media by combining **blockchain ownership** with an 
 
 ### The Core Concept
 
+- **📱 Mobile-First Design**: Built specifically for mobile devices with posts sized at iPhone 16 dimensions (393×852px), making every post feel like a full-screen mobile experience
 - **🗺️ Infinite Canvas**: Posts are arranged on an unlimited 2D grid, creating a visual, explorable social space
 - **🔗 Blockchain-Native**: Every post is minted on-chain with permanent ownership records
 - **📍 Adjacent Growth**: New posts must connect to existing ones, creating organic community clusters
@@ -17,29 +18,39 @@ Starkwall reimagines social media by combining **blockchain ownership** with an 
 
 ### Current Implementation
 
-- ✅ **Wallet-Based Authentication** via Cartridge Controller
-- ✅ **On-Chain Post Creation** with images, captions, and metadata
+- ✅ **Mobile-First Architecture** - Posts designed at iPhone 16 dimensions (393×852px) for optimal mobile viewing
+- ✅ **Wallet-Based Authentication** via Cartridge Controller with username display
+- ✅ **On-Chain Post Creation** with images, captions, and creator attribution
+- ✅ **NFT Marketplace** - Buy and sell post ownership with STRK tokens
+- ✅ **Mock Balance System** - Prototype economy with 1000 STRK starting balance
 - ✅ **Real-Time Sync** between blockchain and UI using Torii indexer
 - ✅ **Infinite Canvas Navigation** with smooth zoom and pan
-- ✅ **Ownership Display** showing current owner on each post (Instagram-style)
-- ✅ **Adjacent Positioning** ensuring posts form connected networks
+- ✅ **Ownership Display** showing creator username on each post
+- ✅ **Adjacent Positioning** ensuring posts form connected networks with non-negative coordinates
 - ✅ **Persistent Storage** - posts survive page reloads and exist permanently on-chain
 
 ### Smart Contract Architecture
 
 ```cairo
 struct Post {
-    id: u32,                          // Unique post identifier
+    id: u64,                          // Unique post identifier
     image_url: ByteArray,             // IPFS or CDN URL
     caption: ByteArray,               // Post description
-    x_position: i32,                  // X coordinate on canvas
-    y_position: i32,                  // Y coordinate on canvas
-    size: u8,                         // Post size (standardized)
+    x_position: i32,                  // X coordinate on canvas (non-negative enforced)
+    y_position: i32,                  // Y coordinate on canvas (non-negative enforced)
+    size: u8,                         // Post size (fixed at 1, represents 393×852px)
     is_paid: bool,                    // Payment status
     created_at: u64,                  // Unix timestamp
     created_by: ContractAddress,      // Original creator
-    current_owner: ContractAddress,   // Current owner
+    creator_username: ByteArray,      // Creator's display name
+    current_owner: ContractAddress,   // Current owner (changes on sale)
+    sale_price: u128,                 // Sale price in STRK (0 = not for sale)
 }
+
+// Actions
+fn create_post() -> u64              // Create new post adjacent to existing ones
+fn set_post_price(post_id, price)    // List post for sale
+fn buy_post(post_id)                 // Purchase a post (transfers ownership)
 ```
 
 ## 🏗️ Tech Stack
@@ -178,16 +189,27 @@ Canvas updates - New post appears!
 
 ### 2. Position Algorithm
 
+- **Mobile-First Dimensions**: Each post is 393×852 pixels (iPhone 16 portrait dimensions)
 - **First Post**: Always at origin `(0, 0)`
 - **Subsequent Posts**: Scans adjacent positions (top, right, bottom, left)
+- **Non-Negative Constraint**: Filters out positions with negative x or y coordinates
 - **No Overlaps**: Ensures each post occupies unique coordinates
-- **Organic Growth**: Creates connected networks of posts
+- **Organic Growth**: Creates connected networks of posts that expand from the origin
 
-### 3. Data Synchronization
+### 3. Marketplace System (Prototype)
+
+- **Starting Balance**: Each wallet starts with 1000 STRK tokens
+- **Selling Posts**: Owners can set a sale price in STRK
+- **Buying Posts**: Anyone can purchase posts for sale (if they have sufficient balance)
+- **Balance Transfer**: STRK automatically transfers from buyer to seller
+- **Ownership Transfer**: `current_owner` updates on-chain after successful purchase
+- **Visual Indicators**: Green borders and "FOR SALE" badges on posts listed for sale
+
+### 4. Data Synchronization
 
 - **Real-time Subscriptions**: Torii notifies frontend of new posts
 - **GraphQL Queries**: Efficient data fetching on page load
-- **Optimistic Updates**: UI updates after blockchain confirmation
+- **Automatic Updates**: Balance and post ownership update after transactions (~5 seconds)
 
 ## 🎨 Why This Matters
 

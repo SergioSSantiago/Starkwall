@@ -50,6 +50,23 @@
       </div>
     </div>
 
+    <div id="postDetailsModal" class="modal">
+      <div class="modal-content">
+        <h2>Post Details</h2>
+        <div id="postDetailsContent">
+          <p><strong>Creator:</strong> <span id="postCreator"></span></p>
+          <p><strong>Caption:</strong> <span id="postCaption"></span></p>
+          <p id="postSaleInfo"></p>
+        </div>
+        <div id="postDetailsButtons" class="modal-buttons">
+          <button type="button" id="sellPostBtn" style="display: none;">💰 Sell Post</button>
+          <button type="button" id="removeSaleBtn" style="display: none;">❌ Remove from Sale</button>
+          <button type="button" id="buyPostBtn" style="display: none;">🛒 Buy Post</button>
+          <button type="button" id="closePostDetails">Close</button>
+        </div>
+      </div>
+    </div>
+
     <script type="module" src="./main.js"></script>
   </body>
 </html>

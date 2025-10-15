@@ -15,6 +15,7 @@ pub struct Post {
     pub created_by: ContractAddress,
     pub creator_username: ByteArray,
     pub current_owner: ContractAddress,
+    pub sale_price: u128, // 0 means not for sale
 }
 
 #[derive(Copy, Drop, Serde)]

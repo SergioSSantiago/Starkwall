@@ -33,6 +33,7 @@ export class PostManager {
           created_by: 'alice',
           creator_username: 'alice',
           current_owner: 'alice',
+          sale_price: 0,
         },
         {
           id: 2,
@@ -46,6 +47,7 @@ export class PostManager {
           created_by: 'bob',
           creator_username: 'bob',
           current_owner: 'pepe',
+          sale_price: 0,
         },
         {
           id: 3,
@@ -59,6 +61,7 @@ export class PostManager {
           created_by: 'carol',
           creator_username: 'carol',
           current_owner: 'carol',
+          sale_price: 0,
         },
         {
           id: 4,
@@ -72,6 +75,7 @@ export class PostManager {
           created_by: 'dave',
           creator_username: 'dave',
           current_owner: 'dave',
+          sale_price: 0,
         }
       ];
     }
@@ -193,7 +197,8 @@ export class PostManager {
         created_at: new Date().toISOString(),
         created_by: 'user',
         creator_username: creatorUsername,
-        current_owner: 'user'
+        current_owner: 'user',
+        sale_price: 0
       }
 
       // Load the image for the new post

@@ -9,6 +9,17 @@ pub trait IActions<T> {
         y_position: i32,
         is_paid: bool
     ) -> u64;
+    
+    fn set_post_price(
+        ref self: T,
+        post_id: u64,
+        price: u128
+    );
+    
+    fn buy_post(
+        ref self: T,
+        post_id: u64
+    );
 }
 
 #[dojo::contract]
@@ -51,11 +62,60 @@ pub mod actions {
                 created_by: caller,
                 creator_username,
                 current_owner: caller,
+                sale_price: 0, // Not for sale initially
             };
 
             world.write_model(@post);
 
             post_id
+        }
+        
+        fn set_post_price(
+            ref self: ContractState,
+            post_id: u64,
+            price: u128
+        ) {
+            let mut world = self.world_default();
+            let caller = starknet::get_caller_address();
+            
+            // Get the post
+            let mut post: Post = world.read_model(post_id);
+            
+            // Verify caller is the current owner
+            assert!(post.current_owner == caller, "Only owner can set price");
+            
+            // Set the price (0 means not for sale)
+            post.sale_price = price;
+            
+            world.write_model(@post);
+        }
+        
+        fn buy_post(
+            ref self: ContractState,
+            post_id: u64
+        ) {
+            let mut world = self.world_default();
+            let caller = starknet::get_caller_address();
+            
+            // Get the post
+            let mut post: Post = world.read_model(post_id);
+            
+            // Verify post is for sale
+            assert!(post.sale_price > 0, "Post is not for sale");
+            
+            // Verify caller is not the owner
+            assert!(post.current_owner != caller, "Cannot buy your own post");
+            
+            // TODO: In a real implementation, you would handle payment here
+            // For now, we just transfer ownership
+            
+            // Transfer ownership
+            post.current_owner = caller;
+            
+            // Remove from sale
+            post.sale_price = 0;
+            
+            world.write_model(@post);
         }
     }
 

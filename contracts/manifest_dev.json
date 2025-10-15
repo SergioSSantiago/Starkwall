@@ -1479,8 +1479,8 @@
   },
   "contracts": [
     {
-      "address": "0x4385327cf6affdb0c9ab207c5590d62998c2ed8fab20fada3e7bf68b68774bc",
-      "class_hash": "0x539df6ff71e7bc0bb91882a1c1db5f770de01a6432b47ab5e85da5f32c8f0b5",
+      "address": "0x2aa726017b98ddb96a95ac65a445e22130f70a00142b97aa76c819142edad43",
+      "class_hash": "0x1f2eb1caa58cfd1fff02902da113202106840509cce1e60dce8a90bcf333de5",
       "abi": [
         {
           "type": "impl",
@@ -1589,6 +1589,34 @@
                   "type": "core::integer::u64"
                 }
               ],
+              "state_mutability": "external"
+            },
+            {
+              "type": "function",
+              "name": "set_post_price",
+              "inputs": [
+                {
+                  "name": "post_id",
+                  "type": "core::integer::u64"
+                },
+                {
+                  "name": "price",
+                  "type": "core::integer::u128"
+                }
+              ],
+              "outputs": [],
+              "state_mutability": "external"
+            },
+            {
+              "type": "function",
+              "name": "buy_post",
+              "inputs": [
+                {
+                  "name": "post_id",
+                  "type": "core::integer::u64"
+                }
+              ],
+              "outputs": [],
               "state_mutability": "external"
             }
           ]
@@ -1713,6 +1741,8 @@
       "selector": "0x4c09d12108e978b8c073f8d7186ed1aa144777a0aad9d1334532b5813038897",
       "systems": [
         "create_post",
+        "set_post_price",
+        "buy_post",
         "upgrade"
       ]
     }
@@ -1721,7 +1751,7 @@
   "models": [
     {
       "members": [],
-      "class_hash": "0x25bad835d6fe521bc50cfa07b63e556401883032bdd9bc18ac260049dbcc0cb",
+      "class_hash": "0x973276b16fe5f084ef52b080229c69d4f4cf08fb151e0633ccf0f8dbb362e0",
       "tag": "di-Post",
       "selector": "0xee9e4c3c087faa03648870ae556985c80c12a4c9ce32fe7c2e9cea457b78e"
     },

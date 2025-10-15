@@ -161,6 +161,34 @@ export class DojoManager {
       
       if (postData) {
         console.log('    ✓ Found Post model:', postData);
+        console.log('    📊 sale_price raw data:', postData.sale_price);
+        
+        // Parse u128 sale_price (might be an object with low/high, a string, or a direct value)
+        let salePrice = 0;
+        if (postData.sale_price !== undefined && postData.sale_price !== null) {
+          const rawPrice = postData.sale_price;
+          
+          if (typeof rawPrice === 'object' && rawPrice !== null) {
+            // u128 might be split into low and high parts
+            if ('low' in rawPrice) {
+              salePrice = Number(rawPrice.low);
+              console.log('    💰 Parsed sale_price from u128.low:', salePrice);
+            } else if ('0' in rawPrice) {
+              // Sometimes stored as array-like object
+              salePrice = Number(rawPrice['0']);
+              console.log('    💰 Parsed sale_price from index 0:', salePrice);
+            } else {
+              console.log('    ⚠️ Unknown u128 object format:', rawPrice);
+              salePrice = 0;
+            }
+          } else {
+            // Direct value (number or string)
+            salePrice = Number(rawPrice);
+            console.log('    💰 Parsed sale_price directly:', salePrice, 'from type:', typeof rawPrice);
+          }
+        } else {
+          console.log('    💰 sale_price is null/undefined, defaulting to 0');
+        }
         
         const post = {
           id: Number(postData.id),
@@ -174,6 +202,7 @@ export class DojoManager {
           created_by: postData.created_by,
           creator_username: this.byteArrayToString(postData.creator_username),
           current_owner: postData.current_owner,
+          sale_price: salePrice,
         };
         
         console.log('    ✅ Parsed post:', post);
@@ -228,6 +257,101 @@ export class DojoManager {
     }
     
     return bytes;
+  }
+
+  /**
+   * Set the sale price for a post
+   * @param {number} postId - ID of the post
+   * @param {number} price - Price in wei (0 to remove from sale)
+   * @returns {Promise} - Transaction result
+   */
+  async setPostPrice(postId, price) {
+    console.log('💰 Setting post price:', { postId, price });
+    
+    // Try passing u128 as a single value (Cairo might handle it automatically)
+    const calldata = [postId, price];
+    console.log('📤 Sending calldata (trying single u128 value):', calldata);
+    console.log('📤 Contract address:', this.actionsContract.address);
+    console.log('📤 Entrypoint:', 'set_post_price');
+
+    try {
+      const tx = await this.account.execute({
+        contractAddress: this.actionsContract.address,
+        entrypoint: 'set_post_price',
+        calldata: calldata,
+      });
+
+      console.log('✅ Price set! Transaction:', tx.transaction_hash);
+      console.log('📊 Full transaction object:', tx);
+      
+      // Wait for transaction confirmation
+      const receipt = await this.account.waitForTransaction(tx.transaction_hash);
+      console.log('✅ Transaction confirmed!', receipt);
+      
+      return tx;
+    } catch (error) {
+      console.error('❌ Failed to set price:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Buy a post that is for sale
+   * @param {number} postId - ID of the post to buy
+   * @returns {Promise} - Transaction result
+   */
+  async buyPost(postId) {
+    console.log('🛒 Buying post:', postId);
+
+    try {
+      const tx = await this.account.execute({
+        contractAddress: this.actionsContract.address,
+        entrypoint: 'buy_post',
+        calldata: [postId],
+      });
+
+      console.log('✅ Post purchased! Transaction:', tx.transaction_hash);
+      
+      // Wait for transaction confirmation
+      const receipt = await this.account.waitForTransaction(tx.transaction_hash);
+      console.log('✅ Transaction confirmed!', receipt);
+      
+      return tx;
+    } catch (error) {
+      console.error('❌ Failed to buy post:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Query a specific post directly from the blockchain (not Torii)
+   * @param {number} postId - ID of the post
+   * @returns {Promise} - The post data
+   */
+  async queryPostDirect(postId) {
+    console.log('🔍 Querying post directly from blockchain:', postId);
+    
+    try {
+      const post = await this.toriiClient.getEntities({
+        query: new ToriiQueryBuilder()
+          .withClause(KeysClause(['di-Post'], [postId], 'FixedLen').build())
+      });
+      
+      console.log('📦 Direct query result:', post);
+      
+      if (post.items && post.items.length > 0) {
+        const postData = post.items[0].models?.di?.Post;
+        console.log('📊 Post data:', postData);
+        console.log('💰 sale_price from blockchain:', postData?.sale_price);
+        return postData;
+      } else {
+        console.log('❌ Post not found');
+        return null;
+      }
+    } catch (error) {
+      console.error('❌ Error querying post:', error);
+      throw error;
+    }
   }
 }
 

@@ -42,9 +42,10 @@ export class InfiniteCanvas {
       // Mouse events
       this.canvas.addEventListener('mousedown', (e) => this.onMouseDown(e))
       this.canvas.addEventListener('mousemove', (e) => this.onMouseMove(e))
-      this.canvas.addEventListener('mouseup', () => this.onMouseUp())
+      this.canvas.addEventListener('mouseup', (e) => this.onMouseUp(e))
       this.canvas.addEventListener('mouseleave', () => this.onMouseUp())
       this.canvas.addEventListener('wheel', (e) => this.onWheel(e))
+      this.canvas.addEventListener('click', (e) => this.onClick(e))
   
       // Touch events
       this.canvas.addEventListener('touchstart', (e) => this.onTouchStart(e))
@@ -78,7 +79,9 @@ export class InfiniteCanvas {
   
     onMouseDown(e) {
       this.isPanning = true
+      this.panStartPos = { x: e.clientX, y: e.clientY }
       this.lastMousePos = { x: e.clientX, y: e.clientY }
+      this.hasPanned = false
       this.canvas.style.cursor = 'grabbing'
     }
   
@@ -88,6 +91,11 @@ export class InfiniteCanvas {
       const dx = e.clientX - this.lastMousePos.x
       const dy = e.clientY - this.lastMousePos.y
   
+      // If moved more than 5 pixels, consider it a pan
+      if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+        this.hasPanned = true
+      }
+
       this.camera.x += dx / this.camera.zoom
       this.camera.y += dy / this.camera.zoom
   
@@ -95,9 +103,46 @@ export class InfiniteCanvas {
       this.render()
     }
   
-    onMouseUp() {
+    onMouseUp(e) {
       this.isPanning = false
       this.canvas.style.cursor = 'grab'
+    }
+
+    onClick(e) {
+      // Don't trigger click if user was panning
+      if (this.hasPanned) {
+        this.hasPanned = false
+        return
+      }
+
+      const post = this.getPostAtPosition(e.clientX, e.clientY)
+      if (post && this.onPostClick) {
+        this.onPostClick(post)
+      }
+    }
+
+    getPostAtPosition(clientX, clientY) {
+      // Convert screen coordinates to world coordinates
+      const worldX = (clientX - this.canvas.width / 2) / this.camera.zoom - this.camera.x
+      const worldY = (clientY - this.canvas.height / 2) / this.camera.zoom - this.camera.y
+
+      // Check each post
+      for (const post of this.posts) {
+        const size = post.size || 1
+        const width = this.postWidth * size
+        const height = this.postHeight * size
+
+        if (worldX >= post.x_position && worldX <= post.x_position + width &&
+            worldY >= post.y_position && worldY <= post.y_position + height) {
+          return post
+        }
+      }
+
+      return null
+    }
+
+    setPostClickHandler(handler) {
+      this.onPostClick = handler
     }
   
     onTouchStart(e) {
@@ -244,8 +289,14 @@ export class InfiniteCanvas {
       this.ctx.fillStyle = '#1a1a1a'
       this.ctx.fillRect(screen.x, screen.y, screenWidth, screenHeight)
   
-      // Draw border
-      this.ctx.strokeStyle = post.is_paid ? '#FFD700' : '#333'
+      // Draw border (green if for sale, gold if paid, default gray)
+      if (post.sale_price > 0) {
+        this.ctx.strokeStyle = '#4CAF50' // Green for sale
+      } else if (post.is_paid) {
+        this.ctx.strokeStyle = '#FFD700' // Gold for paid
+      } else {
+        this.ctx.strokeStyle = '#333' // Default gray
+      }
       this.ctx.lineWidth = 2
       this.ctx.strokeRect(screen.x, screen.y, screenWidth, screenHeight)
   
@@ -329,6 +380,37 @@ export class InfiniteCanvas {
             screen.x + 10 * this.camera.zoom,
             screen.y + screenHeight - 20 * this.camera.zoom
           )
+        }
+
+        // Draw "FOR SALE" badge if post is for sale
+        if (post.sale_price > 0 && this.camera.zoom > 0.2) {
+          const badgeWidth = 120 * this.camera.zoom
+          const badgeHeight = 35 * this.camera.zoom
+          const badgeX = screen.x + screenWidth - badgeWidth - 10 * this.camera.zoom
+          const badgeY = screen.y + 10 * this.camera.zoom
+
+          // Badge background
+          this.ctx.fillStyle = 'rgba(76, 175, 80, 0.9)'
+          this.ctx.fillRect(badgeX, badgeY, badgeWidth, badgeHeight)
+
+          // Badge text
+          this.ctx.fillStyle = '#fff'
+          this.ctx.font = `bold ${12 * this.camera.zoom}px sans-serif`
+          this.ctx.textAlign = 'center'
+          this.ctx.fillText(
+            'FOR SALE',
+            badgeX + badgeWidth / 2,
+            badgeY + 13 * this.camera.zoom
+          )
+          
+          // Price text
+          this.ctx.font = `${10 * this.camera.zoom}px sans-serif`
+          this.ctx.fillText(
+            `${post.sale_price} STRK`,
+            badgeX + badgeWidth / 2,
+            badgeY + 26 * this.camera.zoom
+          )
+          this.ctx.textAlign = 'left'
         }
       } else {
         // Draw placeholder
