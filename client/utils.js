@@ -7,8 +7,12 @@
  * @returns {Array} - Calldata array for Cairo ByteArray
  */
 export function stringToByteArray(str) {
+  console.log('📝 Converting string to ByteArray:', str.substring(0, 50) + (str.length > 50 ? '...' : ''));
+  
   const encoder = new TextEncoder();
   const bytes = encoder.encode(str);
+  
+  console.log('  Total bytes:', bytes.length);
   
   const dataArray = [];
   const chunkSize = 31; // Each felt252 holds 31 bytes
@@ -27,13 +31,18 @@ export function stringToByteArray(str) {
   const pendingWord = remainingBytes.length > 0 ? bytesToFelt252(remainingBytes) : '0';
   const pendingWordLen = remainingBytes.length;
   
+  console.log('  Data chunks:', dataArray.length, 'Pending bytes:', pendingWordLen);
+  
   // Return calldata format: [data_len, ...data, pending_word, pending_word_len]
-  return [
+  const result = [
     dataArray.length.toString(), // data array length
     ...dataArray,                 // data array elements
     pendingWord,                  // pending_word
     pendingWordLen.toString(),    // pending_word_len
   ];
+  
+  console.log('  ByteArray calldata length:', result.length);
+  return result;
 }
 
 /**

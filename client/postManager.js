@@ -112,24 +112,30 @@ export class PostManager {
   }
 
   async createPost(imageUrl, caption, size = 1, isPaid = false) {
+    // Get position for new post
+    let position
+    
     if (this.posts.length === 0) {
-      console.error('No existing posts to place next to')
-      return null
+      // First post - place at origin
+      console.log('Creating first post at origin (0, 0)')
+      position = { x: 0, y: 0 }
+    } else {
+      // Find adjacent position to existing posts
+      position = this.getAdjacentPosition()
+      
+      if (!position) {
+        console.error('No available adjacent positions')
+        return null
+      }
     }
 
-    // Get an available position next to an existing post
-    const position = this.getAdjacentPosition()
-    
-    if (!position) {
-      console.error('No available adjacent positions')
-      return null
-    }
+    console.log('Creating post at position:', position)
 
     if (this.useDojo) {
       // Create post on-chain via Dojo
       try {
-        console.log('Creating post on-chain...');
-        await this.dojoManager.createPost(
+        console.log('🎨 Creating post on-chain...');
+        const tx = await this.dojoManager.createPost(
           imageUrl,
           caption,
           position.x,
@@ -137,14 +143,24 @@ export class PostManager {
           isPaid
         );
         
+        console.log('✅ Post created! Transaction:', tx.transaction_hash);
+        
+        // Wait a moment for Torii to index
+        console.log('⏳ Waiting 5 seconds for Torii to index...');
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        
         // Reload posts from chain
+        console.log('🔄 Reloading posts...');
         await this.loadPosts();
         await this.loadImages();
         this.canvas.setPosts(this.posts);
         
+        console.log('✅ Posts reloaded! Total posts:', this.posts.length);
+        
         // Center on the new post
         const newPost = this.posts[this.posts.length - 1];
         if (newPost) {
+          console.log('📍 Centering on new post:', newPost.id);
           this.canvas.centerOn(
             newPost.x_position + this.canvas.postWidth / 2,
             newPost.y_position + this.canvas.postHeight / 2,
@@ -154,8 +170,9 @@ export class PostManager {
         
         return newPost;
       } catch (error) {
-        console.error('Error creating post on-chain:', error);
-        return null;
+        console.error('❌ Error creating post on-chain:', error);
+        alert('Failed to create post: ' + (error.message || 'Unknown error'));
+        throw error;
       }
     } else {
       // Create post locally (mock mode)

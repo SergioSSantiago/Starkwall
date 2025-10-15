@@ -18,28 +18,53 @@ export class DojoManager {
    * @returns {Promise<number>} - The ID of the created post
    */
   async createPost(imageUrl, caption, xPosition, yPosition, isPaid) {
+    console.log('📝 Creating post with params:', {
+      imageUrl,
+      caption,
+      xPosition,
+      yPosition,
+      isPaid
+    });
+
     // Convert strings to ByteArray format for Cairo
     const imageUrlBytes = stringToByteArray(imageUrl);
     const captionBytes = stringToByteArray(caption);
 
-    const tx = await this.account.execute({
-      contractAddress: this.actionsContract.address,
-      entrypoint: 'create_post',
-      calldata: [
-        ...imageUrlBytes,
-        ...captionBytes,
-        xPosition,
-        yPosition,
-        isPaid ? 1 : 0,
-      ],
+    console.log('📦 Converted calldata:', {
+      imageUrlBytes,
+      captionBytes,
+      contractAddress: this.actionsContract.address
     });
 
-    console.log('Post creation transaction:', tx);
-    
-    // Wait for transaction to be accepted
-    await this.account.waitForTransaction(tx.transaction_hash);
-    
-    return tx;
+    const calldata = [
+      ...imageUrlBytes,
+      ...captionBytes,
+      xPosition,
+      yPosition,
+      isPaid ? 1 : 0,
+    ];
+
+    console.log('🚀 Executing transaction with calldata length:', calldata.length);
+
+    try {
+      const tx = await this.account.execute({
+        contractAddress: this.actionsContract.address,
+        entrypoint: 'create_post',
+        calldata,
+      });
+
+      console.log('✅ Transaction sent:', tx.transaction_hash);
+      
+      // Wait for transaction to be accepted
+      console.log('⏳ Waiting for transaction confirmation...');
+      const receipt = await this.account.waitForTransaction(tx.transaction_hash);
+      console.log('✅ Transaction confirmed!', receipt);
+      
+      return tx;
+    } catch (error) {
+      console.error('❌ Transaction failed:', error);
+      throw error;
+    }
   }
 
   /**
@@ -48,17 +73,84 @@ export class DojoManager {
    */
   async queryAllPosts() {
     try {
-      // Query all entities - Torii will return Post models
-      const entities = await this.toriiClient.getEntities();
+      console.log('🔍 Querying posts via GraphQL...');
       
-      if (!entities) {
-        console.log('No entities found');
+      // Use GraphQL directly since SDK getEntities() is hanging
+      const query = `
+        query {
+          entities(limit: 100) {
+            edges {
+              node {
+                keys
+                models {
+                  __typename
+                  ... on di_Post {
+                    id
+                    image_url
+                    caption
+                    x_position
+                    y_position
+                    size
+                    is_paid
+                    created_at
+                    created_by
+                    current_owner
+                  }
+                }
+              }
+            }
+          }
+        }
+      `;
+
+      const response = await fetch('http://localhost:8080/graphql', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ query }),
+      });
+
+      const result = await response.json();
+      console.log('📦 GraphQL response:', result);
+
+      if (!result.data || !result.data.entities) {
+        console.log('⚠️ No entities in response');
         return [];
       }
 
-      return this.parsePostEntities(entities);
+      const posts = [];
+      
+      for (const edge of result.data.entities.edges) {
+        const models = edge.node.models;
+        
+        // Find the Post model (skip PostCounter)
+        const postModel = models.find(m => m.__typename === 'di_Post');
+        
+        if (postModel) {
+          console.log('✓ Found post:', postModel.id);
+          
+          posts.push({
+            id: Number(postModel.id),
+            image_url: this.byteArrayToString(postModel.image_url),
+            caption: this.byteArrayToString(postModel.caption),
+            x_position: Number(postModel.x_position),
+            y_position: Number(postModel.y_position),
+            size: Number(postModel.size || 1),
+            is_paid: Boolean(postModel.is_paid),
+            created_at: new Date(Number(postModel.created_at) * 1000).toISOString(),
+            created_by: postModel.created_by,
+            current_owner: postModel.current_owner,
+          });
+        }
+      }
+
+      console.log(`✅ Found ${posts.length} posts`);
+      return posts;
+      
     } catch (error) {
-      console.error('Error querying posts:', error);
+      console.error('❌ Error querying posts:', error);
+      console.error('Error details:', error.message, error.stack);
       return [];
     }
   }
@@ -69,13 +161,21 @@ export class DojoManager {
    * @returns {Array} - Parsed post objects
    */
   parsePostEntities(entities) {
+    console.log('🔍 Parsing entities...');
+    console.log('  Entity type:', typeof entities);
+    console.log('  Is array?', Array.isArray(entities));
+    console.log('  Keys:', Object.keys(entities || {}));
+    
     const posts = [];
 
-    for (const [entityId, entity] of Object.entries(entities)) {
+    for (const [entityId, entity] of Object.entries(entities || {})) {
+      console.log(`  Processing entity ${entityId}:`, entity);
+      
       if (entity.models?.di?.Post) {
+        console.log('    ✓ Found Post model');
         const postData = entity.models.di.Post;
         
-        posts.push({
+        const post = {
           id: Number(postData.id || entityId),
           image_url: this.byteArrayToString(postData.image_url),
           caption: this.byteArrayToString(postData.caption),
@@ -86,10 +186,16 @@ export class DojoManager {
           created_at: new Date(Number(postData.created_at) * 1000).toISOString(),
           created_by: postData.created_by,
           current_owner: postData.current_owner,
-        });
+        };
+        
+        console.log('    Parsed post:', post);
+        posts.push(post);
+      } else {
+        console.log('    ✗ No Post model found, models:', entity.models);
       }
     }
 
+    console.log(`📊 Total posts parsed: ${posts.length}`);
     return posts;
   }
 

@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Check Torii Posts</title>
+    <style>
+        body {
+            font-family: monospace;
+            padding: 20px;
+            background: #1a1a1a;
+            color: #fff;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            margin: 10px;
+            cursor: pointer;
+        }
+        pre {
+            background: #2a2a2a;
+            padding: 15px;
+            border-radius: 5px;
+            overflow: auto;
+            max-height: 600px;
+        }
+        .error {
+            color: #f44336;
+        }
+        .success {
+            color: #4CAF50;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔍 Torii Posts Checker</h1>
+    <p>This tool checks if Torii is indexing posts correctly</p>
+    
+    <button onclick="checkTorii()">Check Torii</button>
+    <button onclick="checkGraphQL()">Check GraphQL</button>
+    
+    <div id="output"></div>
+
+    <script type="module">
+        import { init } from '@dojoengine/sdk';
+        import manifest from '../contracts/manifest_dev.json' assert { type: 'json' };
+
+        const DOMAIN_SEPARATOR = {
+            name: 'di',
+            version: '1.0',
+            chainId: 'KATANA',
+            revision: '1',
+        };
+
+        let toriiClient;
+
+        async function initTorii() {
+            if (!toriiClient) {
+                console.log('Initializing Torii...');
+                toriiClient = await init({
+                    client: {
+                        worldAddress: manifest.world.address,
+                        toriiUrl: 'http://localhost:8080',
+                    },
+                    domain: DOMAIN_SEPARATOR,
+                });
+                console.log('Torii initialized');
+            }
+            return toriiClient;
+        }
+
+        window.checkTorii = async function() {
+            const output = document.getElementById('output');
+            output.innerHTML = '<p>⏳ Checking Torii...</p>';
+            
+            try {
+                const client = await initTorii();
+                
+                output.innerHTML += '<p class="success">✓ Torii client initialized</p>';
+                
+                const entities = await client.getEntities();
+                
+                output.innerHTML += '<pre>' + JSON.stringify(entities, null, 2) + '</pre>';
+                
+            } catch (error) {
+                output.innerHTML += '<p class="error">❌ Error: ' + error.message + '</p>';
+                output.innerHTML += '<pre class="error">' + error.stack + '</pre>';
+            }
+        };
+
+        window.checkGraphQL = function() {
+            const output = document.getElementById('output');
+            output.innerHTML = `
+                <h3>GraphQL Endpoint</h3>
+                <p>Open this URL in a new tab:</p>
+                <a href="http://localhost:8080/graphql" target="_blank" style="color: #4CAF50; font-size: 18px;">
+                    http://localhost:8080/graphql
+                </a>
+                <br><br>
+                <p>Run this query:</p>
+                <pre>
+query {
+  entities(limit: 10) {
+    totalCount
+    edges {
+      node {
+        keys
+        models {
+          __typename
+          ... on di_Post {
+            id
+            image_url
+            caption
+            x_position
+            y_position
+            size
+            is_paid
+            created_at
+            created_by
+            current_owner
+          }
+        }
+      }
+    }
+  }
+}
+                </pre>
+            `;
+        };
+    </script>
+</body>
+</html>
+
