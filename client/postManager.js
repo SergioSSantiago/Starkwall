@@ -31,6 +31,7 @@ export class PostManager {
           is_paid: false,
           created_at: '2024-06-07T10:15:00Z',
           created_by: 'alice',
+          creator_username: 'alice',
           current_owner: 'alice',
         },
         {
@@ -43,6 +44,7 @@ export class PostManager {
           is_paid: true,
           created_at: '2024-06-07T10:25:00Z',
           created_by: 'bob',
+          creator_username: 'bob',
           current_owner: 'pepe',
         },
         {
@@ -55,6 +57,7 @@ export class PostManager {
           is_paid: false,
           created_at: '2024-06-07T10:35:00Z',
           created_by: 'carol',
+          creator_username: 'carol',
           current_owner: 'carol',
         },
         {
@@ -67,6 +70,7 @@ export class PostManager {
           is_paid: false,
           created_at: '2024-06-07T10:45:00Z',
           created_by: 'dave',
+          creator_username: 'dave',
           current_owner: 'dave',
         }
       ];
@@ -111,7 +115,7 @@ export class PostManager {
     await Promise.all(imagePromises)
   }
 
-  async createPost(imageUrl, caption, size = 1, isPaid = false) {
+  async createPost(imageUrl, caption, creatorUsername, size = 1, isPaid = false) {
     // Get position for new post
     let position
     
@@ -134,10 +138,11 @@ export class PostManager {
     if (this.useDojo) {
       // Create post on-chain via Dojo
       try {
-        console.log('🎨 Creating post on-chain at position: x=%d, y=%d', position.x, position.y);
+        console.log('🎨 Creating post on-chain at position: x=%d, y=%d by user: %s', position.x, position.y, creatorUsername);
         const tx = await this.dojoManager.createPost(
           imageUrl,
           caption,
+          creatorUsername,
           position.x,
           position.y,
           isPaid
@@ -176,7 +181,7 @@ export class PostManager {
       }
     } else {
       // Create post locally (mock mode)
-      console.log('📝 Creating post locally (mock mode) at position: x=%d, y=%d', position.x, position.y);
+      console.log('📝 Creating post locally (mock mode) at position: x=%d, y=%d by user: %s', position.x, position.y, creatorUsername);
       const newPost = {
         id: Math.max(...this.posts.map(p => p.id), 0) + 1,
         image_url: imageUrl,
@@ -187,6 +192,7 @@ export class PostManager {
         is_paid: isPaid,
         created_at: new Date().toISOString(),
         created_by: 'user',
+        creator_username: creatorUsername,
         current_owner: 'user'
       }
 

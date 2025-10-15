@@ -4,6 +4,7 @@ pub trait IActions<T> {
         ref self: T,
         image_url: ByteArray,
         caption: ByteArray,
+        creator_username: ByteArray,
         x_position: i32,
         y_position: i32,
         is_paid: bool
@@ -23,6 +24,7 @@ pub mod actions {
             ref self: ContractState,
             image_url: ByteArray,
             caption: ByteArray,
+            creator_username: ByteArray,
             x_position: i32,
             y_position: i32,
             is_paid: bool
@@ -47,6 +49,7 @@ pub mod actions {
                 is_paid,
                 created_at: get_block_timestamp(),
                 created_by: caller,
+                creator_username,
                 current_owner: caller,
             };
 

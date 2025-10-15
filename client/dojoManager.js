@@ -14,15 +14,17 @@ export class DojoManager {
    * Create a post on-chain
    * @param {string} imageUrl - URL of the image
    * @param {string} caption - Post caption
+   * @param {string} creatorUsername - Username of the creator
    * @param {number} xPosition - X coordinate
    * @param {number} yPosition - Y coordinate
    * @param {boolean} isPaid - Whether it's a paid post
    * @returns {Promise<number>} - The ID of the created post
    */
-  async createPost(imageUrl, caption, xPosition, yPosition, isPaid) {
+  async createPost(imageUrl, caption, creatorUsername, xPosition, yPosition, isPaid) {
     console.log('📝 Creating post with params:', {
       imageUrl,
       caption,
+      creatorUsername,
       xPosition,
       yPosition,
       isPaid
@@ -31,16 +33,19 @@ export class DojoManager {
     // Convert strings to ByteArray format for Cairo
     const imageUrlBytes = stringToByteArray(imageUrl);
     const captionBytes = stringToByteArray(caption);
+    const usernameBytes = stringToByteArray(creatorUsername);
 
     console.log('📦 Converted calldata:', {
       imageUrlBytes,
       captionBytes,
+      usernameBytes,
       contractAddress: this.actionsContract.address
     });
 
     const calldata = [
       ...imageUrlBytes,
       ...captionBytes,
+      ...usernameBytes,
       xPosition,
       yPosition,
       isPaid ? 1 : 0,
@@ -167,6 +172,7 @@ export class DojoManager {
           is_paid: Boolean(postData.is_paid),
           created_at: new Date(Number(postData.created_at) * 1000).toISOString(),
           created_by: postData.created_by,
+          creator_username: this.byteArrayToString(postData.creator_username),
           current_owner: postData.current_owner,
         };
         

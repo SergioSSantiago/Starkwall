@@ -1479,8 +1479,8 @@
   },
   "contracts": [
     {
-      "address": "0x7a6a03a084dbeb3135b75b367d3efbf0e67df22131c7b84afa9dbcbce2d4f2b",
-      "class_hash": "0x6034a8ddd8596d5350d4b97d64739a53a4ad9b1fec98a139f2fc8aa19c7d22c",
+      "address": "0x4385327cf6affdb0c9ab207c5590d62998c2ed8fab20fada3e7bf68b68774bc",
+      "class_hash": "0x539df6ff71e7bc0bb91882a1c1db5f770de01a6432b47ab5e85da5f32c8f0b5",
       "abi": [
         {
           "type": "impl",
@@ -1565,6 +1565,10 @@
                 },
                 {
                   "name": "caption",
+                  "type": "core::byte_array::ByteArray"
+                },
+                {
+                  "name": "creator_username",
                   "type": "core::byte_array::ByteArray"
                 },
                 {
@@ -1717,7 +1721,7 @@
   "models": [
     {
       "members": [],
-      "class_hash": "0x3c247ff0fda08341b099ddd2311c9eee8fd4f1718946bb7dae28f9b9706d5ea",
+      "class_hash": "0x25bad835d6fe521bc50cfa07b63e556401883032bdd9bc18ac260049dbcc0cb",
       "tag": "di-Post",
       "selector": "0xee9e4c3c087faa03648870ae556985c80c12a4c9ce32fe7c2e9cea457b78e"
     },

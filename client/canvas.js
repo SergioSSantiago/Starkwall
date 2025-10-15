@@ -287,8 +287,8 @@ export class InfiniteCanvas {
 
         this.ctx.restore()
 
-        // Draw current owner overlay at the top (like Instagram)
-        if (post.current_owner && this.camera.zoom > 0.3) {
+        // Draw creator username overlay at the top (like Instagram)
+        if (post.creator_username && this.camera.zoom > 0.3) {
           const ownerHeight = 50 * this.camera.zoom
           const gradient = this.ctx.createLinearGradient(
             screen.x, screen.y,
@@ -303,7 +303,7 @@ export class InfiniteCanvas {
           this.ctx.fillStyle = '#fff'
           this.ctx.font = `bold ${14 * this.camera.zoom}px sans-serif`
           this.ctx.fillText(
-            post.current_owner,
+            post.creator_username,
             screen.x + 12 * this.camera.zoom,
             screen.y + 25 * this.camera.zoom
           )

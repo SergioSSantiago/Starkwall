@@ -13,6 +13,7 @@ pub struct Post {
     pub is_paid: bool,
     pub created_at: u64,
     pub created_by: ContractAddress,
+    pub creator_username: ByteArray,
     pub current_owner: ContractAddress,
 }
 

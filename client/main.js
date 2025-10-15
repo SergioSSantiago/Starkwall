@@ -14,7 +14,7 @@ const DOMAIN_SEPARATOR = {
   revision: '1',
 }
 
-let canvas, postManager, dojoManager, controller
+let canvas, postManager, dojoManager, controller, currentUsername
 
 // Initialize controller once on page load
 controller = new Controller(controllerOpts)
@@ -36,6 +36,8 @@ async function connectWallet() {
     console.log('Connecting to wallet...')
     const account = await controller.connect()
     console.log('✓ Wallet connected:', account.address)
+    currentUsername = await controller.username()
+    console.log('✓ Username:', currentUsername)
     
     connectStatus.textContent = 'Wallet connected! Loading blockchain...'
     
@@ -78,9 +80,8 @@ async function connectWallet() {
     canvasElement.style.display = 'block'
     controlsElement.style.display = 'flex'
     
-    // Show wallet address
-    const shortAddress = account.address.slice(0, 6) + '...' + account.address.slice(-4)
-    walletInfo.innerHTML = `<span style="color: #4CAF50;">● ${shortAddress}</span>`
+    // Show wallet username
+    walletInfo.innerHTML = `<span style="color: #4CAF50;">● ${currentUsername || account.address.slice(0, 6) + '...' + account.address.slice(-4)}</span>`
     
     console.log('✓ App ready!')
     
@@ -143,7 +144,7 @@ function setupUIHandlers() {
     const isPaid = isPaidInput.value === 'true'
 
     try {
-      await postManager.createPost(imageUrl, caption, size, isPaid)
+      await postManager.createPost(imageUrl, caption, currentUsername, size, isPaid)
       modal.classList.remove('active')
       postForm.reset()
     } catch (error) {
