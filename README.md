@@ -1,10 +1,10 @@
-# 🌌 InfinitePost
+# 🌌 Starkwall
 
 > A decentralized social media platform where posts exist as permanent, ownable tiles on an infinite canvas — powered by Dojo on Starknet.
 
-## 🎯 What is InfinitePost?
+## 🎯 What is Starkwall?
 
-InfinitePost reimagines social media by combining **blockchain ownership** with an **infinite canvas interface**. Unlike traditional social platforms where your content exists in a corporate database, here every post is a permanent, verifiable asset on the Starknet blockchain that you truly own.
+Starkwall reimagines social media by combining **blockchain ownership** with an **infinite canvas interface**. Unlike traditional social platforms where your content exists in a corporate database, here every post is a permanent, verifiable asset on the Starknet blockchain that you truly own.
 
 ### The Core Concept
 
