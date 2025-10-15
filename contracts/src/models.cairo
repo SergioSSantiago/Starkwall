@@ -1,44 +1,25 @@
 use starknet::ContractAddress;
-use core::num::traits::{SaturatingAdd, SaturatingSub};
 
-#[derive(Serde, Copy, Drop, Default, Introspect)]
-pub enum Direction {
-    // Serialized as 0.
-    #[default]
-    Left,
-    // Serialized as 1.
-    Right,
-    // Serialized as 2.
-    Up,
-    // Serialized as 3.
-    Down,
+#[derive(Drop, Serde)]
+#[dojo::model]
+pub struct Post {
+    #[key]
+    pub id: u64,
+    pub image_url: ByteArray,
+    pub caption: ByteArray,
+    pub x_position: i32,
+    pub y_position: i32,
+    pub size: u8,
+    pub is_paid: bool,
+    pub created_at: u64,
+    pub created_by: ContractAddress,
+    pub current_owner: ContractAddress,
 }
 
 #[derive(Copy, Drop, Serde)]
 #[dojo::model]
-pub struct Position {
+pub struct PostCounter {
     #[key]
-    pub player: ContractAddress,
-    pub x: u32,
-    pub y: u32,
-}
-
-#[derive(Copy, Drop, Serde)]
-#[dojo::model]
-pub struct Moves {
-    #[key]
-    pub player: ContractAddress,
-    pub remaining: u8,
-}
-
-#[generate_trait]
-pub impl PositionImpl of PositionTrait {
-    fn apply_direction(ref self: Position, direction: Direction) {
-        match direction {
-            Direction::Left => { self.x = self.x.saturating_sub(1) },
-            Direction::Right => { self.x = self.x.saturating_add(1) },
-            Direction::Up => { self.y = self.y.saturating_add(1) },
-            Direction::Down => { self.y = self.y.saturating_sub(1) },
-        }
-    }
+    pub counter_id: u8, // Always 0, used as singleton
+    pub count: u64,
 }

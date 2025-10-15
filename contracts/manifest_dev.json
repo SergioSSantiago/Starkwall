@@ -1479,8 +1479,8 @@
   },
   "contracts": [
     {
-      "address": "0xc15f8f861c8ab9e466c69d78ec701c9ad5952404a8d000a06c6217e67f5591",
-      "class_hash": "0x2bd55e0c15ae632fb28484b82069e6b0be1f33ec102b9c12616857b62cff2ff",
+      "address": "0x7a6a03a084dbeb3135b75b367d3efbf0e67df22131c7b84afa9dbcbce2d4f2b",
+      "class_hash": "0x6034a8ddd8596d5350d4b97d64739a53a4ad9b1fec98a139f2fc8aa19c7d22c",
       "abi": [
         {
           "type": "impl",
@@ -1539,22 +1539,14 @@
         },
         {
           "type": "enum",
-          "name": "dojo_intro::models::Direction",
+          "name": "core::bool",
           "variants": [
             {
-              "name": "Left",
+              "name": "False",
               "type": "()"
             },
             {
-              "name": "Right",
-              "type": "()"
-            },
-            {
-              "name": "Up",
-              "type": "()"
-            },
-            {
-              "name": "Down",
+              "name": "True",
               "type": "()"
             }
           ]
@@ -1565,28 +1557,34 @@
           "items": [
             {
               "type": "function",
-              "name": "spawn",
-              "inputs": [],
-              "outputs": [],
-              "state_mutability": "external"
-            },
-            {
-              "type": "function",
-              "name": "move",
+              "name": "create_post",
               "inputs": [
                 {
-                  "name": "direction",
-                  "type": "dojo_intro::models::Direction"
+                  "name": "image_url",
+                  "type": "core::byte_array::ByteArray"
+                },
+                {
+                  "name": "caption",
+                  "type": "core::byte_array::ByteArray"
+                },
+                {
+                  "name": "x_position",
+                  "type": "core::integer::i32"
+                },
+                {
+                  "name": "y_position",
+                  "type": "core::integer::i32"
+                },
+                {
+                  "name": "is_paid",
+                  "type": "core::bool"
                 }
               ],
-              "outputs": [],
-              "state_mutability": "external"
-            },
-            {
-              "type": "function",
-              "name": "move_random",
-              "inputs": [],
-              "outputs": [],
+              "outputs": [
+                {
+                  "type": "core::integer::u64"
+                }
+              ],
               "state_mutability": "external"
             }
           ]
@@ -1710,9 +1708,7 @@
       "tag": "di-actions",
       "selector": "0x4c09d12108e978b8c073f8d7186ed1aa144777a0aad9d1334532b5813038897",
       "systems": [
-        "spawn",
-        "move",
-        "move_random",
+        "create_post",
         "upgrade"
       ]
     }
@@ -1721,15 +1717,15 @@
   "models": [
     {
       "members": [],
-      "class_hash": "0x59aa2d584a078cf0a8f1b9eea6ab4656b2cf98a13c6a54392d09b7cc14ab74c",
-      "tag": "di-Moves",
-      "selector": "0xf9b3361ecd0207357b703079e95e035572c2bf2b236611dd97111225abe9f"
+      "class_hash": "0x3c247ff0fda08341b099ddd2311c9eee8fd4f1718946bb7dae28f9b9706d5ea",
+      "tag": "di-Post",
+      "selector": "0xee9e4c3c087faa03648870ae556985c80c12a4c9ce32fe7c2e9cea457b78e"
     },
     {
       "members": [],
-      "class_hash": "0x1fe9f5b2df0d4ae2f4dc055cee47d1099051d64137c6ca6bb7449a83420c80",
-      "tag": "di-Position",
-      "selector": "0x594a11e54660698f5198d8a38c3f2a691680a4466addfeac08919c3014b5e75"
+      "class_hash": "0x1bcfa8315938a059f6d4ef9ab085c90872da6c87d060df199ef4189bf9af5c8",
+      "tag": "di-PostCounter",
+      "selector": "0x71b1b8cf65527b80df295d973ff9bd00324d121b4ac82000ea4d7ba1e424106"
     }
   ],
   "events": [],

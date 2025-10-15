@@ -1,15 +1,26 @@
 import { SpiralLayout } from './spiralLayout.js'
 
 export class PostManager {
-  constructor(canvas) {
+  constructor(canvas, dojoManager = null) {
     this.canvas = canvas
     this.layout = new SpiralLayout(canvas.postWidth, canvas.postHeight)
     this.posts = []
     this.imageCache = new Map()
+    this.dojoManager = dojoManager // Optional Dojo integration
+    this.useDojo = !!dojoManager
   }
 
-  async loadPosts() { 
-    const data = [
+  async loadPosts() {
+    let data = [];
+
+    if (this.useDojo) {
+      // Load posts from Dojo
+      console.log('Loading posts from Dojo...');
+      data = await this.dojoManager.queryAllPosts();
+      console.log('Loaded posts from Dojo:', data);
+    } else {
+      // Use mock data
+      data = [
         {
           id: 1,
           image_url: 'https://picsum.photos/id/1011/400/400',
@@ -58,8 +69,8 @@ export class PostManager {
           created_by: 'dave',
           current_owner: 'dave',
         }
-        
-    ]
+      ];
+    }
 
     this.posts = data
 
@@ -114,48 +125,82 @@ export class PostManager {
       return null
     }
 
-    // Create new post data
-    const newPost = {
-      id: Math.max(...this.posts.map(p => p.id), 0) + 1,
-      image_url: imageUrl,
-      caption: caption,
-      x_position: position.x,
-      y_position: position.y,
-      size: 1, // Always size 1
-      is_paid: isPaid,
-      created_at: new Date().toISOString(),
-      created_by: 'user',
-      current_owner: 'user'
+    if (this.useDojo) {
+      // Create post on-chain via Dojo
+      try {
+        console.log('Creating post on-chain...');
+        await this.dojoManager.createPost(
+          imageUrl,
+          caption,
+          position.x,
+          position.y,
+          isPaid
+        );
+        
+        // Reload posts from chain
+        await this.loadPosts();
+        await this.loadImages();
+        this.canvas.setPosts(this.posts);
+        
+        // Center on the new post
+        const newPost = this.posts[this.posts.length - 1];
+        if (newPost) {
+          this.canvas.centerOn(
+            newPost.x_position + this.canvas.postWidth / 2,
+            newPost.y_position + this.canvas.postHeight / 2,
+            0.8
+          );
+        }
+        
+        return newPost;
+      } catch (error) {
+        console.error('Error creating post on-chain:', error);
+        return null;
+      }
+    } else {
+      // Create post locally (mock mode)
+      const newPost = {
+        id: Math.max(...this.posts.map(p => p.id), 0) + 1,
+        image_url: imageUrl,
+        caption: caption,
+        x_position: position.x,
+        y_position: position.y,
+        size: 1, // Always size 1
+        is_paid: isPaid,
+        created_at: new Date().toISOString(),
+        created_by: 'user',
+        current_owner: 'user'
+      }
+
+      // Load the image for the new post
+      await new Promise((resolve) => {
+        const img = new Image()
+        img.crossOrigin = 'anonymous'
+        img.onload = () => {
+          newPost.imageElement = img
+          this.imageCache.set(newPost.image_url, img)
+          resolve()
+        }
+        img.onerror = () => {
+          console.error('Failed to load image:', newPost.image_url)
+          resolve()
+        }
+        img.src = newPost.image_url
+      })
+
+      this.posts.push(newPost)
+      this.layout.addExistingPost(newPost.x_position, newPost.y_position, newPost.size)
+      this.canvas.setPosts(this.posts)
+
+      // Center on the new post
+      this.canvas.centerOn(
+        newPost.x_position + this.canvas.postWidth / 2,
+        newPost.y_position + this.canvas.postHeight / 2,
+        0.8
+      )
+
+      return newPost
     }
-
-    // Load the image for the new post
-    await new Promise((resolve) => {
-      const img = new Image()
-      img.crossOrigin = 'anonymous'
-      img.onload = () => {
-        newPost.imageElement = img
-        this.imageCache.set(newPost.image_url, img)
-        resolve()
-      }
-      img.onerror = () => {
-        console.error('Failed to load image:', newPost.image_url)
-        resolve()
-      }
-      img.src = newPost.image_url
-    })
-
-    this.posts.push(newPost)
-    this.layout.addExistingPost(newPost.x_position, newPost.y_position, newPost.size)
-    this.canvas.setPosts(this.posts)
-
-    // Center on the new post
-    this.canvas.centerOn(
-      newPost.x_position + this.canvas.postWidth / 2,
-      newPost.y_position + this.canvas.postHeight / 2,
-      0.8
-    )
-
-    return newPost
   }
 
   getAdjacentPosition() {

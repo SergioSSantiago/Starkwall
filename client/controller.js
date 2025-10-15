@@ -7,7 +7,6 @@
 import manifest from '../contracts/manifest_dev.json' assert { type: 'json' };
 
 const actionsContract = manifest.contracts.find((contract) => contract.tag === 'di-actions');
-const VRF_PROVIDER_ADDRESS = '0x15f542e25a4ce31481f986888c179b6e57412be340b8095f72f75a328fbb27b';
 
 const controllerOpts = {
   chains: [{ rpcUrl: 'http://localhost:5050' }],
@@ -16,28 +15,15 @@ const controllerOpts = {
   policies: {
     contracts: {
       [actionsContract.address]: {
-        name: 'Actions',
-        description: 'Actions contract to control the player movement',
+        name: 'Post Actions',
+        description: 'Actions contract to create posts',
         methods: [
           {
-            name: 'Spawn',
-            entrypoint: 'spawn',
-            description: 'Spawn the player in the game',
-          },
-          {
-            name: 'Move',
-            entrypoint: 'move',
-            description: 'Move the player in the game',
-          },
-          {
-            name: 'Move Random',
-            entrypoint: 'move_random',
-            description: 'Move the player in the game',
+            name: 'Create Post',
+            entrypoint: 'create_post',
+            description: 'Create a new post on the canvas',
           },
         ],
-      },
-      [VRF_PROVIDER_ADDRESS]: {
-        methods: [{ entrypoint: 'request_random' }],
       },
     },
   },

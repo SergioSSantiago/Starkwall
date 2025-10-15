@@ -24,8 +24,18 @@
     top: 20px;
     right: 20px;
     display: flex;
+    flex-direction: column;
     gap: 10px;
     z-index: 100;
+    align-items: flex-end;
+  }
+  
+  #wallet-info {
+    background: rgba(42, 42, 42, 0.9);
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-size: 12px;
+    border: 1px solid #444;
   }
   
   button {
@@ -132,4 +142,106 @@
   
   .modal-buttons button[type="submit"]:hover {
     background: #0052a3;
+  }
+  
+  /* Connect Screen */
+  #connect-screen {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: #0a0a0a;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    text-align: center;
+    padding: 40px;
+  }
+  
+  #connect-screen h1 {
+    font-size: 48px;
+    margin-bottom: 20px;
+    color: #fff;
+  }
+  
+  #connect-screen > p {
+    font-size: 18px;
+    color: #aaa;
+    margin-bottom: 40px;
+    max-width: 600px;
+    line-height: 1.6;
+  }
+  
+  .connect-button {
+    font-size: 20px;
+    padding: 18px 48px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border: none;
+    border-radius: 12px;
+    color: white;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s;
+    box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+  }
+  
+  .connect-button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+  }
+  
+  .connect-button:active {
+    transform: translateY(0);
+  }
+  
+  .connect-button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    transform: none;
+  }
+  
+  #connect-status {
+    margin-top: 30px;
+    font-size: 16px;
+    min-height: 24px;
+  }
+  
+  #requirements {
+    margin-top: 60px;
+    padding: 30px;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 12px;
+    max-width: 500px;
+  }
+  
+  #requirements h3 {
+    color: #fff;
+    margin-bottom: 15px;
+    font-size: 18px;
+  }
+  
+  #requirements ul {
+    list-style: none;
+    padding: 0;
+    text-align: left;
+  }
+  
+  #requirements li {
+    color: #aaa;
+    padding: 8px 0;
+    padding-left: 30px;
+    position: relative;
+    font-size: 14px;
+  }
+  
+  #requirements li:before {
+    content: '✓';
+    position: absolute;
+    left: 0;
+    color: #4CAF50;
+    font-weight: bold;
   }
