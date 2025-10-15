@@ -134,7 +134,7 @@ export class PostManager {
     if (this.useDojo) {
       // Create post on-chain via Dojo
       try {
-        console.log('🎨 Creating post on-chain...');
+        console.log('🎨 Creating post on-chain at position: x=%d, y=%d', position.x, position.y);
         const tx = await this.dojoManager.createPost(
           imageUrl,
           caption,
@@ -176,6 +176,7 @@ export class PostManager {
       }
     } else {
       // Create post locally (mock mode)
+      console.log('📝 Creating post locally (mock mode) at position: x=%d, y=%d', position.x, position.y);
       const newPost = {
         id: Math.max(...this.posts.map(p => p.id), 0) + 1,
         image_url: imageUrl,
@@ -238,18 +239,29 @@ export class PostManager {
       possiblePositions.push(...adjacentPositions)
     })
     
-    // Filter out positions that are already occupied
+    // Filter out positions that are already occupied or have negative coordinates
     const availablePositions = possiblePositions.filter(pos => {
-      return !this.isPositionOccupied(pos.x, pos.y)
+      const isNonNegative = pos.x >= 0 && pos.y >= 0
+      const isNotOccupied = !this.isPositionOccupied(pos.x, pos.y)
+      
+      if (!isNonNegative) {
+        console.log('🚫 Filtered out negative position: x=%d, y=%d (direction: %s)', pos.x, pos.y, pos.direction)
+      }
+      
+      return isNonNegative && isNotOccupied
     })
     
     if (availablePositions.length === 0) {
+      console.log('⚠️ No available adjacent positions found (all occupied or would be negative)')
       return null
     }
     
     // Pick a random available position
     const randomIndex = Math.floor(Math.random() * availablePositions.length)
-    return availablePositions[randomIndex]
+    const selectedPosition = availablePositions[randomIndex]
+    console.log('✅ Selected adjacent position: x=%d, y=%d (direction: %s, %d options available)', 
+      selectedPosition.x, selectedPosition.y, selectedPosition.direction, availablePositions.length)
+    return selectedPosition
   }
 
   isPositionOccupied(x, y) {
