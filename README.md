@@ -246,33 +246,74 @@ See [`QUICK_START.md`](./QUICK_START.md) for detailed troubleshooting steps.
 
 ## 🔮 Future Roadmap
 
-### Phase 2: Social Features
+### Phase 2: Post Types & Mutability
 
-- [ ] Like & comment systems
-- [ ] User profiles and galleries
-- [ ] Follow/follower relationships
-- [ ] Post collections (bookmarks)
+- [ ] **Free Random Posts** - Create non-modifiable posts that can be sold, transferred, or auctioned
+  - Lucky placement next to celebrity posts (with public ownership history)
+  - Option to upgrade to modifiable by paying later
+- [ ] **Paid Modifiable Posts** - Pay upfront to create posts you can edit anytime
+- [ ] **Variable Post Sizes** - Larger posts (2x2, 3x3, etc.) with exponential pricing
+  - Perfect for brand advertising and higher visibility
+- [ ] **Post Ownership History** - Public ledger showing all transfers and ownership changes
 
-### Phase 3: Economic Layer
+### Phase 3: Yield & Economics (WALLD Integration)
 
+- [ ] **Automatic Staking & Yield** - Posts generate yield when paid (e.g., 10 STRK → 1 STRK yield)
+  - Automatically staked without user action
+  - Yield decreases over time but never reaches 0%
+- [ ] **Dynamic Yield Multiplier** - Create more posts to increase yield up to a maximum, then decreases
+- [ ] **Monthly Membership** - Subscribe to prevent yield decay and potentially double it
+- [ ] **Post Trading Market** - Transfer, sell, or auction your posts
+- [ ] **Creator Royalties** - Earn on secondary sales
 - [ ] Paid posts with premium content
-- [ ] Post trading/ownership transfer
-- [ ] Creator royalties on resales
 - [ ] Advertising on adjacent posts
 
-### Phase 4: Advanced Canvas
+### Phase 4: Social Features & Dual View Modes
 
+- [ ] **Dual View System**
+  - Global wall view (dynamic real-time canvas)
+  - Instagram-style scrolling feed mode
+  - Easy toggle between views
+- [ ] **Follow/Follower System** - Build your social graph on-chain
+- [ ] Like & comment systems
+- [ ] User profiles and galleries
+- [ ] Post collections (bookmarks)
+
+### Phase 5: Charity Auctions
+
+- [ ] **Celebrity Charity Auction System**
+  - Example: Messi buys 9 posts, auctions 8 adjacent spots
+  - Winners get modifiable posts next to celebrity's post
+- [ ] **Non-Transferable Center Posts** - Immutable identity posts for auction creators
+  - Serves as permanent proof of charity campaign
+  - Winner posts can say "I have a post adjacent to [Celebrity]"
+- [ ] **Donation Integration** - Direct proceeds to WALLD for specified causes
+  - Cause details displayed on center post
+  - Examples: "1 million milk bricks for Gaza", humanitarian aid, etc.
+- [ ] **Goal Tracking with Color Coding**
+  - 🟧 Orange = Goal pending
+  - 🟩 Green = Goal achieved
+- [ ] **Yield-to-Charity** - Posts generate ongoing revenue until goal is reached
+- [ ] Transparent impact tracking on-chain
+
+### Phase 6: Advanced Content Types
+
+- [ ] **Content Evolution** - Start with text/images, expand to:
+  - Embedded websites in posts
+  - Video and audio support
+  - Interactive posts (polls, quizzes, forms)
+  - NFT integration and display
+  - 3D content and experimental AR/VR
 - [ ] Different post sizes (1x1, 2x2, 1x2)
-- [ ] Video and audio support
-- [ ] Interactive posts (polls, quizzes)
 - [ ] Themes and customization
 
-### Phase 5: Scalability
+### Phase 7: Scalability & Distribution
 
-- [ ] IPFS integration for images
-- [ ] Layer 3 for ultra-low costs
+- [ ] IPFS integration for decentralized image storage
+- [ ] Layer 3 deployment for ultra-low transaction costs
 - [ ] Mobile app (iOS/Android)
-- [ ] Browser extension
+- [ ] Browser extension for quick post creation
+- [ ] API for developers to build on Starkwall's social graph
 
 ## 🤝 Contributing
 
