@@ -3,7 +3,7 @@ import { InfiniteCanvas } from './canvas.js'
 import { PostManager } from './postManager.js'
 import { DojoManager } from './dojoManager.js'
 import Controller from '@cartridge/controller'
-import { init as initDojo, KeysClause } from '@dojoengine/sdk'
+import { init as initDojo, KeysClause, ToriiQueryBuilder } from '@dojoengine/sdk'
 import controllerOpts from './controller.js'
 import manifest from '../contracts/manifest_dev.json' assert { type: 'json' }
 
@@ -164,11 +164,17 @@ function setupUIHandlers() {
 
 async function subscribeToPostUpdates(toriiClient) {
   try {
+    console.log('Setting up subscription for Post entities...');
+    
+    // SDK builds query automatically - don't call .build()
+    const query = new ToriiQueryBuilder()
+      .withClause(KeysClause(['di-Post'], [], 'VariableLen').build());
+    
     const subscription = await toriiClient.subscribeEntityQuery({
-      query: KeysClause.any(),
+      query: query,
       callback: async ({ data, error }) => {
         if (data) {
-          console.log('New post detected, reloading...')
+          console.log('🔔 New post detected, reloading...')
           await postManager.loadPosts()
           await postManager.loadImages()
           canvas.setPosts(postManager.posts)
@@ -185,7 +191,7 @@ async function subscribeToPostUpdates(toriiClient) {
       }
     })
     
-    console.log('✓ Subscribed to entity updates')
+    console.log('✓ Subscribed to Post entity updates')
   } catch (error) {
     console.warn('Failed to subscribe to updates:', error)
     // Non-fatal error, app can still work without subscriptions

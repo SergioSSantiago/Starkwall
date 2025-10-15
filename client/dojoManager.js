@@ -1,4 +1,6 @@
 import { stringToByteArray } from './utils.js';
+import { ToriiQueryBuilder, KeysClause } from "@dojoengine/sdk";
+
 
 export class DojoManager {
   constructor(account, manifest, toriiClient) {
@@ -73,110 +75,90 @@ export class DojoManager {
    */
   async queryAllPosts() {
     try {
-      console.log('🔍 Querying posts via GraphQL...');
+      console.log('🔍 Querying Post entities from Torii...');
+      console.log('  ToriiClient:', this.toriiClient);
+      console.log('  Available methods:', Object.keys(this.toriiClient));
       
-      // Use GraphQL directly since SDK getEntities() is hanging
-      const query = `
-        query {
-          entities(limit: 100) {
-            edges {
-              node {
-                keys
-                models {
-                  __typename
-                  ... on di_Post {
-                    id
-                    image_url
-                    caption
-                    x_position
-                    y_position
-                    size
-                    is_paid
-                    created_at
-                    created_by
-                    current_owner
-                  }
-                }
-              }
-            }
-          }
-        }
-      `;
-
-      const response = await fetch('http://localhost:8080/graphql', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ query }),
+      // Build query for all entities (we'll filter for Posts)
+      console.log('  Step 1: Creating ToriiQueryBuilder...');
+      const builder = new ToriiQueryBuilder();
+      console.log('  Builder created:', builder);
+      
+      console.log('  Step 2: Creating KeysClause...');
+      // KeysClause is a function: KeysClause([models], [keys], pattern)
+      // To get all posts: empty keys array with VariableLen pattern
+      const keysClause = KeysClause(['di-Post'], [], 'VariableLen').build();
+      console.log('  KeysClause created:', keysClause);
+      
+      console.log('  Step 3: Adding clause to builder...');
+      const withClause = builder.withClause(keysClause);
+      console.log('  Clause added:', withClause);
+      
+      console.log('  Step 4: Calling getEntities (SDK will build query automatically)...');
+      
+      // Add timeout to prevent infinite hanging
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Query timeout after 10s')), 10000);
       });
-
-      const result = await response.json();
-      console.log('📦 GraphQL response:', result);
-
-      if (!result.data || !result.data.entities) {
-        console.log('⚠️ No entities in response');
+      
+      // Don't call .build() - SDK builds it automatically!
+      const queryPromise = this.toriiClient.getEntities({
+        query: withClause
+      });
+      
+      const entities = await Promise.race([queryPromise, timeoutPromise]);
+      
+      console.log('  ✅ getEntities returned!');
+      console.log('📦 Raw entities response:', entities);
+      console.log('📊 Items count:', entities?.items?.length || 0);
+      
+      if (!entities || !entities.items || entities.items.length === 0) {
+        console.log('⚠️ No Post entities found');
         return [];
       }
 
-      const posts = [];
+      const posts = this.parseSDKEntities(entities.items);
+      console.log(`✅ Parsed ${posts.length} posts`);
       
-      for (const edge of result.data.entities.edges) {
-        const models = edge.node.models;
-        
-        // Find the Post model (skip PostCounter)
-        const postModel = models.find(m => m.__typename === 'di_Post');
-        
-        if (postModel) {
-          console.log('✓ Found post:', postModel.id);
-          
-          posts.push({
-            id: Number(postModel.id),
-            image_url: this.byteArrayToString(postModel.image_url),
-            caption: this.byteArrayToString(postModel.caption),
-            x_position: Number(postModel.x_position),
-            y_position: Number(postModel.y_position),
-            size: Number(postModel.size || 1),
-            is_paid: Boolean(postModel.is_paid),
-            created_at: new Date(Number(postModel.created_at) * 1000).toISOString(),
-            created_by: postModel.created_by,
-            current_owner: postModel.current_owner,
-          });
-        }
-      }
-
-      console.log(`✅ Found ${posts.length} posts`);
       return posts;
-      
     } catch (error) {
       console.error('❌ Error querying posts:', error);
-      console.error('Error details:', error.message, error.stack);
+      console.error('Error name:', error.name);
+      console.error('Error message:', error.message);
+      console.error('Error stack:', error.stack);
+      
+      // If it timed out, the SDK method might not work, so return empty
+      if (error.message.includes('timeout')) {
+        console.error('⏱️ Query timed out - SDK getEntities may not be working');
+        console.error('💡 Torii is working (GraphQL works), but SDK client query is hanging');
+      }
+      
       return [];
     }
   }
 
   /**
-   * Parse post entities from Torii response
-   * @param {Object} entities - Raw entities data from Torii
+   * Parse post entities from SDK response (entities.items)
+   * @param {Array} items - Array of entity items from SDK
    * @returns {Array} - Parsed post objects
    */
-  parsePostEntities(entities) {
-    console.log('🔍 Parsing entities...');
-    console.log('  Entity type:', typeof entities);
-    console.log('  Is array?', Array.isArray(entities));
-    console.log('  Keys:', Object.keys(entities || {}));
+  parseSDKEntities(items) {
+    console.log('🔍 Parsing SDK entities...');
+    console.log('  Items count:', items.length);
     
     const posts = [];
 
-    for (const [entityId, entity] of Object.entries(entities || {})) {
-      console.log(`  Processing entity ${entityId}:`, entity);
+    items.forEach((entity, index) => {
+      console.log(`  Processing item ${index}:`, entity);
       
-      if (entity.models?.di?.Post) {
-        console.log('    ✓ Found Post model');
-        const postData = entity.models.di.Post;
+      // SDK format: entity.models.di.Post
+      const postData = entity.models?.di?.Post;
+      
+      if (postData) {
+        console.log('    ✓ Found Post model:', postData);
         
         const post = {
-          id: Number(postData.id || entityId),
+          id: Number(postData.id),
           image_url: this.byteArrayToString(postData.image_url),
           caption: this.byteArrayToString(postData.caption),
           x_position: Number(postData.x_position),
@@ -188,12 +170,12 @@ export class DojoManager {
           current_owner: postData.current_owner,
         };
         
-        console.log('    Parsed post:', post);
+        console.log('    ✅ Parsed post:', post);
         posts.push(post);
       } else {
-        console.log('    ✗ No Post model found, models:', entity.models);
+        console.log('    ✗ No Post model, available models:', entity.models);
       }
-    }
+    });
 
     console.log(`📊 Total posts parsed: ${posts.length}`);
     return posts;
