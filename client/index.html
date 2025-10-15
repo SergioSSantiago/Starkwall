@@ -7,24 +7,35 @@
   </head>
 
   <body>
-    <h1>Spawn and move</h1>
-
-    <button id="controller-button">Connect</button>
-
-    <div>
-      <div id="position-display" class="display">Position: (0, 0)</div>
-      <div id="moves-display" class="display">Moves remaining: 0</div>
-
-      <button id="spawn-button" disabled>Spawn</button>
-      <button id="move-random-button" disabled>Move random</button>
-      <div>
-        <button id="up-button" disabled>Up</button>
-        <button id="down-button" disabled>Down</button>
-        <button id="left-button" disabled>Left</button>
-        <button id="right-button" disabled>Right</button>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+      <button id="addPost">Add Post</button>
+      <button id="addPaidPost">Add Paid Post (2x2)</button>
+      <button id="resetView">Reset View</button>
+    </div>
+    <div id="modal" class="modal">
+      <div class="modal-content">
+        <h2>Create New Post</h2>
+        <form id="postForm">
+          <label>
+            Image URL:
+            <input type="url" id="imageUrl" placeholder="https://example.com/image.jpg" required />
+          </label>
+          <label>
+            Caption:
+            <textarea id="caption" placeholder="Enter caption..." maxlength="200"></textarea>
+          </label>
+          <input type="hidden" id="postSize" value="1" />
+          <input type="hidden" id="isPaid" value="false" />
+          <div class="modal-buttons">
+            <button type="submit">Create Post</button>
+            <button type="button" id="cancelPost">Cancel</button>
+          </div>
+        </form>
       </div>
     </div>
 
+    <script type="module" src="./main.js"></script>
     <script type="module">
       import Controller from '@cartridge/controller';
       import { init, ToriiQueryBuilder, KeysClause } from '@dojoengine/sdk';
@@ -35,7 +46,7 @@
       import manifest from '../contracts/manifest_dev.json' assert { type: 'json' };
 
       const DOMAIN_SEPERATOR = {
-        name: 'dojo-intro',
+        name: 'di',
         version: '1.0',
         chainId: 'KATANA',
         revision: '1',
@@ -59,6 +70,7 @@
           ),
           callback: ({ data, error }) => {
             if (data) {
+              console.log('data', data);
               updateFromEntitiesData(data);
             }
             if (error) {

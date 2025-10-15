@@ -21,6 +21,7 @@ function updateFromEntityData(entity) {
   if (entity.models) {
     if (entity.models[NAMESPACE][POSITION_MODEL]) {
       const position = entity.models[NAMESPACE][POSITION_MODEL];
+      console.log('position', position);
       updatePositionDisplay(position.x, position.y);
     }
 
