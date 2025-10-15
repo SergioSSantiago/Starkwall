@@ -326,7 +326,7 @@ This is a hackathon project, but contributions are welcome! Areas of interest:
 
 ## 📄 License
 
-MIT License - feel free to fork and build upon this concept!
+This project is licensed under the [AGPL-3.0 License](./LICENSE) - ensuring that modifications and network use remain open source.
 
 ## 🙏 Acknowledgments
 
