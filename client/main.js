@@ -22,27 +22,14 @@ const DOMAIN_SEPARATOR = {
 
 let canvas, postManager, dojoManager, controller, currentUsername, currentAccount
 /** Clave de balance de la wallet conectada; fijada al conectar para que todas las operaciones usen la misma. */
-let currentAccountBalanceKey = null
 
-const BALANCE_STORAGE_KEY = 'starkwall_strk_balances'
-const DEFAULT_BALANCE = 1000
+const RPC_URL = 'http://localhost:5050'
+const FAUCET_URL = 'http://localhost:3001'
 const LAST_SESSION_KEY = 'starkwall_last_session'
 
-function loadBalances() {
-  try {
-    const raw = localStorage.getItem(BALANCE_STORAGE_KEY)
-    return raw ? JSON.parse(raw) : {}
-  } catch {
-    return {}
-  }
-}
-
-function saveBalances(balances) {
-  try {
-    localStorage.setItem(BALANCE_STORAGE_KEY, JSON.stringify(balances))
-  } catch (e) {
-    console.warn('Could not save balances to localStorage:', e)
-  }
+async function getChainBalance(address) {
+  if (!dojoManager) return 0
+  return dojoManager.getTokenBalance(address)
 }
 
 function loadLastSession() {
@@ -71,46 +58,18 @@ function saveLastSession(address, username) {
 }
 
 /**
- * Clave de balance muy sencilla: usamos literalmente el string de la dirección.
- * No hacemos magia con BigInt ni normalizaciones raras: lo que devuelve Cartridge
- * (o lo que venga en los posts) es lo que usamos como clave.
  */
-function normalizeBalanceKey(address) {
-  if (address == null) return ''
-  return String(address).trim()
-}
 
-// Balance por clave (usa currentAccountBalanceKey para el usuario actual).
-function getBalanceByKey(key) {
-  const balances = loadBalances()
-  if (typeof balances[key] === 'number') return balances[key]
-  return DEFAULT_BALANCE
-}
 
-function setBalanceByKey(key, amount) {
-  const balances = loadBalances()
-  balances[key] = amount
-  saveBalances(balances)
-}
 
-/** Resta amount del balance bajo `key`. Siempre lee el balance actual de storage, resta y guarda. Devuelve true si había saldo. */
-function deductBalanceByKey(key, amount) {
-  const current = getBalanceByKey(key)
-  if (current < amount) return false
-  setBalanceByKey(key, current - amount)
-  return true
-}
 
-// Para otras direcciones (comprador/vendedor en marketplace)
-function getBalance(address) {
-  const key = normalizeBalanceKey(address)
-  return getBalanceByKey(key)
-}
 
-function setBalance(address, amount) {
-  const key = normalizeBalanceKey(address)
-  setBalanceByKey(key, amount)
-}
+
+
+
+
+
+
 
 /** Inicializa la app con la cuenta ya conectada (tras connect() o restauración de sesión). */
 async function enterApp(account) {
@@ -121,8 +80,7 @@ async function enterApp(account) {
   const controlsElement = document.getElementById('controls')
 
   currentAccount = account
-  currentAccountBalanceKey = normalizeBalanceKey(account.address)
-  try {
+    try {
     currentUsername = await controller.username()
   } catch {
     const cached = loadLastSession()
@@ -248,7 +206,6 @@ function resizeImageToDataUrlWithMaxLength(fileOrDataUrl, maxBytes = CONTRACT_MA
 function logout() {
   saveLastSession(null)
   currentAccount = null
-  currentAccountBalanceKey = null
   try {
     if (controller && typeof controller.disconnect === 'function') {
       controller.disconnect()
@@ -547,15 +504,14 @@ function setupUIHandlers() {
     }
 
     if (isPaid) {
-      if (!currentAccountBalanceKey) return
+      if (!currentAccount) return
       const price = PostManager.getPriceForPaidPost(size)
       // Siempre leer balance actual de storage, restar coste y guardar (nunca usar un balance “viejo”).
-      const balanceActual = getBalanceByKey(currentAccountBalanceKey)
+      const balanceActual = await getChainBalance(currentAccount.address)
       if (balanceActual < price) {
-        alert(`Saldo insuficiente. Necesitas ${price} STRK y tienes ${balanceActual} STRK.`)
+        alert(`Saldo insuficiente. Necesitas ${price} STRK y tienes ${balanceActual} STRK. Haz clic en "Obtener STRK" si no tienes fondos.`)
         return
       }
-      setBalanceByKey(currentAccountBalanceKey, balanceActual - price)
     }
 
     submitPostBtn.disabled = true
@@ -573,11 +529,6 @@ function setupUIHandlers() {
         updateWalletInfo().catch(() => {})
       })
     } catch (error) {
-      if (isPaid && currentAccountBalanceKey) {
-        const price = PostManager.getPriceForPaidPost(size)
-        const balanceActual = getBalanceByKey(currentAccountBalanceKey)
-        setBalanceByKey(currentAccountBalanceKey, balanceActual + price)
-      }
       console.error('Error creating post:', error)
       alert('No se pudo crear el post. Inténtalo de nuevo.')
       submitPostBtn.disabled = false
@@ -591,6 +542,44 @@ function setupUIHandlers() {
       canvas.centerOn(firstPost.x_position, firstPost.y_position, 0.3)
     } else {
       canvas.centerOn(0, 0, 0.3)
+    }
+  })
+
+  const faucetBtn = document.getElementById('faucet-btn')
+  if (faucetBtn) faucetBtn.addEventListener('click', async () => {
+    if (!currentAccount) return
+    faucetBtn.disabled = true
+    faucetBtn.textContent = '...'
+    try {
+      const res = await fetch(FAUCET_URL + '/faucet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address: currentAccount.address }),
+      })
+      const data = await res.json()
+      if (data.ok) {
+        showToast('¡1000 STRK recibidos!')
+        await updateWalletInfo()
+      } else {
+        const msg = data.error || ''
+        const addr = currentAccount?.address || ''
+        if (msg.includes('pending') && addr) {
+          alert('Katana no soporta el faucet por Node.\n\nEjecuta en terminal:\n./scripts/faucet.sh ' + addr)
+        } else {
+          alert(msg || 'Error en el faucet')
+        }
+      }
+    } catch (e) {
+      const addr = currentAccount?.address || ''
+      if (addr) {
+        alert('Faucet no disponible. Ejecuta en terminal:\n./scripts/faucet.sh ' + addr)
+      } else {
+        alert('Error: ' + (e.message || e))
+      }
+      console.error('Faucet error:', e)
+    } finally {
+      faucetBtn.disabled = false
+      faucetBtn.textContent = '💧 Obtener STRK'
     }
   })
 
@@ -687,7 +676,7 @@ function setupPostDetailsHandlers() {
     const sellerAddress = currentPost.current_owner
 
     // Check if user has enough STRK
-    const buyerBalance = getBalance(buyerAddress)
+    const buyerBalance = await getChainBalance(buyerAddress)
     if (buyerBalance < price) {
       alert(`Insufficient balance! You have ${buyerBalance} STRK but need ${price} STRK`)
       return
@@ -701,17 +690,7 @@ function setupPostDetailsHandlers() {
       if (dojoManager) {
         postDetailsModal.classList.remove('active')
         
-        await dojoManager.buyPost(currentPost.id)
-        
-        // Transfer STRK from buyer to seller (prototype)
-        const newBuyerBalance = buyerBalance - price
-        setBalance(buyerAddress, newBuyerBalance)
-        console.log(`💸 Buyer paid ${price} STRK. New balance: ${newBuyerBalance} STRK`)
-        
-        const sellerBalance = getBalance(sellerAddress)
-        const newSellerBalance = sellerBalance + price
-        setBalance(sellerAddress, newSellerBalance)
-        console.log(`💰 Seller received ${price} STRK. New balance: ${newSellerBalance} STRK`)
+        await dojoManager.buyPostWithPayment(currentPost.id, sellerAddress, price)
         
         // Wait for Torii to index
         await new Promise(resolve => setTimeout(resolve, 5000))
@@ -848,9 +827,7 @@ async function updateWalletInfo() {
   const walletInfo = document.getElementById('wallet-info')
   if (!currentAccount) return
   try {
-    const balance = (currentAccountBalanceKey != null)
-      ? getBalanceByKey(currentAccountBalanceKey)
-      : DEFAULT_BALANCE
+    const balance = await getChainBalance(currentAccount.address)
     const num = Number(balance)
     const balanceStr = Number.isFinite(num) ? num.toFixed(2) : '0.00'
     const shortAddr = String(currentAccount.address).slice(0, 6) + '...' + String(currentAccount.address).slice(-4)

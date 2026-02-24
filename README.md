@@ -132,6 +132,17 @@ pnpm run dev
 
 Open the URL shown (should be `https://localhost:5173`)
 
+#### Terminal 5 (opcional): Faucet - Para recibir STRK/ETH en tu wallet
+
+Tu balance está a 0 porque **Cartridge usa tu wallet personal**; Katana solo pre-fondea sus cuentas de desarrollo. Para obtener tokens, usa el script con starkli:
+
+```bash
+# Instalar starkli: curl https://get.starkli.sh | sh && source ~/.starkli/env && starkliup
+./scripts/faucet.sh 0xTU_DIRECCION
+```
+
+Copia tu dirección desde la app (o desde Cartridge) y pégala en el comando. Luego haz clic en **"💧 Obtener STRK"** en la app (o recarga) para actualizar el balance.
+
 ### 🎮 Using the App
 
 1. **Click "Connect Wallet"** - Cartridge Controller popup will appear

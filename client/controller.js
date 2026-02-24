@@ -5,8 +5,11 @@
  * This example uses Katana for local host development.
  */
 import manifest from '../contracts/manifest_dev.json' assert { type: 'json' };
+import { STRK_TOKEN_ADDRESS } from './config.js';
 
 const actionsContract = manifest.contracts.find((contract) => contract.tag === 'di-actions');
+const KATANA_ETH = '0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7';
+const paymentToken = STRK_TOKEN_ADDRESS || KATANA_ETH;
 
 const controllerOpts = {
   chains: [{ rpcUrl: 'http://localhost:5050' }],
@@ -32,6 +35,17 @@ const controllerOpts = {
             name: 'Buy Post',
             entrypoint: 'buy_post',
             description: 'Buy a post that is for sale',
+          },
+        ],
+      },
+      [paymentToken]: {
+        name: 'Payment Token',
+        description: 'Token used to pay for paid posts',
+        methods: [
+          {
+            name: 'Token Transfer',
+            entrypoint: 'transfer',
+            description: 'Transfer token for paid post creation',
           },
         ],
       },

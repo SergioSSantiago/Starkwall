@@ -1,6 +1,36 @@
 import { stringToByteArray } from './utils.js';
 import { ToriiQueryBuilder, KeysClause } from "@dojoengine/sdk";
+import { STRK_TOKEN_ADDRESS } from './config.js';
+import { RpcProvider } from 'starknet';
 
+const ONE_STRK = 10n ** 18n;
+const KATANA_ETH = '0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7';
+const BALANCE_PROVIDER = new RpcProvider({ nodeUrl: 'http://127.0.0.1:5050/rpc' });
+const PAID_POST_MULTIPLIER = 4;
+
+function getPaidPostPrice(size) {
+  if (size < 2) return 0;
+  return Math.max(1, Math.floor(PAID_POST_MULTIPLIER ** (size - 2)));
+}
+
+
+function isTxReceiptSuccessful(receipt) {
+  const execution = receipt?.execution_status || receipt?.executionStatus || '';
+  const finality = receipt?.finality_status || receipt?.finalityStatus || '';
+
+  if (String(execution).toUpperCase() === 'REVERTED') return false;
+  if (String(finality).toUpperCase() === 'REJECTED') return false;
+
+  // Some providers only return tx hash/finality; treat non-reverted receipts as success.
+  return true;
+}
+
+function feltToU256(val) {
+  const n = BigInt(val);
+  const low = n & ((1n << 128n) - 1n);
+  const high = n >> 128n;
+  return { low: low.toString(), high: high.toString() };
+}
 
 export class DojoManager {
   constructor(account, manifest, toriiClient) {
@@ -8,6 +38,51 @@ export class DojoManager {
     this.manifest = manifest;
     this.toriiClient = toriiClient;
     this.actionsContract = manifest.contracts.find((c) => c.tag === 'di-actions');
+  }
+
+  async getTokenBalance(address) {
+    const tokenAddr = STRK_TOKEN_ADDRESS || KATANA_ETH;
+    if (!tokenAddr) return 0;
+
+    const call = {
+      contractAddress: tokenAddr,
+      entrypoint: 'balance_of',
+      calldata: [address],
+    };
+
+    try {
+      // Katana in this project rejects `pending`; force `latest` when possible.
+      let result;
+      try {
+        result = await BALANCE_PROVIDER.callContract(call, 'latest');
+      } catch {
+        result = await BALANCE_PROVIDER.callContract(call);
+      }
+
+      // Some providers return { result: [low, high] }, others return [low, high].
+      const parts = Array.isArray(result) ? result : (result?.result || []);
+      const low = BigInt(parts[0] || 0);
+      const high = BigInt(parts[1] || 0);
+      const wei = low + (high << 128n);
+      return Number(wei / ONE_STRK);
+    } catch (e) {
+      console.warn('getTokenBalance failed:', e);
+      return 0;
+    }
+  }
+
+  async buyPostWithPayment(postId, sellerAddress, price) {
+    const tokenAddr = STRK_TOKEN_ADDRESS || KATANA_ETH;
+    if (!tokenAddr) throw new Error('No token configured. Set VITE_STRK_TOKEN or deploy STRK (see contracts/DEPLOY_STRK.md).');
+    const amountWei = BigInt(price) * ONE_STRK;
+    const { low, high } = feltToU256(amountWei);
+    const calls = [
+      { contractAddress: tokenAddr, entrypoint: 'transfer', calldata: [sellerAddress, low, high] },
+      { contractAddress: this.actionsContract.address, entrypoint: 'buy_post', calldata: [postId] },
+    ];
+    const tx = await this.account.execute(calls);
+    await this.account.waitForTransaction(tx.transaction_hash);
+    return tx;
   }
 
   /**
@@ -57,19 +132,52 @@ export class DojoManager {
     console.log('🚀 Executing transaction with calldata length:', calldata.length);
 
     try {
-      const tx = await this.account.execute({
-        contractAddress: this.actionsContract.address,
-        entrypoint: 'create_post',
-        calldata,
-      });
+      const tokenAddr = STRK_TOKEN_ADDRESS || KATANA_ETH;
+      const shouldChargePaidPost = Boolean(isPaid) && Number(size) >= 2;
+
+      if (shouldChargePaidPost) {
+        console.log('💸 Paid post price (STRK):', getPaidPostPrice(Number(size)));
+      }
+
+      // Paid post: atomic multicall (charge -> create post)
+      const tx = shouldChargePaidPost
+        ? await (() => {
+            const priceInStrk = getPaidPostPrice(Number(size));
+            const amountWei = BigInt(priceInStrk) * ONE_STRK;
+            const { low, high } = feltToU256(amountWei);
+            return this.account.execute([
+              {
+                contractAddress: tokenAddr,
+                entrypoint: 'transfer',
+                // Send paid-post fee to actions contract as protocol treasury sink.
+                calldata: [this.actionsContract.address, low, high],
+              },
+              {
+                contractAddress: this.actionsContract.address,
+                entrypoint: 'create_post',
+                calldata,
+              },
+            ]);
+          })()
+        : await this.account.execute({
+            contractAddress: this.actionsContract.address,
+            entrypoint: 'create_post',
+            calldata,
+          });
 
       console.log('✅ Transaction sent:', tx.transaction_hash);
-      
+
       // Wait for transaction to be accepted
       console.log('⏳ Waiting for transaction confirmation...');
       const receipt = await this.account.waitForTransaction(tx.transaction_hash);
-      console.log('✅ Transaction confirmed!', receipt);
-      
+      console.log('✅ Transaction receipt:', receipt);
+
+      if (!isTxReceiptSuccessful(receipt)) {
+        const reason = receipt?.revert_reason || receipt?.revertReason || 'Transaction reverted';
+        throw new Error(reason);
+      }
+
+      console.log('✅ Transaction confirmed!');
       return tx;
     } catch (error) {
       console.error('❌ Transaction failed:', error);

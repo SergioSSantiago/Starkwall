@@ -1,0 +1,11 @@
+[package]
+name = "strk_token"
+version = "0.1.0"
+edition = "2024_07"
+
+[dependencies]
+starknet = "2.12.2"
+openzeppelin_token = "1.0.0"
+
+[[target.starknet-contract]]
+casm = true
