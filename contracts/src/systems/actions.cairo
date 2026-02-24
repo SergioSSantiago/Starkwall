@@ -168,16 +168,23 @@ pub mod actions {
             
             // Verify caller is not the owner
             assert!(post.current_owner != caller, "Cannot buy your own post");
-            
-            // TODO: In a real implementation, you would handle payment here
-            // For now, we just transfer ownership
-            
+
+            let seller = post.current_owner;
+            let amount_low: u128 = post.sale_price * STRK_DECIMALS_FACTOR;
+            let token = IERC20Dispatcher { contract_address: payment_token() };
+            let paid = token.transfer_from(
+                caller,
+                seller,
+                u256 { low: amount_low, high: 0 },
+            );
+            assert!(paid, "Payment failed");
+
             // Transfer ownership
             post.current_owner = caller;
-            
+
             // Remove from sale
             post.sale_price = 0;
-            
+
             world.write_model(@post);
         }
     }

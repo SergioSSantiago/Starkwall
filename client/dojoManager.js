@@ -77,11 +77,19 @@ export class DojoManager {
     const amountWei = BigInt(price) * ONE_STRK;
     const { low, high } = feltToU256(amountWei);
     const calls = [
-      { contractAddress: tokenAddr, entrypoint: 'transfer', calldata: [sellerAddress, low, high] },
+      // Contract enforces payment via transfer_from inside buy_post.
+      { contractAddress: tokenAddr, entrypoint: 'approve', calldata: [this.actionsContract.address, low, high] },
       { contractAddress: this.actionsContract.address, entrypoint: 'buy_post', calldata: [postId] },
     ];
+
     const tx = await this.account.execute(calls);
-    await this.account.waitForTransaction(tx.transaction_hash);
+    const receipt = await this.account.waitForTransaction(tx.transaction_hash);
+
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Buy transaction reverted';
+      throw new Error(reason);
+    }
+
     return tx;
   }
 
