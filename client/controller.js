@@ -43,9 +43,14 @@ const controllerOpts = {
         description: 'Token used to pay for paid posts',
         methods: [
           {
+            name: 'Token Approve',
+            entrypoint: 'approve',
+            description: 'Approve token spending for paid post creation',
+          },
+          {
             name: 'Token Transfer',
             entrypoint: 'transfer',
-            description: 'Transfer token for paid post creation',
+            description: 'Transfer token for paid operations',
           },
         ],
       },

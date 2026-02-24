@@ -530,7 +530,7 @@ function setupUIHandlers() {
       })
     } catch (error) {
       console.error('Error creating post:', error)
-      alert('No se pudo crear el post. Inténtalo de nuevo.')
+      alert('No se pudo crear el post: ' + (error?.message || error || 'Unknown error'))
       submitPostBtn.disabled = false
       submitPostBtn.textContent = isPaid ? `Create Paid Post (${PostManager.getPriceForPaidPost(size)} STRK)` : 'Create Post'
     }

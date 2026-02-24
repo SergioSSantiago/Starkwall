@@ -25,12 +25,46 @@ pub trait IActions<T> {
     );
 }
 
+#[starknet::interface]
+pub trait IERC20<T> {
+    fn transfer_from(
+        ref self: T,
+        sender: starknet::ContractAddress,
+        recipient: starknet::ContractAddress,
+        amount: u256
+    ) -> bool;
+}
+
 #[dojo::contract]
 pub mod actions {
-    use super::IActions;
+    use super::{IActions, IERC20Dispatcher, IERC20DispatcherTrait};
+    use core::traits::TryInto;
+    use starknet::{ContractAddress, get_block_timestamp, get_contract_address};
     use crate::models::{Post, PostCounter};
     use dojo::model::ModelStorage;
-    use starknet::get_block_timestamp;
+
+    const STRK_DECIMALS_FACTOR: u128 = 1000000000000000000;
+
+    fn payment_token() -> ContractAddress {
+        0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7.try_into().unwrap()
+    }
+
+    fn paid_post_price(size: u8) -> u128 {
+        if size < 2 {
+            return 0;
+        }
+
+        let mut price: u128 = 1;
+        let mut i: u8 = 2;
+        loop {
+            if i >= size {
+                break;
+            }
+            price *= 4;
+            i += 1;
+        };
+        price
+    }
 
     #[abi(embed_v0)]
     impl ActionsImpl of IActions<ContractState> {
@@ -56,6 +90,20 @@ pub mod actions {
                 if size != 1 {
                     panic(array![])
                 }
+            }
+
+            if is_paid {
+                let price_strk = paid_post_price(size);
+                assert!(price_strk > 0, "Invalid paid post price");
+
+                let amount_low: u128 = price_strk * STRK_DECIMALS_FACTOR;
+                let token = IERC20Dispatcher { contract_address: payment_token() };
+                let paid = token.transfer_from(
+                    caller,
+                    get_contract_address(),
+                    u256 { low: amount_low, high: 0 },
+                );
+                assert!(paid, "Payment failed");
             }
 
             // Get and increment post counter

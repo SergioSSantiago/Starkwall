@@ -148,8 +148,8 @@ export class DojoManager {
             return this.account.execute([
               {
                 contractAddress: tokenAddr,
-                entrypoint: 'transfer',
-                // Send paid-post fee to actions contract as protocol treasury sink.
+                entrypoint: 'approve',
+                // Contract enforces payment via transfer_from inside create_post.
                 calldata: [this.actionsContract.address, low, high],
               },
               {
