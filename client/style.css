@@ -13,6 +13,8 @@
   
   #canvas {
     display: block;
+    position: fixed;
+    inset: 0;
     width: 100vw;
     height: 100vh;
     cursor: grab;
@@ -477,32 +479,37 @@
 @media (max-width: 640px) {
   #controls {
     top: auto;
-    right: 12px;
-    right: max(12px, env(safe-area-inset-right));
-    left: 12px;
-    left: max(12px, env(safe-area-inset-left));
-    bottom: 12px;
-    bottom: calc(12px + env(safe-area-inset-bottom));
+    left: 0;
+    right: 0;
+    bottom: 0;
     flex-direction: row;
     flex-wrap: wrap;
     gap: 8px;
     align-items: center;
     justify-content: space-between;
-    padding: 10px;
+    padding: 10px 12px;
+    padding-left: calc(12px + env(safe-area-inset-left));
+    padding-right: calc(12px + env(safe-area-inset-right));
     padding-bottom: calc(10px + env(safe-area-inset-bottom));
     background: rgba(10, 10, 10, 0.65);
     border: 1px solid #333;
-    border-radius: 12px;
+    border-left: none;
+    border-right: none;
+    border-bottom: none;
+    border-radius: 14px 14px 0 0;
     z-index: 900; /* above canvas, below modal */
     backdrop-filter: blur(8px);
     -webkit-backdrop-filter: blur(8px);
+    transform: translateZ(0); /* reduce iOS Safari fixed glitches */
+    will-change: transform;
   }
 
   #controls button {
     flex: 1 1 calc(50% - 8px);
-    padding: 10px 12px;
+    padding: 12px 12px;
     font-size: 13px;
     border-radius: 10px;
+    min-height: 44px;
   }
 
   #wallet-info {
