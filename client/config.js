@@ -11,9 +11,15 @@
 export const NETWORK = String(import.meta.env?.VITE_NETWORK || 'dev').toLowerCase()
 export const IS_SEPOLIA = NETWORK === 'sepolia'
 
-// RPC endpoint (JSON-RPC). For Katana, the default endpoint includes /rpc.
+// RPC endpoint (JSON-RPC).
+//
+// Important: Cartridge Controller runs inside an iframe on `x.cartridge.gg` and
+// needs browser CORS access to the RPC. Many public RPCs block CORS, so we
+// default Sepolia to Cartridge's RPC.
+//
+// For Katana, the default endpoint includes /rpc.
 export const RPC_URL = String(
-  import.meta.env?.VITE_RPC_URL || (IS_SEPOLIA ? 'https://starknet-sepolia-rpc.publicnode.com' : 'http://127.0.0.1:5050/rpc'),
+  import.meta.env?.VITE_RPC_URL || (IS_SEPOLIA ? 'https://api.cartridge.gg/x/starknet/sepolia' : 'http://127.0.0.1:5050/rpc'),
 )
 
 export const TORII_URL = String(
