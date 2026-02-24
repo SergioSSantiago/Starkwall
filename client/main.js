@@ -169,6 +169,38 @@ function showToast(message) {
   }, 3000)
 }
 
+async function copyToClipboard(text) {
+  const t = String(text || '')
+  if (!t) return false
+
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(t)
+      return true
+    }
+  } catch {
+    // fall through
+  }
+
+  // Fallback for older mobile browsers
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = t
+    ta.setAttribute('readonly', '')
+    ta.style.position = 'fixed'
+    ta.style.left = '-9999px'
+    ta.style.top = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    ta.setSelectionRange(0, ta.value.length)
+    const ok = document.execCommand('copy')
+    document.body.removeChild(ta)
+    return Boolean(ok)
+  } catch {
+    return false
+  }
+}
+
 // Exponer toast para otros módulos (postManager.js)
 globalThis.showToast = showToast
 
@@ -880,13 +912,30 @@ async function updateWalletInfo() {
     const balance = await getChainBalance(currentAccount.address)
     const num = Number(balance)
     const balanceStr = Number.isFinite(num) ? num.toFixed(2) : '0.00'
-    const shortAddr = String(currentAccount.address).slice(0, 6) + '...' + String(currentAccount.address).slice(-4)
+    const addr = String(currentAccount.address)
+    const shortAddr = addr.slice(0, 6) + '...' + addr.slice(-4)
     walletInfo.innerHTML = `
-      <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 4px;">
-        <span style="color: #4CAF50;">● ${currentUsername || shortAddr}</span>
-        <span style="color: #FFD700; font-size: 12px;">💰 ${balanceStr} STRK</span>
+      <div class="wallet-box">
+        <span class="wallet-user">● ${currentUsername || shortAddr}</span>
+        <span class="wallet-balance">💰 ${balanceStr} STRK</span>
+        <div class="wallet-address-row" title="${addr}">
+          <span class="wallet-address">${addr}</span>
+          <button id="copy-address-btn" class="wallet-copy-btn" type="button" title="Copiar address">📋</button>
+        </div>
       </div>
     `
+
+    const copyBtn = document.getElementById('copy-address-btn')
+    if (copyBtn) {
+      copyBtn.onclick = async () => {
+        const ok = await copyToClipboard(addr)
+        if (ok) {
+          showToast('Address copiada')
+        } else {
+          alert('No se pudo copiar. Mantén pulsado el texto y copia manualmente.')
+        }
+      }
+    }
   } catch (error) {
     console.error('Error updating wallet info:', error)
     const shortAddr = currentAccount ? (String(currentAccount.address).slice(0, 6) + '...' + String(currentAccount.address).slice(-4)) : ''

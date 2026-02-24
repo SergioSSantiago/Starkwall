@@ -39,6 +39,47 @@
     font-size: 12px;
     border: 1px solid #444;
   }
+
+  /* Wallet info: address + copy button */
+  #wallet-info .wallet-box {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+  }
+
+  #wallet-info .wallet-user {
+    color: #4CAF50;
+  }
+
+  #wallet-info .wallet-balance {
+    color: #FFD700;
+    font-size: 12px;
+  }
+
+  #wallet-info .wallet-address-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  #wallet-info .wallet-address {
+    font-size: 11px;
+    color: #bbb;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    word-break: break-all;
+    text-align: right;
+    max-width: 240px;
+  }
+
+  #controls .wallet-copy-btn {
+    flex: 0 0 auto;
+    min-height: 0;
+    padding: 6px 10px;
+    font-size: 12px;
+    border-radius: 10px;
+    line-height: 1;
+  }
   
   button {
     background: #2a2a2a;
