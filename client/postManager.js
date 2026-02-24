@@ -188,8 +188,21 @@ export class PostManager {
         
         console.log('✅ Posts reloaded! Total posts:', this.posts.length);
         
-        // Center on the new post
-        const newPost = this.posts[this.posts.length - 1];
+        // Center on the actual created post (list ordering from Torii is not guaranteed).
+        const newPost =
+          this.posts.find((p) =>
+            Number(p.x_position) === Number(position.x) &&
+            Number(p.y_position) === Number(position.y) &&
+            Number(p.size) === Number(size)
+          ) ||
+          this.posts.find((p) =>
+            Number(p.x_position) === Number(position.x) &&
+            Number(p.y_position) === Number(position.y)
+          ) ||
+          this.posts.reduce((latest, p) => {
+            if (!latest) return p;
+            return Number(p.id) > Number(latest.id) ? p : latest;
+          }, null);
         if (newPost) {
           console.log('📍 Centering on new post:', newPost.id);
           const centerX = newPost.x_position + this.canvas.postWidth / 2;

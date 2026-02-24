@@ -7,7 +7,10 @@
   </head>
 
   <body>
-    <div id="connect-screen">
+    <div id="loading-screen" style="display: flex; align-items: center; justify-content: center; position: fixed; inset: 0; background: #0a0a0a; z-index: 2000; flex-direction: column; gap: 12px;">
+      <p style="color: #888;">Loading...</p>
+    </div>
+    <div id="connect-screen" style="display: none;">
       <h1>📱 Starkwall</h1>
       <p>Connect your wallet to create and view posts on the blockchain</p>
       <button id="connect-wallet" class="connect-button">🎮 Connect Wallet</button>
@@ -27,6 +30,7 @@
       <button id="addPaidPost">Add Paid Post</button>
       <button id="resetView">Reset View</button>
       <div id="wallet-info"></div>
+      <button id="logout-btn" type="button">Logout</button>
     </div>
     <div id="modal" class="modal">
       <div class="modal-content">

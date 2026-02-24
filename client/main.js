@@ -26,6 +26,7 @@ let currentAccountBalanceKey = null
 
 const BALANCE_STORAGE_KEY = 'starkwall_strk_balances'
 const DEFAULT_BALANCE = 1000
+const LAST_SESSION_KEY = 'starkwall_last_session'
 
 function loadBalances() {
   try {
@@ -41,6 +42,31 @@ function saveBalances(balances) {
     localStorage.setItem(BALANCE_STORAGE_KEY, JSON.stringify(balances))
   } catch (e) {
     console.warn('Could not save balances to localStorage:', e)
+  }
+}
+
+function loadLastSession() {
+  try {
+    const raw = localStorage.getItem(LAST_SESSION_KEY)
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    return null
+  }
+}
+
+function saveLastSession(address, username) {
+  try {
+    if (!address) {
+      localStorage.removeItem(LAST_SESSION_KEY)
+      return
+    }
+    localStorage.setItem(LAST_SESSION_KEY, JSON.stringify({
+      address: String(address),
+      username: String(username || ''),
+      updatedAt: Date.now(),
+    }))
+  } catch {
+    // ignore localStorage failures
   }
 }
 
@@ -96,7 +122,13 @@ async function enterApp(account) {
 
   currentAccount = account
   currentAccountBalanceKey = normalizeBalanceKey(account.address)
-  currentUsername = await controller.username()
+  try {
+    currentUsername = await controller.username()
+  } catch {
+    const cached = loadLastSession()
+    currentUsername = cached?.username || null
+  }
+  saveLastSession(account.address, currentUsername)
   console.log('✓ Wallet:', currentAccount.address, '| Username:', currentUsername)
 
   connectStatus.textContent = 'Loading blockchain...'
@@ -132,6 +164,7 @@ async function enterApp(account) {
   await subscribeToPostUpdates(toriiClient)
   console.log('✓ Subscribed to updates')
 
+  document.getElementById('loading-screen').style.display = 'none'
   connectScreen.style.display = 'none'
   canvasElement.style.display = 'block'
   controlsElement.style.display = 'flex'
@@ -139,6 +172,8 @@ async function enterApp(account) {
   connectButton.textContent = '🎮 Connect Wallet'
 
   await updateWalletInfo()
+  const logoutBtn = document.getElementById('logout-btn')
+  if (logoutBtn) logoutBtn.onclick = () => logout()
   console.log('✓ App ready!')
 }
 
@@ -209,6 +244,34 @@ function resizeImageToDataUrlWithMaxLength(fileOrDataUrl, maxBytes = CONTRACT_MA
   })
 }
 
+/** Cerrar sesión y volver a la pantalla de login. Obliga a hacer login de nuevo. */
+function logout() {
+  saveLastSession(null)
+  currentAccount = null
+  currentAccountBalanceKey = null
+  try {
+    if (controller && typeof controller.disconnect === 'function') {
+      controller.disconnect()
+    }
+  } catch (e) {
+    console.warn('Controller disconnect:', e)
+  }
+  const connectScreen = document.getElementById('connect-screen')
+  const canvasEl = document.getElementById('canvas')
+  const controlsEl = document.getElementById('controls')
+  const connectStatus = document.getElementById('connect-status')
+  const connectButton = document.getElementById('connect-wallet')
+  const loadingScreen = document.getElementById('loading-screen')
+  if (loadingScreen) loadingScreen.style.display = 'none'
+  connectScreen.style.display = 'flex'
+  canvasEl.style.display = 'none'
+  controlsEl.style.display = 'none'
+  connectStatus.textContent = ''
+  connectStatus.innerHTML = ''
+  connectButton.disabled = false
+  connectButton.textContent = '🎮 Connect Wallet'
+}
+
 async function connectWallet() {
   const connectStatus = document.getElementById('connect-status')
   const connectButton = document.getElementById('connect-wallet')
@@ -227,14 +290,7 @@ async function connectWallet() {
   try {
     const account = await controller.connect()
     if (!account) {
-      try {
-        if (typeof controller.open === 'function') {
-          controller.open({ redirectUrl: window.location.href })
-        }
-      } catch (openErr) {
-        console.warn('controller.open fallback failed:', openErr)
-      }
-      connectStatus.innerHTML = '<span style="color: #f44336;">No se obtuvo cuenta. Se abrió Cartridge Keychain; completa login y vuelve.</span>'
+      connectStatus.innerHTML = '<span style="color: #f44336;">No se obtuvo cuenta. Completa el login en Cartridge y vuelve a intentar.</span>'
       connectButton.disabled = false
       connectButton.textContent = '🎮 Connect Wallet'
       return
@@ -248,34 +304,47 @@ async function connectWallet() {
   }
 }
 
-/** Intenta restaurar sesión al cargar (Cartridge puede devolver la cuenta si ya había sesión). */
-async function tryRestoreSession() {
+/** Restaura sesión al recargar si había sesión guardada (Cartridge puede devolver cuenta sin popup). */
+async function tryRestoreSessionOnLoad() {
+  const loadingScreen = document.getElementById('loading-screen')
+  const connectScreen = document.getElementById('connect-screen')
   const connectStatus = document.getElementById('connect-status')
   const connectButton = document.getElementById('connect-wallet')
-  const resetUI = () => {
+
+  if (!controller) {
+    loadingScreen.style.display = 'none'
+    connectScreen.style.display = 'flex'
+    return
+  }
+
+  const hadSession = loadLastSession()
+  if (!hadSession?.address) {
+    loadingScreen.style.display = 'none'
+    connectScreen.style.display = 'flex'
     connectStatus.textContent = ''
-    connectStatus.innerHTML = ''
     connectButton.disabled = false
     connectButton.textContent = '🎮 Connect Wallet'
+    return
   }
+
   try {
-    connectStatus.textContent = 'Restoring session...'
-    connectStatus.style.color = '#888'
-    const account = await controller.connect()
+    const account = await Promise.race([
+      controller.connect(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000)),
+    ])
     if (account) {
-      try {
-        await enterApp(account)
-        return
-      } catch (e) {
-        console.error('Error after connect (enterApp):', e)
-        resetUI()
-        return
-      }
+      await enterApp(account)
+      return
     }
   } catch (e) {
-    console.warn('Session restore failed or skipped:', e)
+    console.warn('Session restore skipped:', e?.message || e)
   }
-  resetUI()
+
+  loadingScreen.style.display = 'none'
+  connectScreen.style.display = 'flex'
+  connectStatus.textContent = ''
+  connectButton.disabled = false
+  connectButton.textContent = '🎮 Connect Wallet'
 }
 
 function setupUIHandlers() {
@@ -798,11 +867,12 @@ async function updateWalletInfo() {
   }
 }
 
-// Inicializar cuando el DOM esté listo (evita errores y recargas en bucle)
+// Inicializar cuando el DOM esté listo
 function initApp() {
   try {
     const btn = document.getElementById('connect-wallet')
     if (btn) btn.addEventListener('click', connectWallet)
+    tryRestoreSessionOnLoad().catch((e) => console.warn('Session restore:', e))
   } catch (e) {
     console.error('Init error:', e)
   }
