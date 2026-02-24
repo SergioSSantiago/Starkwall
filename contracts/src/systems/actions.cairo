@@ -1,3 +1,5 @@
+// Free post: size=1, position random adjacent. Paid post: user chooses size (2,3,4...),
+// position still random adjacent; price is exponential in size (e.g. base^size).
 #[starknet::interface]
 pub trait IActions<T> {
     fn create_post(
@@ -7,6 +9,7 @@ pub trait IActions<T> {
         creator_username: ByteArray,
         x_position: i32,
         y_position: i32,
+        size: u8,
         is_paid: bool
     ) -> u64;
     
@@ -38,10 +41,22 @@ pub mod actions {
             creator_username: ByteArray,
             x_position: i32,
             y_position: i32,
+            size: u8,
             is_paid: bool
         ) -> u64 {
             let mut world = self.world_default();
             let caller = starknet::get_caller_address();
+
+            // Validate size: free posts must be size 1, paid posts can be 2+
+            if is_paid {
+                if size < 2 {
+                    panic(array![])
+                }
+            } else {
+                if size != 1 {
+                    panic(array![])
+                }
+            }
 
             // Get and increment post counter
             let mut counter: PostCounter = world.read_model(0_u8);
@@ -56,7 +71,7 @@ pub mod actions {
                 caption,
                 x_position,
                 y_position,
-                size: 1, // Always 1
+                size,
                 is_paid,
                 created_at: get_block_timestamp(),
                 created_by: caller,

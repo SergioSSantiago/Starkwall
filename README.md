@@ -268,14 +268,18 @@ See [`QUICK_START.md`](./QUICK_START.md) for detailed troubleshooting steps.
 
 ## 🔮 Future Roadmap
 
+### Post model: Free vs Paid
+
+- **Free post**: Size always **1** (one tile). **Position is random** among adjacent slots (user cannot choose).
+- **Paid post**: User chooses **size only** (2, 3, 4… → 2×2, 3×3, 4×4 tiles). **Position is still random adjacent** (no choosing where it goes). Bigger = more visible, so **price is exponential** in size (e.g. `base × multiplier^(size-1)` STRK).
+
 ### Phase 2: Post Types & Mutability
 
 - [ ] **Free Random Posts** - Create non-modifiable posts that can be sold, transferred, or auctioned
   - Lucky placement next to celebrity posts (with public ownership history)
   - Option to upgrade to modifiable by paying later
+- [ ] **Paid posts** - User chooses **size** (2, 3, 4…); position remains **random adjacent**; **exponential pricing** (e.g. 10, 40, 160, 640 STRK).
 - [ ] **Paid Modifiable Posts** - Pay upfront to create posts you can edit anytime
-- [ ] **Variable Post Sizes** - Larger posts (2x2, 3x3, etc.) with exponential pricing
-  - Perfect for brand advertising and higher visibility
 - [ ] **Post Ownership History** - Public ledger showing all transfers and ownership changes
 
 ### Phase 3: Yield & Economics (WALLD Integration)

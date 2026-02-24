@@ -1,5 +1,10 @@
 import { SpiralLayout } from './spiralLayout.js'
 
+/**
+ * Free post: size always 1, position random among adjacent slots.
+ * Paid post: user chooses size (2, 3, 4...) → bigger tile (2x2, 3x3, 4x4);
+ * position is still random adjacent (no choosing position). Price is exponential in size.
+ */
 export class PostManager {
   constructor(canvas, dojoManager = null) {
     this.canvas = canvas
@@ -119,40 +124,57 @@ export class PostManager {
     await Promise.all(imagePromises)
   }
 
-  async createPost(imageUrl, caption, creatorUsername, size = 1, isPaid = false) {
-    // Get position for new post
+  /**
+   * Price for a paid post (STRK). Minimum 1 STRK for 2x2, then exponential.
+   * Formula: 4^(size-2) → 2x2=1, 3x3=4, 4x4=16, 5x5=64 STRK...
+   */
+  static getPriceForPaidPost(size, multiplier = 4) {
+    if (size < 2) return 0
+    return Math.max(1, Math.floor(multiplier ** (size - 2)))
+  }
+
+  async createPost(imageUrl, caption, creatorUsername, size = 1, isPaid = false, onSuccess = null) {
+    // Position: always random among adjacent slots (free and paid). Only size is chosen for paid.
     let position
-    
+
     if (this.posts.length === 0) {
       // First post - place at origin
       console.log('Creating first post at origin (0, 0)')
       position = { x: 0, y: 0 }
     } else {
-      // Find adjacent position to existing posts
-      position = this.getAdjacentPosition()
-      
+      // Find adjacent position (for size > 1 we need a slot that fits the whole block; TODO when implementing paid)
+      position = this.getAdjacentPosition(size)
+
       if (!position) {
         console.error('No available adjacent positions')
         return null
       }
     }
 
-    console.log('Creating post at position:', position)
+    console.log('Creating post at position:', position, 'size:', size)
 
     if (this.useDojo) {
       // Create post on-chain via Dojo
       try {
-        console.log('🎨 Creating post on-chain at position: x=%d, y=%d by user: %s', position.x, position.y, creatorUsername);
+        console.log('🎨 Creating post on-chain at position: x=%d, y=%d, size: %d by user: %s', position.x, position.y, size, creatorUsername);
         const tx = await this.dojoManager.createPost(
           imageUrl,
           caption,
           creatorUsername,
           position.x,
           position.y,
+          size,
           isPaid
         );
         
         console.log('✅ Post created! Transaction:', tx.transaction_hash);
+        
+        // Cerrar modal en el siguiente tick (antes de esperar Torii) para que se pinte el cierre
+        if (typeof onSuccess === 'function') {
+          setTimeout(() => {
+            try { onSuccess(); } catch (e) { console.error('onSuccess callback error:', e); }
+          }, 0);
+        }
         
         // Wait a moment for Torii to index
         console.log('⏳ Waiting 5 seconds for Torii to index...');
@@ -170,11 +192,17 @@ export class PostManager {
         const newPost = this.posts[this.posts.length - 1];
         if (newPost) {
           console.log('📍 Centering on new post:', newPost.id);
-          this.canvas.centerOn(
-            newPost.x_position + this.canvas.postWidth / 2,
-            newPost.y_position + this.canvas.postHeight / 2,
-            0.8
-          );
+          const centerX = newPost.x_position + this.canvas.postWidth / 2;
+          const centerY = newPost.y_position + this.canvas.postHeight / 2;
+          this.canvas.centerOn(centerX, centerY, 0.8);
+          
+          // Highlight the new post
+          this.canvas.highlightPost(newPost.id, 3000);
+          
+          // Show toast with position (si existe helper global)
+          if (typeof globalThis.showToast === 'function') {
+            globalThis.showToast(`✅ Post creado en posición (${newPost.x_position}, ${newPost.y_position})`);
+          }
         }
         
         return newPost;
@@ -228,57 +256,74 @@ export class PostManager {
         0.8
       )
 
+      if (typeof onSuccess === 'function') onSuccess()
       return newPost
     }
   }
 
-  getAdjacentPosition() {
+  getAdjacentPosition(size = 1) {
     const postWidth = this.canvas.postWidth
     const postHeight = this.canvas.postHeight
-    
-    // Collect all possible adjacent positions
+    const blockW = postWidth * size
+    const blockH = postHeight * size
+
+    // Collect candidate positions: adjacent to existing posts (edges of the grid)
     const possiblePositions = []
-    
+
     this.posts.forEach(post => {
-      const adjacentPositions = [
-        { x: post.x_position, y: post.y_position - postHeight, direction: 'top' },
-        { x: post.x_position, y: post.y_position + postHeight, direction: 'bottom' },
-        { x: post.x_position - postWidth, y: post.y_position, direction: 'left' },
-        { x: post.x_position + postWidth, y: post.y_position, direction: 'right' }
-      ]
-      
-      possiblePositions.push(...adjacentPositions)
+      const postRight = post.x_position + (post.size || 1) * postWidth
+      const postBottom = post.y_position + (post.size || 1) * postHeight
+      // One tile in each direction (for size 1); for size > 1 we push the block beside the post
+      possiblePositions.push(
+        { x: post.x_position, y: post.y_position - blockH, direction: 'top' },
+        { x: post.x_position, y: postBottom, direction: 'bottom' },
+        { x: post.x_position - blockW, y: post.y_position, direction: 'left' },
+        { x: postRight, y: post.y_position, direction: 'right' }
+      )
     })
-    
-    // Filter out positions that are already occupied or have negative coordinates
+
+    // Dedupe by "x,y" and filter: non-negative, block not occupied, block adjacent to at least one post
+    const seen = new Set()
     const availablePositions = possiblePositions.filter(pos => {
+      const key = `${pos.x},${pos.y}`
+      if (seen.has(key)) return false
+      seen.add(key)
       const isNonNegative = pos.x >= 0 && pos.y >= 0
-      const isNotOccupied = !this.isPositionOccupied(pos.x, pos.y)
-      
-      if (!isNonNegative) {
-        console.log('🚫 Filtered out negative position: x=%d, y=%d (direction: %s)', pos.x, pos.y, pos.direction)
-      }
-      
-      return isNonNegative && isNotOccupied
+      const blockFree = !this.isBlockOccupied(pos.x, pos.y, size)
+      return isNonNegative && blockFree
     })
-    
+
     if (availablePositions.length === 0) {
       console.log('⚠️ No available adjacent positions found (all occupied or would be negative)')
       return null
     }
-    
-    // Pick a random available position
+
     const randomIndex = Math.floor(Math.random() * availablePositions.length)
     const selectedPosition = availablePositions[randomIndex]
-    console.log('✅ Selected adjacent position: x=%d, y=%d (direction: %s, %d options available)', 
-      selectedPosition.x, selectedPosition.y, selectedPosition.direction, availablePositions.length)
+    console.log('✅ Selected adjacent position: x=%d, y=%d (direction: %s, size: %d)', 
+      selectedPosition.x, selectedPosition.y, selectedPosition.direction, size)
     return selectedPosition
   }
 
   isPositionOccupied(x, y) {
-    return this.posts.some(post => 
-      post.x_position === x && post.y_position === y
-    )
+    return this.posts.some(post => {
+      const pw = this.canvas.postWidth * (post.size || 1)
+      const ph = this.canvas.postHeight * (post.size || 1)
+      return x >= post.x_position && x < post.x_position + pw &&
+             y >= post.y_position && y < post.y_position + ph
+    })
+  }
+
+  /** Returns true if the block [x, x+size*W) x [y, y+size*H) overlaps any existing post */
+  isBlockOccupied(x, y, size) {
+    const postWidth = this.canvas.postWidth
+    const postHeight = this.canvas.postHeight
+    for (let i = 0; i < size; i++) {
+      for (let j = 0; j < size; j++) {
+        if (this.isPositionOccupied(x + i * postWidth, y + j * postHeight)) return true
+      }
+    }
+    return false
   }
 
   async subscribeToChanges() {

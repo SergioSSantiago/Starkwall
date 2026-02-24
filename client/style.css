@@ -107,6 +107,7 @@
     font-weight: 500;
   }
   
+  .modal-content input[type="text"],
   .modal-content input[type="url"],
   .modal-content textarea {
     background: #0a0a0a;
@@ -118,7 +119,7 @@
     font-family: inherit;
   }
   
-  .modal-content input[type="url"]:focus,
+  .modal-content input:focus,
   .modal-content textarea:focus {
     outline: none;
     border-color: #555;
@@ -127,6 +128,169 @@
   .modal-content textarea {
     min-height: 100px;
     resize: vertical;
+  }
+
+  /* Photo picker (Instagram-style) */
+  .photo-picker {
+    min-height: 200px;
+    border: 2px dashed #333;
+    border-radius: 12px;
+    overflow: hidden;
+    background: #0a0a0a;
+  }
+  
+  .photo-placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 200px;
+    padding: 24px;
+    gap: 16px;
+  }
+  
+  .photo-placeholder p {
+    color: #888;
+    font-size: 15px;
+    margin: 0;
+  }
+  
+  .photo-hint {
+    font-size: 12px !important;
+    color: #666 !important;
+    margin-top: 4px !important;
+  }
+  
+  .paid-post-options {
+    padding: 12px 0;
+    border-top: 1px solid #333;
+  }
+  
+  .paid-post-options > label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 14px;
+  }
+  
+  .size-options {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  
+  .size-option {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    color: #ccc;
+  }
+  
+  .size-option input {
+    margin: 0;
+  }
+  
+  .paid-price {
+    font-size: 18px;
+    font-weight: 600;
+    color: #4CAF50;
+    margin: 0;
+  }
+  
+  .photo-actions {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  
+  .btn-photo {
+    padding: 12px 20px;
+    border-radius: 8px;
+    font-size: 15px;
+    cursor: pointer;
+    background: #1a1a1a;
+    border: 1px solid #444;
+    color: #fff;
+    transition: all 0.2s;
+  }
+  
+  .btn-photo:hover {
+    background: #252525;
+    border-color: #555;
+  }
+  
+  .photo-preview {
+    position: relative;
+    min-height: 200px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #111;
+  }
+  
+  .photo-preview img {
+    max-width: 100%;
+    max-height: 320px;
+    object-fit: contain;
+    display: block;
+  }
+  
+  .remove-photo {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    border: none;
+    background: rgba(0, 0, 0, 0.7);
+    color: #fff;
+    font-size: 24px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    transition: background 0.2s;
+  }
+  
+  .remove-photo:hover {
+    background: rgba(200, 0, 0, 0.9);
+  }
+  
+  /* Webcam modal */
+  .webcam-modal .modal-content {
+    max-width: 420px;
+  }
+  
+  .webcam-hint {
+    color: #888;
+    font-size: 13px;
+    margin-bottom: 12px;
+  }
+  
+  #webcamVideo {
+    width: 100%;
+    max-height: 360px;
+    background: #000;
+    border-radius: 8px;
+    display: block;
+    margin-bottom: 16px;
+  }
+  
+  .webcam-buttons {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+  }
+  
+  .webcam-buttons .btn-cancel {
+    background: transparent;
+    border-color: #555;
   }
   
   .modal-buttons {
@@ -244,4 +408,28 @@
     left: 0;
     color: #4CAF50;
     font-weight: bold;
+  }
+
+  /* Toast notification */
+  .toast {
+    position: fixed;
+    bottom: 30px;
+    left: 50%;
+    transform: translateX(-50%) translateY(100px);
+    background: rgba(0, 255, 255, 0.95);
+    color: #0a0a0a;
+    padding: 16px 24px;
+    border-radius: 8px;
+    font-size: 16px;
+    font-weight: 600;
+    z-index: 2000;
+    opacity: 0;
+    transition: all 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+    box-shadow: 0 4px 20px rgba(0, 255, 255, 0.4);
+    pointer-events: none;
+  }
+
+  .toast.show {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
   }

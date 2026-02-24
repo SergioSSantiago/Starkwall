@@ -22,7 +22,9 @@ export class InfiniteCanvas {
       this.lastMousePos = { x: 0, y: 0 }
   
       this.posts = []
-  
+      this.highlightedPostId = null
+      this.highlightUntil = 0
+
       this.setupCanvas()
       this.setupEventListeners()
     }
@@ -219,6 +221,17 @@ export class InfiniteCanvas {
   
       // Draw posts
       this.posts.forEach(post => this.drawPost(post))
+      
+      // Draw highlight for newly created post
+      if (this.highlightedPostId && Date.now() < this.highlightUntil) {
+        const highlightedPost = this.posts.find(p => p.id === this.highlightedPostId)
+        if (highlightedPost) {
+          this.drawHighlight(highlightedPost)
+        }
+      } else if (this.highlightedPostId) {
+        // Clear highlight after timeout
+        this.highlightedPostId = null
+      }
     }
   
     drawGrid() {
@@ -431,6 +444,63 @@ export class InfiniteCanvas {
       }
     }
   
+    drawHighlight(post) {
+      const size = post.size || 1
+      const width = this.postWidth * size
+      const height = this.postHeight * size
+      const screen = this.worldToScreen(post.x_position, post.y_position)
+      const screenWidth = width * this.camera.zoom
+      const screenHeight = height * this.camera.zoom
+
+      // Pulsing glow effect
+      const time = Date.now() - (this.highlightUntil - 3000)
+      const pulse = Math.sin(time / 200) * 0.5 + 0.5 // 0 to 1
+      const alpha = 0.8 * (1 - time / 3000) // Fade out over 3 seconds
+
+      // Outer glow
+      const glowSize = 10 + pulse * 5
+      const gradient = this.ctx.createRadialGradient(
+        screen.x + screenWidth / 2,
+        screen.y + screenHeight / 2,
+        0,
+        screen.x + screenWidth / 2,
+        screen.y + screenHeight / 2,
+        screenWidth / 2 + glowSize
+      )
+      gradient.addColorStop(0, `rgba(0, 255, 255, ${alpha * 0.6})`)
+      gradient.addColorStop(0.5, `rgba(0, 255, 255, ${alpha * 0.3})`)
+      gradient.addColorStop(1, 'rgba(0, 255, 255, 0)')
+
+      this.ctx.fillStyle = gradient
+      this.ctx.fillRect(
+        screen.x - glowSize,
+        screen.y - glowSize,
+        screenWidth + glowSize * 2,
+        screenHeight + glowSize * 2
+      )
+
+      // Bright border
+      this.ctx.strokeStyle = `rgba(0, 255, 255, ${alpha})`
+      this.ctx.lineWidth = 4 + pulse * 2
+      this.ctx.strokeRect(screen.x, screen.y, screenWidth, screenHeight)
+    }
+
+    highlightPost(postId, durationMs = 3000) {
+      this.highlightedPostId = postId
+      this.highlightUntil = Date.now() + durationMs
+      // Keep rendering to show animation
+      const startTime = Date.now()
+      const animate = () => {
+        if (Date.now() < this.highlightUntil) {
+          this.render()
+          requestAnimationFrame(animate)
+        } else {
+          this.render() // Final render to clear highlight
+        }
+      }
+      animate()
+    }
+
     centerOn(x, y, zoom = this.camera.zoom) {
       this.camera.x = -x
       this.camera.y = -y

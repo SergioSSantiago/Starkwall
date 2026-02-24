@@ -32,18 +32,41 @@
       <div class="modal-content">
         <h2>Create New Post</h2>
         <form id="postForm">
-          <label>
-            Image URL:
-            <input type="url" id="imageUrl" placeholder="https://example.com/image.jpg" required />
-          </label>
+          <input type="file" id="imageFile" accept="image/*" style="display: none;" />
+          <input type="file" id="imageFileCamera" accept="image/*" capture="environment" style="display: none;" />
+          <div class="photo-picker">
+            <div id="photoPreview" class="photo-preview" style="display: none;">
+              <img id="photoPreviewImg" alt="Preview" />
+              <button type="button" id="removePhoto" class="remove-photo" title="Quitar foto">×</button>
+            </div>
+            <div id="photoPlaceholder" class="photo-placeholder">
+              <p>Elige una foto para tu post</p>
+              <div class="photo-actions">
+                <button type="button" id="btnWebcam" class="btn-photo">📷 Cámara</button>
+                <button type="button" id="btnGallery" class="btn-photo">🖼️ Galería</button>
+              </div>
+              <p class="photo-hint">En el Mac: Cámara usa la webcam; Galería abre un archivo.</p>
+            </div>
+          </div>
+          <div id="paidPostOptions" class="paid-post-options" style="display: none;">
+            <label>Tamaño del post</label>
+            <div class="size-options">
+              <label class="size-option"><input type="radio" name="postSizeRadio" value="2" /> 2×2</label>
+              <label class="size-option"><input type="radio" name="postSizeRadio" value="3" /> 3×3</label>
+              <label class="size-option"><input type="radio" name="postSizeRadio" value="4" /> 4×4</label>
+              <label class="size-option"><input type="radio" name="postSizeRadio" value="5" /> 5×5</label>
+            </div>
+            <p id="paidPostPrice" class="paid-price">1 STRK</p>
+          </div>
           <label>
             Caption:
-            <textarea id="caption" placeholder="Enter caption..." maxlength="200"></textarea>
+            <textarea id="caption" placeholder="Escribe un pie de foto..." maxlength="200"></textarea>
           </label>
+          <input type="hidden" id="imageDataUrl" value="" />
           <input type="hidden" id="postSize" value="1" />
           <input type="hidden" id="isPaid" value="false" />
           <div class="modal-buttons">
-            <button type="submit">Create Post</button>
+            <button type="submit" id="submitPostBtn" disabled>Create Post</button>
             <button type="button" id="cancelPost">Cancel</button>
           </div>
         </form>
@@ -66,6 +89,20 @@
         </div>
       </div>
     </div>
+
+    <div id="webcamModal" class="modal webcam-modal">
+      <div class="modal-content webcam-content">
+        <h2>Tomar foto</h2>
+        <p class="webcam-hint">Permite el acceso a la cámara cuando el navegador lo pida.</p>
+        <video id="webcamVideo" autoplay playsinline muted></video>
+        <div class="webcam-buttons">
+          <button type="button" id="webcamCapture" class="btn-photo">📸 Capturar foto</button>
+          <button type="button" id="webcamCancel" class="btn-photo btn-cancel">Cancelar</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast"></div>
 
     <script type="module" src="./main.js"></script>
   </body>

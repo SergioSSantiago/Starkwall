@@ -17,16 +17,18 @@ export class DojoManager {
    * @param {string} creatorUsername - Username of the creator
    * @param {number} xPosition - X coordinate
    * @param {number} yPosition - Y coordinate
+   * @param {number} size - Post size (1 = free, 2+ = paid)
    * @param {boolean} isPaid - Whether it's a paid post
    * @returns {Promise<number>} - The ID of the created post
    */
-  async createPost(imageUrl, caption, creatorUsername, xPosition, yPosition, isPaid) {
+  async createPost(imageUrl, caption, creatorUsername, xPosition, yPosition, size, isPaid) {
     console.log('📝 Creating post with params:', {
       imageUrl,
       caption,
       creatorUsername,
       xPosition,
       yPosition,
+      size,
       isPaid
     });
 
@@ -48,6 +50,7 @@ export class DojoManager {
       ...usernameBytes,
       xPosition,
       yPosition,
+      size, // Tamaño del post (1, 2, 3, 4...)
       isPaid ? 1 : 0,
     ];
 

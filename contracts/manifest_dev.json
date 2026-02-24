@@ -1480,7 +1480,7 @@
   "contracts": [
     {
       "address": "0x2aa726017b98ddb96a95ac65a445e22130f70a00142b97aa76c819142edad43",
-      "class_hash": "0x1f2eb1caa58cfd1fff02902da113202106840509cce1e60dce8a90bcf333de5",
+      "class_hash": "0x56eaedef9c4d9477aad468b19a7af199520d5505c89cb07213f8e977723af0d",
       "abi": [
         {
           "type": "impl",
@@ -1578,6 +1578,10 @@
                 {
                   "name": "y_position",
                   "type": "core::integer::i32"
+                },
+                {
+                  "name": "size",
+                  "type": "core::integer::u8"
                 },
                 {
                   "name": "is_paid",
