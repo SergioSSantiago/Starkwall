@@ -1,3 +1,15 @@
 target
 node_modules
 .pnpm-store
+
+# Client build output
+client/dist
+
+# Sepolia / production secrets (DO NOT COMMIT)
+contracts/.env.sepolia
+contracts/sepolia.account.json
+contracts/dojo_sepolia.toml
+*.keystore.json
+
+# Local debug artifacts
+.DS_Store

@@ -1,0 +1,21 @@
+# Torii production config (Sepolia)
+# Run: torii --config contracts/torii_sepolia.toml
+
+world_address = "0x06a45d7bf207b9920d1843690e11fd3072100743ea52c8ef77404b72da4c5dbb"
+
+# RPC is provided via env (Fly secret): TORII_RPC_URL
+
+# Persist DB so restarts don't reindex from scratch.
+# In Fly.io we mount a volume at /data.
+db_dir = "/data/torii.db"
+
+[indexing]
+# More conservative for production; tune later.
+pending = false
+polling_interval = 1000
+max_concurrent_tasks = 100
+
+[server]
+http_addr = "0.0.0.0"
+http_port = 8080
+http_cors_origins = ["*"]

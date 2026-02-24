@@ -1,0 +1,23 @@
+# Fly.io config for Torii (Sepolia)
+# Usage:
+#   flyctl launch --no-deploy
+#   # then merge these settings or keep this file
+#   flyctl volumes create torii_data --size 10 --region <region>
+#   flyctl deploy
+
+app = "starkwall-torii"
+primary_region = "cdg"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_start_machines = true
+  auto_stop_machines = true
+  min_machines_running = 1
+
+[[mounts]]
+  source = "torii_data"
+  destination = "/data"

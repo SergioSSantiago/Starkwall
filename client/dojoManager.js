@@ -1,11 +1,9 @@
 import { stringToByteArray } from './utils.js';
 import { ToriiQueryBuilder, KeysClause } from "@dojoengine/sdk";
-import { STRK_TOKEN_ADDRESS } from './config.js';
+import { PAYMENT_TOKEN_ADDRESS, RPC_URL } from './config.js';
 import { RpcProvider } from 'starknet';
 
 const ONE_STRK = 10n ** 18n;
-const KATANA_ETH = '0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7';
-const BALANCE_PROVIDER = new RpcProvider({ nodeUrl: 'http://127.0.0.1:5050/rpc' });
 const PAID_POST_MULTIPLIER = 4;
 
 function getPaidPostPrice(size) {
@@ -38,41 +36,49 @@ export class DojoManager {
     this.manifest = manifest;
     this.toriiClient = toriiClient;
     this.actionsContract = manifest.contracts.find((c) => c.tag === 'di-actions');
+    this.balanceProvider = new RpcProvider({ nodeUrl: RPC_URL });
   }
 
   async getTokenBalance(address) {
-    const tokenAddr = STRK_TOKEN_ADDRESS || KATANA_ETH;
-    if (!tokenAddr) return 0;
+    const tokenAddr = PAYMENT_TOKEN_ADDRESS
+    if (!tokenAddr) return 0
 
-    const call = {
-      contractAddress: tokenAddr,
-      entrypoint: 'balance_of',
-      calldata: [address],
-    };
+    // Starknet ERC20s usually expose `balanceOf`, but our local minimal token uses `balance_of`.
+    const entrypoints = ['balanceOf', 'balance_of']
 
-    try {
-      // Katana in this project rejects `pending`; force `latest` when possible.
-      let result;
-      try {
-        result = await BALANCE_PROVIDER.callContract(call, 'latest');
-      } catch {
-        result = await BALANCE_PROVIDER.callContract(call);
+    for (const entrypoint of entrypoints) {
+      const call = {
+        contractAddress: tokenAddr,
+        entrypoint,
+        calldata: [address],
       }
 
-      // Some providers return { result: [low, high] }, others return [low, high].
-      const parts = Array.isArray(result) ? result : (result?.result || []);
-      const low = BigInt(parts[0] || 0);
-      const high = BigInt(parts[1] || 0);
-      const wei = low + (high << 128n);
-      return Number(wei / ONE_STRK);
-    } catch (e) {
-      console.warn('getTokenBalance failed:', e);
-      return 0;
+      try {
+        // Some nodes reject `pending`; prefer `latest`.
+        let result
+        try {
+          result = await this.balanceProvider.callContract(call, 'latest')
+        } catch {
+          result = await this.balanceProvider.callContract(call)
+        }
+
+        // Some providers return { result: [low, high] }, others return [low, high].
+        const parts = Array.isArray(result) ? result : (result?.result || [])
+        const low = BigInt(parts[0] || 0)
+        const high = BigInt(parts[1] || 0)
+        const wei = low + (high << 128n)
+        return Number(wei / ONE_STRK)
+      } catch (e) {
+        // Try next entrypoint.
+        continue
+      }
     }
+
+    return 0
   }
 
   async buyPostWithPayment(postId, sellerAddress, price) {
-    const tokenAddr = STRK_TOKEN_ADDRESS || KATANA_ETH;
+    const tokenAddr = PAYMENT_TOKEN_ADDRESS;
     if (!tokenAddr) throw new Error('No token configured. Set VITE_STRK_TOKEN or deploy STRK (see contracts/DEPLOY_STRK.md).');
     const amountWei = BigInt(price) * ONE_STRK;
     const { low, high } = feltToU256(amountWei);
@@ -140,7 +146,7 @@ export class DojoManager {
     console.log('🚀 Executing transaction with calldata length:', calldata.length);
 
     try {
-      const tokenAddr = STRK_TOKEN_ADDRESS || KATANA_ETH;
+      const tokenAddr = PAYMENT_TOKEN_ADDRESS;
       const shouldChargePaidPost = Boolean(isPaid) && Number(size) >= 2;
 
       if (shouldChargePaidPost) {

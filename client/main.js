@@ -5,7 +5,8 @@ import { DojoManager } from './dojoManager.js'
 import Controller from '@cartridge/controller'
 import { init as initDojo, KeysClause, ToriiQueryBuilder } from '@dojoengine/sdk'
 import controllerOpts from './controller.js'
-import manifest from '../contracts/manifest_dev.json' assert { type: 'json' }
+import manifest from './manifest.js'
+import { DOMAIN_CHAIN_ID, TORII_URL, IS_SEPOLIA, FAUCET_URL } from './config.js'
 
 // Evitar que un rechazo de promesa no capturado provoque recarga o cierre de la app
 window.addEventListener('unhandledrejection', (event) => {
@@ -16,15 +17,13 @@ window.addEventListener('unhandledrejection', (event) => {
 const DOMAIN_SEPARATOR = {
   name: 'di',
   version: '1.0',
-  chainId: 'KATANA',
+  chainId: DOMAIN_CHAIN_ID,
   revision: '1',
 }
 
 let canvas, postManager, dojoManager, controller, currentUsername, currentAccount
 /** Clave de balance de la wallet conectada; fijada al conectar para que todas las operaciones usen la misma. */
 
-const RPC_URL = 'http://localhost:5050'
-const FAUCET_URL = 'http://localhost:3001'
 const LAST_SESSION_KEY = 'starkwall_last_session'
 
 async function getChainBalance(address) {
@@ -89,13 +88,18 @@ async function enterApp(account) {
   saveLastSession(account.address, currentUsername)
   console.log('✓ Wallet:', currentAccount.address, '| Username:', currentUsername)
 
+  if (IS_SEPOLIA && (!TORII_URL || TORII_URL === '')) {
+    connectStatus.innerHTML = '<span style="color: #f44336;">Missing Torii URL. Set VITE_TORII_URL in production.</span>'
+    throw new Error('Missing VITE_TORII_URL')
+  }
+
   connectStatus.textContent = 'Loading blockchain...'
   connectStatus.style.color = '#4CAF50'
 
   const toriiClient = await initDojo({
     client: {
       worldAddress: manifest.world.address,
-      toriiUrl: 'http://localhost:8080',
+      toriiUrl: TORII_URL,
     },
     domain: DOMAIN_SEPARATOR,
   })
@@ -135,12 +139,24 @@ async function enterApp(account) {
   console.log('✓ App ready!')
 }
 
-// Inicializar Controller (puede fallar si la extensión no está lista)
-try {
-  controller = new Controller(controllerOpts)
-} catch (e) {
-  console.warn('Controller init failed (extension may not be ready):', e)
-  controller = null
+// Cartridge Controller helper.
+//
+// Cartridge Controller uses a keychain iframe (not a browser extension). In Firefox,
+// strict tracking/cookie settings can block iframe storage and make Controller init
+// fail early. We lazy-init and provide a clearer message in connect flow.
+let controllerInitError = null
+
+function ensureController() {
+  if (controller) return controller
+  try {
+    controller = new Controller(controllerOpts)
+    controllerInitError = null
+    return controller
+  } catch (e) {
+    controllerInitError = e
+    controller = null
+    return null
+  }
 }
 
 function showToast(message) {
@@ -233,8 +249,17 @@ async function connectWallet() {
   const connectStatus = document.getElementById('connect-status')
   const connectButton = document.getElementById('connect-wallet')
 
-  if (!controller) {
-    connectStatus.innerHTML = '<span style="color: #f44336;">Cartridge no disponible. Recarga la página con la extensión instalada.</span>'
+  const c = ensureController()
+  if (!c) {
+    console.warn('Controller init failed:', controllerInitError)
+    connectStatus.innerHTML = [
+      '<span style="color: #f44336;">Cartridge no disponible todavía.</span>',
+      '<div style="margin-top: 8px; color: #999; font-size: 12px;">En Firefox suele ser por bloqueo de cookies/tracking que impide al iframe de Cartridge inicializarse.</div>',
+      '<div style="margin-top: 8px; color: #999; font-size: 12px;">Prueba esto y recarga:</div>',
+      '<div style="margin-top: 6px; color: #999; font-size: 12px;">1) Abre <a href="https://x.cartridge.gg/" target="_blank" rel="noreferrer">x.cartridge.gg</a> e inicia sesión</div>',
+      '<div style="margin-top: 6px; color: #999; font-size: 12px;">2) En el icono del escudo (Protección contra rastreo) desactívala para este sitio</div>',
+      '<div style="margin-top: 6px; color: #999; font-size: 12px;">3) Vuelve aquí y refresca la página</div>',
+    ].join('')
     return
   }
 
@@ -245,7 +270,7 @@ async function connectWallet() {
   connectStatus.innerHTML = ''
 
   try {
-    const account = await controller.connect()
+    const account = await c.connect()
     if (!account) {
       connectStatus.innerHTML = '<span style="color: #f44336;">No se obtuvo cuenta. Completa el login en Cartridge y vuelve a intentar.</span>'
       connectButton.disabled = false
@@ -261,47 +286,41 @@ async function connectWallet() {
   }
 }
 
-/** Restaura sesión al recargar si había sesión guardada (Cartridge puede devolver cuenta sin popup). */
+/** Restaura sesión al recargar usando probe() — NUNCA abre popup ni pide login. */
 async function tryRestoreSessionOnLoad() {
   const loadingScreen = document.getElementById('loading-screen')
   const connectScreen = document.getElementById('connect-screen')
   const connectStatus = document.getElementById('connect-status')
   const connectButton = document.getElementById('connect-wallet')
 
-  if (!controller) {
-    loadingScreen.style.display = 'none'
-    connectScreen.style.display = 'flex'
-    return
-  }
-
-  const hadSession = loadLastSession()
-  if (!hadSession?.address) {
-    loadingScreen.style.display = 'none'
+  const showConnect = () => {
+    if (loadingScreen) loadingScreen.style.display = 'none'
     connectScreen.style.display = 'flex'
     connectStatus.textContent = ''
+    connectStatus.innerHTML = ''
     connectButton.disabled = false
     connectButton.textContent = '🎮 Connect Wallet'
-    return
   }
 
+  // Solo intentar si el usuario ya había hecho login antes
+  const hadSession = loadLastSession()
+  if (!hadSession?.address) { showConnect(); return }
+
+  const c = ensureController()
+  if (!c) { showConnect(); return }
+
   try {
-    const account = await Promise.race([
-      controller.connect(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000)),
-    ])
+    // probe() = restauración completamente silenciosa, sin abrir ningún popup ni modal
+    const account = await c.probe()
     if (account) {
       await enterApp(account)
       return
     }
   } catch (e) {
-    console.warn('Session restore skipped:', e?.message || e)
+    console.warn('probe() restore failed:', e?.message || e)
   }
 
-  loadingScreen.style.display = 'none'
-  connectScreen.style.display = 'flex'
-  connectStatus.textContent = ''
-  connectButton.disabled = false
-  connectButton.textContent = '🎮 Connect Wallet'
+  showConnect()
 }
 
 function setupUIHandlers() {
@@ -508,7 +527,11 @@ function setupUIHandlers() {
       // Siempre leer balance actual de storage, restar coste y guardar (nunca usar un balance “viejo”).
       const balanceActual = await getChainBalance(currentAccount.address)
       if (balanceActual < price) {
-        alert(`Saldo insuficiente. Necesitas ${price} STRK y tienes ${balanceActual} STRK. Haz clic en "Obtener STRK" si no tienes fondos.`)
+        if (IS_SEPOLIA) {
+          alert(`Saldo insuficiente. Necesitas ${price} STRK y tienes ${balanceActual} STRK en Sepolia.`)
+        } else {
+          alert(`Saldo insuficiente. Necesitas ${price} STRK y tienes ${balanceActual} STRK. Haz clic en "Obtener STRK" si no tienes fondos.`)
+        }
         return
       }
     }
@@ -535,7 +558,12 @@ function setupUIHandlers() {
     }
   })
   const faucetBtn = document.getElementById('faucet-btn')
-  if (faucetBtn) faucetBtn.addEventListener('click', async () => {
+  if (faucetBtn && IS_SEPOLIA) {
+    // Faucet is local-only; hide in production deployments.
+    faucetBtn.style.display = 'none'
+  }
+
+  if (faucetBtn && !IS_SEPOLIA) faucetBtn.addEventListener('click', async () => {
     if (!currentAccount) return
     faucetBtn.disabled = true
     faucetBtn.textContent = '...'

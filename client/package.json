@@ -5,7 +5,9 @@
   "main": "index.js",
   "scripts": {
     "dev": "vite dev",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "build": "vite build",
+    "preview": "vite preview --host"
   },
   "keywords": [],
   "author": "",

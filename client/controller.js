@@ -1,20 +1,24 @@
 /**
- * Setups controller options:
- * https://docs.cartridge.gg/controller/getting-started
+ * Cartridge Controller options.
  *
- * This example uses Katana for local host development.
+ * This file is environment-driven (dev vs Sepolia) via `client/config.js`.
  */
-import manifest from '../contracts/manifest_dev.json' assert { type: 'json' };
-import { STRK_TOKEN_ADDRESS } from './config.js';
 
-const actionsContract = manifest.contracts.find((contract) => contract.tag === 'di-actions');
-const KATANA_ETH = '0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7';
-const paymentToken = STRK_TOKEN_ADDRESS || KATANA_ETH;
+import manifest from './manifest.js'
+import { CHAIN_ID_HEX, RPC_URL, PAYMENT_TOKEN_ADDRESS } from './config.js'
+
+const actionsContract = manifest.contracts.find((contract) => contract.tag === 'di-actions')
+
+if (!actionsContract?.address) {
+  throw new Error('Actions contract not found in manifest (tag: di-actions)')
+}
 
 const controllerOpts = {
-  chains: [{ rpcUrl: 'http://localhost:5050' }],
-  // "KATANA"
-  defaultChainId: '0x4b4154414e41',
+  // Avoid eager iframe mount on page load (Firefox tracking/cookie settings can
+  // make this fail early). We'll mount when the user clicks "Connect".
+  lazyload: true,
+  chains: [{ rpcUrl: RPC_URL }],
+  defaultChainId: CHAIN_ID_HEX,
   policies: {
     contracts: {
       [actionsContract.address]: {
@@ -38,7 +42,7 @@ const controllerOpts = {
           },
         ],
       },
-      [paymentToken]: {
+      [PAYMENT_TOKEN_ADDRESS]: {
         name: 'Payment Token',
         description: 'Token used to pay for paid posts',
         methods: [
@@ -56,6 +60,6 @@ const controllerOpts = {
       },
     },
   },
-};
+}
 
-export default controllerOpts;
+export default controllerOpts
