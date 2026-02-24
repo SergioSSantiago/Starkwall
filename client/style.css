@@ -471,3 +471,41 @@
 .sale-price-input::-webkit-inner-spin-button {
   opacity: 1;
 }
+
+
+/* Mobile: keep controls visible (wrap into bottom bar) */
+@media (max-width: 640px) {
+  #controls {
+    top: auto;
+    right: 12px;
+    left: 12px;
+    bottom: 12px;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px;
+    background: rgba(10, 10, 10, 0.65);
+    border: 1px solid #333;
+    border-radius: 12px;
+    z-index: 900; /* above canvas, below modal */
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+
+  #controls button {
+    flex: 1 1 calc(50% - 8px);
+    padding: 10px 12px;
+    font-size: 13px;
+    border-radius: 10px;
+  }
+
+  #wallet-info {
+    order: 10;
+    flex: 1 1 100%;
+    width: 100%;
+    padding: 8px 12px;
+    text-align: right;
+  }
+}
