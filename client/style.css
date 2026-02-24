@@ -433,3 +433,41 @@
     opacity: 1;
     transform: translateX(-50%) translateY(0);
   }
+
+.sale-price-row {
+  margin-top: 12px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid #333;
+  border-radius: 8px;
+}
+
+.sale-price-label {
+  display: block;
+  font-size: 13px;
+  color: #ccc;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.sale-price-input {
+  width: 100%;
+  background: #0f0f0f;
+  border: 1px solid #444;
+  color: #fff;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.sale-price-input:focus {
+  outline: none;
+  border-color: #4CAF50;
+  box-shadow: 0 0 0 2px rgba(76, 175, 80, 0.15);
+}
+
+.sale-price-input::-webkit-outer-spin-button,
+.sale-price-input::-webkit-inner-spin-button {
+  opacity: 1;
+}

@@ -83,8 +83,13 @@
         <h2>Post Details</h2>
         <div id="postDetailsContent">
           <p><strong>Creator:</strong> <span id="postCreator"></span></p>
+          <p><strong>Current owner:</strong> <span id="postCurrentOwner"></span></p>
           <p><strong>Caption:</strong> <span id="postCaption"></span></p>
           <p id="postSaleInfo"></p>
+          <div id="salePriceRow" class="sale-price-row" style="display: none;">
+            <label for="salePriceInput" class="sale-price-label">Sale price (STRK)</label>
+            <input type="number" id="salePriceInput" class="sale-price-input" min="1" step="1" value="10" />
+          </div>
         </div>
         <div id="postDetailsButtons" class="modal-buttons">
           <button type="button" id="sellPostBtn" style="display: none;">💰 Sell Post</button>

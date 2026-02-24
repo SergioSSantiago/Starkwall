@@ -593,6 +593,8 @@ function setupPostDetailsHandlers() {
   const sellPostBtn = document.getElementById('sellPostBtn')
   const removeSaleBtn = document.getElementById('removeSaleBtn')
   const buyPostBtn = document.getElementById('buyPostBtn')
+  const salePriceInput = document.getElementById('salePriceInput')
+  const salePriceRow = document.getElementById('salePriceRow')
 
   let currentPost = null
 
@@ -611,12 +613,9 @@ function setupPostDetailsHandlers() {
   sellPostBtn.addEventListener('click', async () => {
     if (!currentPost) return
 
-    const priceStr = prompt('Enter sale price (in STRK):', '10')
-    if (!priceStr) return
-
-    const price = parseInt(priceStr)
+    const price = parseInt(salePriceInput?.value || '0')
     if (isNaN(price) || price <= 0) {
-      alert('Invalid price')
+      alert('Invalid price. Enter a number greater than 0.')
       return
     }
 
@@ -716,10 +715,13 @@ function showPostDetails(post) {
   const postDetailsModal = document.getElementById('postDetailsModal')
   const postCreator = document.getElementById('postCreator')
   const postCaption = document.getElementById('postCaption')
+  const postCurrentOwner = document.getElementById('postCurrentOwner')
   const postSaleInfo = document.getElementById('postSaleInfo')
   const sellPostBtn = document.getElementById('sellPostBtn')
   const removeSaleBtn = document.getElementById('removeSaleBtn')
   const buyPostBtn = document.getElementById('buyPostBtn')
+  const salePriceInput = document.getElementById('salePriceInput')
+  const salePriceRow = document.getElementById('salePriceRow')
 
   // Set current post
   window.postDetailsHandlers.setCurrentPost(post)
@@ -727,6 +729,34 @@ function showPostDetails(post) {
   // Update content
   postCreator.textContent = post.creator_username || 'Unknown'
   postCaption.textContent = post.caption || 'No caption'
+
+  const normalizeLocalAddress = (addr) => {
+    if (!addr) return ''
+    let addrStr = addr.toString().toLowerCase()
+    if (addrStr.startsWith('0x')) addrStr = addrStr.slice(2)
+    addrStr = addrStr.replace(/^0+/, '')
+    return '0x' + addrStr
+  }
+
+  const ownerRaw = post.current_owner ? String(post.current_owner) : ''
+  const ownerShort = ownerRaw
+    ? ownerRaw.slice(0, 8) + '...' + ownerRaw.slice(-6)
+    : 'Unknown'
+
+  const ownerNormalized = normalizeLocalAddress(ownerRaw)
+  let ownerDisplay = ownerShort
+
+  // Try to resolve current owner username from known posts (created_by -> creator_username).
+  const ownerProfilePost = postManager?.posts?.find((p) =>
+    normalizeLocalAddress(p.created_by) === ownerNormalized && p.creator_username
+  )
+  if (ownerProfilePost?.creator_username) {
+    ownerDisplay = ownerProfilePost.creator_username
+  } else if (normalizeLocalAddress(currentAccount?.address) === ownerNormalized && currentUsername) {
+    ownerDisplay = currentUsername
+  }
+
+  if (postCurrentOwner) postCurrentOwner.textContent = ownerDisplay
 
   // Normalize addresses for comparison (convert to lowercase hex strings and remove leading zeros)
   const normalizeAddress = (addr) => {
@@ -762,6 +792,7 @@ function showPostDetails(post) {
   sellPostBtn.style.display = 'none'
   removeSaleBtn.style.display = 'none'
   buyPostBtn.style.display = 'none'
+  if (salePriceRow) salePriceRow.style.display = 'none'
 
   if (post.sale_price > 0) {
     postSaleInfo.innerHTML = `<strong>💰 FOR SALE:</strong> ${post.sale_price} STRK`
@@ -779,6 +810,8 @@ function showPostDetails(post) {
     if (isOwner) {
       console.log('✅ Showing sell button for owned post')
       sellPostBtn.style.display = 'inline-block'
+      if (salePriceRow) salePriceRow.style.display = 'block'
+      if (salePriceInput && !salePriceInput.value) salePriceInput.value = '10'
     } else {
       console.log('❌ Not owner - buttons hidden')
     }
