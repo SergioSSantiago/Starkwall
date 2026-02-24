@@ -220,7 +220,54 @@ export class PostManager {
         
         return newPost;
       } catch (error) {
+        const msg = String(error?.message || error || '')
         console.error('❌ Error creating post on-chain:', error);
+
+        // Cartridge Controller can sometimes report a failed deploy step even when the
+        // post creation actually succeeded (e.g. 'contract already deployed at address').
+        // Avoid a false-negative error: resync from Torii and see if the post exists.
+        if (msg.toLowerCase().includes('already deployed at address')) {
+          console.warn('Detected already-deployed controller error; resyncing from Torii...')
+
+          if (typeof onSuccess === 'function') {
+            setTimeout(() => {
+              try { onSuccess(); } catch (e) { console.error('onSuccess callback error:', e); }
+            }, 0);
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, 6000));
+          await this.loadPosts();
+          await this.loadImages();
+          this.canvas.setPosts(this.posts);
+
+          const newPost =
+            this.posts.find((p) =>
+              Number(p.x_position) === Number(position.x) &&
+              Number(p.y_position) === Number(position.y) &&
+              Number(p.size) === Number(size)
+            ) ||
+            this.posts.find((p) =>
+              Number(p.x_position) === Number(position.x) &&
+              Number(p.y_position) === Number(position.y)
+            ) ||
+            null;
+
+          if (newPost) {
+            console.log('✅ Post found after resync:', newPost.id);
+            const centerX = newPost.x_position + this.canvas.postWidth / 2;
+            const centerY = newPost.y_position + this.canvas.postHeight / 2;
+            this.canvas.centerOn(centerX, centerY, 0.8);
+            this.canvas.highlightPost(newPost.id, 3000);
+            if (typeof globalThis.showToast === 'function') {
+              globalThis.showToast('Post creado (sincronizado)');
+            }
+            return newPost;
+          }
+
+          alert('El post puede haberse creado. Si no lo ves, espera unos segundos y recarga.');
+          return null;
+        }
+
         alert('Failed to create post: ' + (error.message || 'Unknown error'));
         throw error;
       }
