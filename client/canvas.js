@@ -14,7 +14,8 @@ export class InfiniteCanvas {
         zoom: 0.3
       }
   
-      this.minZoom = 0.1
+      // Allow further zoom-out to view larger areas of the canvas at once.
+      this.minZoom = 0.02
       this.maxZoom = 1.0
   
       // Pan state

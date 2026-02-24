@@ -326,7 +326,6 @@ function setupUIHandlers() {
 
   const addPostBtn = document.getElementById('addPost')
   const addPaidPostBtn = document.getElementById('addPaidPost')
-  const resetViewBtn = document.getElementById('resetView')
   const cancelPostBtn = document.getElementById('cancelPost')
 
   function updatePaidPriceLabel() {
@@ -535,16 +534,6 @@ function setupUIHandlers() {
       submitPostBtn.textContent = isPaid ? `Create Paid Post (${PostManager.getPriceForPaidPost(size)} STRK)` : 'Create Post'
     }
   })
-
-  resetViewBtn.addEventListener('click', () => {
-    if (postManager.posts.length > 0) {
-      const firstPost = postManager.posts[0]
-      canvas.centerOn(firstPost.x_position, firstPost.y_position, 0.3)
-    } else {
-      canvas.centerOn(0, 0, 0.3)
-    }
-  })
-
   const faucetBtn = document.getElementById('faucet-btn')
   if (faucetBtn) faucetBtn.addEventListener('click', async () => {
     if (!currentAccount) return
