@@ -152,6 +152,7 @@
   
   .modal-content input[type="text"],
   .modal-content input[type="url"],
+  .modal-content input[type="datetime-local"],
   .modal-content textarea {
     background: #0a0a0a;
     border: 1px solid #333;
@@ -316,7 +317,8 @@
     margin-bottom: 12px;
   }
   
-  #webcamVideo {
+  #webcamVideo,
+  #wonSlotWebcamVideo {
     width: 100%;
     max-height: 360px;
     background: #000;
@@ -575,4 +577,12 @@
     padding: 8px 12px;
     text-align: right;
   }
+}
+
+
+#postAuctionInfo {
+  margin-top: 10px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #9ecbff;
 }

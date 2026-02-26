@@ -40,6 +40,26 @@ const controllerOpts = {
             entrypoint: 'buy_post',
             description: 'Buy a post that is for sale',
           },
+          {
+            name: 'Create Auction 3x3',
+            entrypoint: 'create_auction_post_3x3',
+            description: 'Create a 3x3 auction post',
+          },
+          {
+            name: 'Place Bid',
+            entrypoint: 'place_bid',
+            description: 'Place bid on auction slot',
+          },
+          {
+            name: 'Finalize Auction Slot',
+            entrypoint: 'finalize_auction_slot',
+            description: 'Finalize auction slot after end time',
+          },
+          {
+            name: 'Set Won Slot Content',
+            entrypoint: 'set_won_slot_content',
+            description: 'Winner sets image and caption for finalized auction slot',
+          },
         ],
       },
       [PAYMENT_TOKEN_ADDRESS]: {

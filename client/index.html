@@ -27,6 +27,7 @@
     <div id="controls" style="display: none;">
       <button id="addPost">Add Post</button>
       <button id="addPaidPost">Add Paid Post</button>
+      <button id="addAuctionPost">Create Auction Post</button>
       <div id="wallet-info"></div>
       <button id="faucet-btn" type="button" title="Obtener 1000 STRK para desarrollo">💧 Obtener STRK</button>
       <button id="logout-btn" type="button">Logout</button>
@@ -61,6 +62,12 @@
             </div>
             <p id="paidPostPrice" class="paid-price">1 STRK</p>
           </div>
+          <div id="auctionPostOptions" class="paid-post-options" style="display: none;">
+            <label for="auctionEndAt">Auction end date/time</label>
+            <input type="datetime-local" id="auctionEndAt" />
+            <p id="auctionEndPreview" class="photo-hint">Displayed in your local timezone and UTC.</p>
+            <p class="photo-hint">Creates a 3x3 auction layout: your center post plus 8 surrounding bid slots.</p>
+          </div>
           <label>
             Caption:
             <textarea id="caption" placeholder="Escribe un pie de foto..." maxlength="200"></textarea>
@@ -68,6 +75,7 @@
           <input type="hidden" id="imageDataUrl" value="" />
           <input type="hidden" id="postSize" value="1" />
           <input type="hidden" id="isPaid" value="false" />
+          <input type="hidden" id="isAuction" value="false" />
           <div class="modal-buttons">
             <button type="submit" id="submitPostBtn" disabled>Create Post</button>
             <button type="button" id="cancelPost">Cancel</button>
@@ -84,6 +92,11 @@
           <p><strong>Current owner:</strong> <span id="postCurrentOwner"></span></p>
           <p><strong>Caption:</strong> <span id="postCaption"></span></p>
           <p id="postSaleInfo"></p>
+          <p id="postAuctionInfo" style="display: none;"></p>
+          <div id="auctionBidRow" class="sale-price-row" style="display: none;">
+            <label for="auctionBidInput" class="sale-price-label">Your bid (STRK)</label>
+            <input type="number" id="auctionBidInput" class="sale-price-input" min="1" step="1" value="1" />
+          </div>
           <div id="salePriceRow" class="sale-price-row" style="display: none;">
             <label for="salePriceInput" class="sale-price-label">Sale price (STRK)</label>
             <input type="number" id="salePriceInput" class="sale-price-input" min="1" step="1" value="10" />
@@ -93,7 +106,31 @@
           <button type="button" id="sellPostBtn" style="display: none;">💰 Sell Post</button>
           <button type="button" id="removeSaleBtn" style="display: none;">❌ Remove from Sale</button>
           <button type="button" id="buyPostBtn" style="display: none;">🛒 Buy Post</button>
+          <button type="button" id="placeBidBtn" style="display: none;">🏷️ Place Bid</button>
+          <button type="button" id="initializeSlotContentBtn" style="display: none;">🖼️ Publish Won Slot</button>
           <button type="button" id="closePostDetails">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="wonSlotModal" class="modal">
+      <div class="modal-content">
+        <h2>Publish Won Slot</h2>
+        <p class="webcam-hint">Choose image source, write final caption, and publish once.</p>
+        <div class="photo-actions" style="justify-content: flex-start; margin-bottom: 12px;">
+          <button type="button" id="wonSlotCameraBtn" class="btn-photo">📷 Camera</button>
+          <button type="button" id="wonSlotGalleryBtn" class="btn-photo">🖼️ Gallery</button>
+        </div>
+        <div id="wonSlotPreview" class="photo-preview" style="display: none; min-height: 160px; margin-bottom: 12px;">
+          <img id="wonSlotPreviewImg" alt="Won slot preview" />
+        </div>
+        <label>
+          Final caption
+          <textarea id="wonSlotCaptionInput" placeholder="Write your final caption..." maxlength="200"></textarea>
+        </label>
+        <div class="modal-buttons">
+          <button type="button" id="wonSlotPublishBtn" disabled>Publish</button>
+          <button type="button" id="wonSlotCancelBtn">Cancel</button>
         </div>
       </div>
     </div>
@@ -110,7 +147,22 @@
       </div>
     </div>
 
+    <div id="wonSlotWebcamModal" class="modal webcam-modal">
+      <div class="modal-content webcam-content">
+        <h2>Capture Won Slot Photo</h2>
+        <p class="webcam-hint">Allow camera access to take the final slot image.</p>
+        <video id="wonSlotWebcamVideo" autoplay playsinline muted></video>
+        <div class="webcam-buttons">
+          <button type="button" id="wonSlotWebcamCapture" class="btn-photo">📸 Capture</button>
+          <button type="button" id="wonSlotWebcamCancel" class="btn-photo btn-cancel">Cancel</button>
+        </div>
+      </div>
+    </div>
+
     <div id="toast" class="toast"></div>
+
+    <input type="file" id="wonSlotImagePicker" accept="image/*" style="display: none;" />
+    <input type="file" id="wonSlotCameraPicker" accept="image/*" capture="environment" style="display: none;" />
 
     <script type="module" src="./main.js"></script>
   </body>

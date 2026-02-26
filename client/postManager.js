@@ -99,8 +99,28 @@ export class PostManager {
   async loadImages() {
     const imagePromises = this.posts.map(post => {
       return new Promise((resolve) => {
-        if (this.imageCache.has(post.image_url)) {
-          post.imageElement = this.imageCache.get(post.image_url)
+        const isAuctionSlot = Number(post.post_kind) === 2
+        const hasSlotState = Boolean(post.auction_slot)
+        const isFinalizedSlot = Boolean(post.auction_slot?.finalized)
+
+        // Only force placeholder when slot state explicitly says "not finalized".
+        // If slot state is temporarily missing, allow media loading from Post data.
+        if (isAuctionSlot && hasSlotState && !isFinalizedSlot) {
+          post.imageElement = null
+          resolve()
+          return
+        }
+
+        const imageUrl = String(post.image_url || '')
+        const isLoadableUrl = imageUrl.startsWith('http://') || imageUrl.startsWith('https://') || imageUrl.startsWith('data:image/')
+        if (!isLoadableUrl) {
+          post.imageElement = null
+          resolve()
+          return
+        }
+
+        if (this.imageCache.has(imageUrl)) {
+          post.imageElement = this.imageCache.get(imageUrl)
           resolve()
           return
         }
@@ -109,15 +129,16 @@ export class PostManager {
         img.crossOrigin = 'anonymous'
         img.onload = () => {
           post.imageElement = img
-          this.imageCache.set(post.image_url, img)
+          this.imageCache.set(imageUrl, img)
           this.canvas.render()
           resolve()
         }
         img.onerror = () => {
-          console.error('Failed to load image:', post.image_url)
+          console.error('Failed to load image:', imageUrl)
+          post.imageElement = null
           resolve()
         }
-        img.src = post.image_url
+        img.src = imageUrl
       })
     })
 
@@ -134,6 +155,11 @@ export class PostManager {
   }
 
   async createPost(imageUrl, caption, creatorUsername, size = 1, isPaid = false, onSuccess = null) {
+    // Refresh local state before picking a position to avoid overlaps from stale data.
+    if (this.useDojo) {
+      await this.loadPosts()
+    }
+
     // Position: always random among adjacent slots (free and paid). Only size is chosen for paid.
     let position
 
@@ -318,6 +344,73 @@ export class PostManager {
 
       if (typeof onSuccess === 'function') onSuccess()
       return newPost
+    }
+  }
+
+
+  async createAuctionPost(imageUrl, caption, creatorUsername, endTimeUnix, onSuccess = null) {
+    // Always re-sync before selecting the 3x3 block to prevent stale overlaps.
+    await this.loadPosts()
+
+    let blockTopLeft
+
+    if (this.posts.length === 0) {
+      blockTopLeft = { x: 0, y: 0 }
+    } else {
+      blockTopLeft = this.getAdjacentPosition(3)
+      if (!blockTopLeft) {
+        throw new Error('No available adjacent space for a 3x3 auction post.')
+      }
+    }
+
+    // Contract expects center coordinates; getAdjacentPosition(3) returns top-left of the 3x3 block.
+    const centerPosition = {
+      x: blockTopLeft.x + this.canvas.postWidth,
+      y: blockTopLeft.y + this.canvas.postHeight,
+    }
+
+    if (!this.useDojo) {
+      throw new Error('Auction posts require Dojo mode')
+    }
+
+    try {
+      const tx = await this.dojoManager.createAuctionPost3x3(
+        imageUrl,
+        caption,
+        creatorUsername,
+        centerPosition.x,
+        centerPosition.y,
+        endTimeUnix,
+      )
+
+      if (typeof onSuccess === 'function') {
+        setTimeout(() => {
+          try { onSuccess() } catch (e) { console.error('onSuccess callback error:', e) }
+        }, 0)
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 6000))
+      await this.loadPosts()
+      await this.loadImages()
+      this.canvas.setPosts(this.posts)
+
+      const centerPost = this.posts.find((p) =>
+        Number(p.x_position) === Number(centerPosition.x) &&
+        Number(p.y_position) === Number(centerPosition.y) &&
+        Number(p.post_kind) === 1
+      )
+
+      if (centerPost) {
+        const centerX = centerPost.x_position + this.canvas.postWidth / 2
+        const centerY = centerPost.y_position + this.canvas.postHeight / 2
+        this.canvas.centerOn(centerX, centerY, 0.8)
+        this.canvas.highlightPost(centerPost.id, 3000)
+      }
+
+      return tx
+    } catch (error) {
+      console.error('❌ Error creating auction post on-chain:', error)
+      throw error
     }
   }
 

@@ -292,6 +292,12 @@ export class InfiniteCanvas {
       const screen = this.worldToScreen(post.x_position, post.y_position)
       const screenWidth = width * this.camera.zoom
       const screenHeight = height * this.camera.zoom
+
+      const isAuctionSlot = Number(post.post_kind) === 2
+      const hasSlotState = Boolean(post.auction_slot)
+      const isFinalizedSlot = Boolean(post.auction_slot?.finalized)
+      // Show slot placeholder only when we explicitly know slot is still active.
+      const showAuctionPlaceholder = isAuctionSlot && hasSlotState && !isFinalizedSlot
   
       // Check if post is visible
       if (screen.x + screenWidth < 0 || screen.x > this.canvas.width ||
@@ -303,8 +309,10 @@ export class InfiniteCanvas {
       this.ctx.fillStyle = '#1a1a1a'
       this.ctx.fillRect(screen.x, screen.y, screenWidth, screenHeight)
   
-      // Draw border (green if for sale, gold if paid, default gray)
-      if (post.sale_price > 0) {
+      // Draw border (blue for active auction slots, green if for sale, gold if paid, default gray)
+      if (showAuctionPlaceholder) {
+        this.ctx.strokeStyle = '#38b6ff'
+      } else if (post.sale_price > 0) {
         this.ctx.strokeStyle = '#4CAF50' // Green for sale
       } else if (post.is_paid) {
         this.ctx.strokeStyle = '#FFD700' // Gold for paid
@@ -315,7 +323,7 @@ export class InfiniteCanvas {
       this.ctx.strokeRect(screen.x, screen.y, screenWidth, screenHeight)
   
       // Draw image if available and loaded
-      if (post.imageElement && post.imageElement.complete) {
+      if (!showAuctionPlaceholder && post.imageElement && post.imageElement.complete) {
         // Save context state and clip to post boundaries
         this.ctx.save()
         this.ctx.beginPath()
@@ -430,8 +438,27 @@ export class InfiniteCanvas {
         // Draw placeholder
         this.ctx.fillStyle = '#2a2a2a'
         this.ctx.fillRect(screen.x + 10, screen.y + 10, screenWidth - 20, screenHeight - 20)
-  
-        if (this.camera.zoom > 0.2) {
+
+        if (showAuctionPlaceholder) {
+          const highest = Number(post.auction_slot?.highest_bid || 0)
+          const endTs = Number(post.auction_group?.end_time || 0)
+          const now = Math.floor(Date.now() / 1000)
+          const remaining = Math.max(0, endTs - now)
+          const h = Math.floor(remaining / 3600)
+          const m = Math.floor((remaining % 3600) / 60)
+
+          if (this.camera.zoom > 0.18) {
+            this.ctx.fillStyle = '#9ecbff'
+            this.ctx.textAlign = 'center'
+            this.ctx.font = `bold ${16 * this.camera.zoom}px sans-serif`
+            this.ctx.fillText('AUCTION SLOT', screen.x + screenWidth / 2, screen.y + 70 * this.camera.zoom)
+
+            this.ctx.font = `${13 * this.camera.zoom}px sans-serif`
+            this.ctx.fillText(`Highest: ${highest} STRK`, screen.x + screenWidth / 2, screen.y + 105 * this.camera.zoom)
+            this.ctx.fillText(`Ends in: ${h}h ${m}m`, screen.x + screenWidth / 2, screen.y + 128 * this.camera.zoom)
+            this.ctx.textAlign = 'left'
+          }
+        } else if (this.camera.zoom > 0.2) {
           this.ctx.fillStyle = '#666'
           this.ctx.font = `${16 * this.camera.zoom}px sans-serif`
           this.ctx.textAlign = 'center'

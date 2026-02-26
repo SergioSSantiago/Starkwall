@@ -5,6 +5,10 @@ import { RpcProvider } from 'starknet';
 
 const ONE_STRK = 10n ** 18n;
 const PAID_POST_MULTIPLIER = 4;
+const AUCTION_POST_CREATION_FEE_STRK = 10;
+const POST_KIND_NORMAL = 0;
+const POST_KIND_AUCTION_CENTER = 1;
+const POST_KIND_AUCTION_SLOT = 2;
 
 function getPaidPostPrice(size) {
   if (size < 2) return 0;
@@ -199,6 +203,114 @@ export class DojoManager {
     }
   }
 
+  async createAuctionPost3x3(imageUrl, caption, creatorUsername, centerX, centerY, endTimeUnix) {
+    const imageUrlBytes = stringToByteArray(imageUrl || '');
+    const captionBytes = stringToByteArray(caption || '');
+    const usernameBytes = stringToByteArray(creatorUsername || '');
+
+    const calldata = [
+      ...imageUrlBytes,
+      ...captionBytes,
+      ...usernameBytes,
+      centerX,
+      centerY,
+      Number(endTimeUnix),
+    ];
+
+    const amountWei = BigInt(AUCTION_POST_CREATION_FEE_STRK) * ONE_STRK;
+    const { low, high } = feltToU256(amountWei);
+
+    const tx = await this.account.execute([
+      {
+        contractAddress: PAYMENT_TOKEN_ADDRESS,
+        entrypoint: 'approve',
+        calldata: [this.actionsContract.address, low, high],
+      },
+      {
+        contractAddress: this.actionsContract.address,
+        entrypoint: 'create_auction_post_3x3',
+        calldata,
+      },
+    ]);
+
+    const receipt = await this.account.waitForTransaction(tx.transaction_hash);
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Create auction transaction reverted';
+      throw new Error(reason);
+    }
+
+    return tx;
+  }
+
+  async placeAuctionBid(slotPostId, bidAmountStrk) {
+    const tokenAddr = PAYMENT_TOKEN_ADDRESS;
+    if (!tokenAddr) throw new Error('No token configured.');
+
+    const amountStrk = Number(bidAmountStrk);
+    if (!Number.isFinite(amountStrk) || amountStrk <= 0) throw new Error('Invalid bid amount');
+
+    const amountWei = BigInt(Math.floor(amountStrk)) * ONE_STRK;
+    const { low, high } = feltToU256(amountWei);
+
+    const calls = [
+      {
+        contractAddress: tokenAddr,
+        entrypoint: 'approve',
+        calldata: [this.actionsContract.address, low, high],
+      },
+      {
+        contractAddress: this.actionsContract.address,
+        entrypoint: 'place_bid',
+        calldata: [slotPostId, Math.floor(amountStrk)],
+      },
+    ];
+
+    const tx = await this.account.execute(calls);
+    const receipt = await this.account.waitForTransaction(tx.transaction_hash);
+
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Bid transaction reverted';
+      throw new Error(reason);
+    }
+
+    return tx;
+  }
+
+  async finalizeAuctionSlot(slotPostId) {
+    const tx = await this.account.execute({
+      contractAddress: this.actionsContract.address,
+      entrypoint: 'finalize_auction_slot',
+      calldata: [slotPostId],
+    });
+
+    const receipt = await this.account.waitForTransaction(tx.transaction_hash);
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Finalize auction transaction reverted';
+      throw new Error(reason);
+    }
+
+    return tx;
+  }
+
+  async setWonSlotContent(slotPostId, imageUrl, caption) {
+    const imageUrlBytes = stringToByteArray(imageUrl || '');
+    const captionBytes = stringToByteArray(caption || '');
+
+    const tx = await this.account.execute({
+      contractAddress: this.actionsContract.address,
+      entrypoint: 'set_won_slot_content',
+      calldata: [slotPostId, ...imageUrlBytes, ...captionBytes],
+    });
+
+    const receipt = await this.account.waitForTransaction(tx.transaction_hash);
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Set slot content transaction reverted';
+      throw new Error(reason);
+    }
+
+    return tx;
+  }
+
   /**
    * Query all posts from Torii
    * @returns {Promise<Array>} - Array of post objects
@@ -247,7 +359,30 @@ export class DojoManager {
         return [];
       }
 
-      const posts = this.parseSDKEntities(entities.items);
+      // Query auction models too; they are not guaranteed to be included in Post envelopes.
+      let slotItems = [];
+      let groupItems = [];
+
+      try {
+        const slotQuery = new ToriiQueryBuilder()
+          .withClause(KeysClause(['di-AuctionSlot'], [], 'VariableLen').build());
+        const slotEntities = await this.toriiClient.getEntities({ query: slotQuery });
+        slotItems = slotEntities?.items || [];
+      } catch (e) {
+        console.warn('⚠️ AuctionSlot query failed:', e?.message || e);
+      }
+
+      try {
+        const groupQuery = new ToriiQueryBuilder()
+          .withClause(KeysClause(['di-AuctionGroup'], [], 'VariableLen').build());
+        const groupEntities = await this.toriiClient.getEntities({ query: groupQuery });
+        groupItems = groupEntities?.items || [];
+      } catch (e) {
+        console.warn('⚠️ AuctionGroup query failed:', e?.message || e);
+      }
+
+      const mergedItems = [...entities.items, ...slotItems, ...groupItems];
+      const posts = this.parseSDKEntities(mergedItems);
       console.log(`✅ Parsed ${posts.length} posts`);
       
       return posts;
@@ -273,71 +408,88 @@ export class DojoManager {
    * @returns {Array} - Parsed post objects
    */
   parseSDKEntities(items) {
-    console.log('🔍 Parsing SDK entities...');
-    console.log('  Items count:', items.length);
-    
     const posts = [];
+    const slotByPostId = new Map();
+    const groupById = new Map();
 
-    items.forEach((entity, index) => {
-      console.log(`  Processing item ${index}:`, entity);
-      
-      // SDK format: entity.models.di.Post
-      const postData = entity.models?.di?.Post;
-      
-      if (postData) {
-        console.log('    ✓ Found Post model:', postData);
-        console.log('    📊 sale_price raw data:', postData.sale_price);
-        
-        // Parse u128 sale_price (might be an object with low/high, a string, or a direct value)
-        let salePrice = 0;
-        if (postData.sale_price !== undefined && postData.sale_price !== null) {
-          const rawPrice = postData.sale_price;
-          
-          if (typeof rawPrice === 'object' && rawPrice !== null) {
-            // u128 might be split into low and high parts
-            if ('low' in rawPrice) {
-              salePrice = Number(rawPrice.low);
-              console.log('    💰 Parsed sale_price from u128.low:', salePrice);
-            } else if ('0' in rawPrice) {
-              // Sometimes stored as array-like object
-              salePrice = Number(rawPrice['0']);
-              console.log('    💰 Parsed sale_price from index 0:', salePrice);
-            } else {
-              console.log('    ⚠️ Unknown u128 object format:', rawPrice);
-              salePrice = 0;
-            }
-          } else {
-            // Direct value (number or string)
-            salePrice = Number(rawPrice);
-            console.log('    💰 Parsed sale_price directly:', salePrice, 'from type:', typeof rawPrice);
-          }
-        } else {
-          console.log('    💰 sale_price is null/undefined, defaulting to 0');
+    // First pass: collect AuctionSlot and AuctionGroup models from entity envelopes.
+    items.forEach((entity) => {
+      const slot = entity.models?.di?.AuctionSlot;
+      if (slot) {
+        const slotPostId = Number(slot.slot_post_id ?? slot.slotPostId ?? slot.slot_post ?? 0);
+        if (slotPostId > 0) {
+          slotByPostId.set(slotPostId, {
+            slot_post_id: slotPostId,
+            group_id: Number(slot.group_id ?? 0),
+            highest_bid: Number(slot.highest_bid ?? 0),
+            highest_bidder: slot.highest_bidder || null,
+            has_bid: Boolean(slot.has_bid),
+            finalized: Boolean(slot.finalized),
+            content_initialized: Boolean(slot.content_initialized),
+          });
         }
-        
-        const post = {
-          id: Number(postData.id),
-          image_url: this.byteArrayToString(postData.image_url),
-          caption: this.byteArrayToString(postData.caption),
-          x_position: Number(postData.x_position),
-          y_position: Number(postData.y_position),
-          size: Number(postData.size || 1),
-          is_paid: Boolean(postData.is_paid),
-          created_at: new Date(Number(postData.created_at) * 1000).toISOString(),
-          created_by: postData.created_by,
-          creator_username: this.byteArrayToString(postData.creator_username),
-          current_owner: postData.current_owner,
-          sale_price: salePrice,
-        };
-        
-        console.log('    ✅ Parsed post:', post);
-        posts.push(post);
-      } else {
-        console.log('    ✗ No Post model, available models:', entity.models);
+      }
+
+      const group = entity.models?.di?.AuctionGroup;
+      if (group) {
+        const groupId = Number(group.group_id ?? 0);
+        if (groupId > 0) {
+          groupById.set(groupId, {
+            group_id: groupId,
+            center_post_id: Number(group.center_post_id ?? 0),
+            creator: group.creator || null,
+            end_time: Number(group.end_time ?? 0),
+            active: Boolean(group.active),
+          });
+        }
       }
     });
 
-    console.log(`📊 Total posts parsed: ${posts.length}`);
+    // Second pass: parse Post models and attach auction metadata.
+    items.forEach((entity) => {
+      const postData = entity.models?.di?.Post;
+      if (!postData) return;
+
+      let salePrice = 0;
+      if (postData.sale_price !== undefined && postData.sale_price !== null) {
+        const rawPrice = postData.sale_price;
+        if (typeof rawPrice === 'object' && rawPrice !== null) {
+          if ('low' in rawPrice) salePrice = Number(rawPrice.low);
+          else if ('0' in rawPrice) salePrice = Number(rawPrice['0']);
+        } else {
+          salePrice = Number(rawPrice);
+        }
+      }
+
+      const postId = Number(postData.id);
+      const postKind = Number(postData.post_kind ?? POST_KIND_NORMAL);
+      const auctionGroupId = Number(postData.auction_group_id ?? 0);
+      const auctionSlotIndex = Number(postData.auction_slot_index ?? 0);
+
+      const slot = slotByPostId.get(postId) || null;
+      const group = auctionGroupId > 0 ? (groupById.get(auctionGroupId) || null) : null;
+
+      posts.push({
+        id: postId,
+        image_url: this.byteArrayToString(postData.image_url),
+        caption: this.byteArrayToString(postData.caption),
+        x_position: Number(postData.x_position),
+        y_position: Number(postData.y_position),
+        size: Number(postData.size || 1),
+        is_paid: Boolean(postData.is_paid),
+        created_at: new Date(Number(postData.created_at) * 1000).toISOString(),
+        created_by: postData.created_by,
+        creator_username: this.byteArrayToString(postData.creator_username),
+        current_owner: postData.current_owner,
+        sale_price: salePrice,
+        post_kind: postKind,
+        auction_group_id: auctionGroupId,
+        auction_slot_index: auctionSlotIndex,
+        auction_slot: slot,
+        auction_group: group,
+      });
+    });
+
     return posts;
   }
 
