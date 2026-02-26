@@ -416,41 +416,16 @@
     min-height: 24px;
   }
   
-  #requirements {
-    margin-top: 60px;
-    padding: 30px;
-    background: #1a1a1a;
-    border: 1px solid #333;
-    border-radius: 12px;
-    max-width: 500px;
-  }
-  
-  #requirements h3 {
-    color: #fff;
-    margin-bottom: 15px;
-    font-size: 18px;
-  }
-  
-  #requirements ul {
-    list-style: none;
-    padding: 0;
-    text-align: left;
-  }
-  
-  #requirements li {
-    color: #aaa;
-    padding: 8px 0;
-    padding-left: 30px;
-    position: relative;
+  .branding-note {
+    margin-top: 28px;
+    padding: 14px 18px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid #2e2e2e;
+    border-radius: 10px;
+    max-width: 560px;
     font-size: 14px;
-  }
-  
-  #requirements li:before {
-    content: '✓';
-    position: absolute;
-    left: 0;
-    color: #4CAF50;
-    font-weight: bold;
+    color: #9aa0a6;
+    line-height: 1.5;
   }
 
   /* Toast notification */
