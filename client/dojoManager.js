@@ -103,6 +103,35 @@ export class DojoManager {
     return tx;
   }
 
+  async sendStrk(recipientAddress, amountStrk) {
+    const tokenAddr = PAYMENT_TOKEN_ADDRESS;
+    if (!tokenAddr) throw new Error('No token configured.');
+
+    const recipient = String(recipientAddress || '').trim();
+    if (!recipient.startsWith('0x')) throw new Error('Invalid recipient address.');
+
+    const amountNum = Number(amountStrk);
+    if (!Number.isFinite(amountNum) || amountNum <= 0) throw new Error('Invalid amount.');
+
+    const amountWei = BigInt(Math.floor(amountNum * 1_000_000)) * (ONE_STRK / 1_000_000n);
+    if (amountWei <= 0n) throw new Error('Amount too small.');
+
+    const { low, high } = feltToU256(amountWei);
+    const tx = await this.account.execute({
+      contractAddress: tokenAddr,
+      entrypoint: 'transfer',
+      calldata: [recipient, low, high],
+    });
+
+    const receipt = await this.account.waitForTransaction(tx.transaction_hash);
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Token transfer reverted';
+      throw new Error(reason);
+    }
+
+    return tx;
+  }
+
   /**
    * Create a post on-chain
    * @param {string} imageUrl - URL of the image

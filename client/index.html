@@ -28,6 +28,7 @@
       <button id="addPost">Add Post</button>
       <button id="addPaidPost">Add Paid Post</button>
       <button id="addAuctionPost">Create Auction Post</button>
+      <button id="sendStrkBtn" type="button">Send STRK</button>
       <div id="wallet-info"></div>
       <button id="faucet-btn" type="button" title="Obtener 1000 STRK para desarrollo">💧 Obtener STRK</button>
       <button id="logout-btn" type="button">Logout</button>
@@ -79,6 +80,26 @@
           <div class="modal-buttons">
             <button type="submit" id="submitPostBtn" disabled>Create Post</button>
             <button type="button" id="cancelPost">Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div id="sendStrkModal" class="modal">
+      <div class="modal-content">
+        <h2>Send STRK</h2>
+        <form id="sendStrkForm">
+          <label>
+            Recipient wallet
+            <input type="text" id="sendStrkRecipient" placeholder="0x..." required />
+          </label>
+          <label>
+            Amount (STRK)
+            <input type="number" id="sendStrkAmount" min="0.000001" step="0.000001" required />
+          </label>
+          <div class="modal-buttons">
+            <button type="submit" id="confirmSendStrkBtn">Send</button>
+            <button type="button" id="cancelSendStrkBtn">Cancel</button>
           </div>
         </form>
       </div>

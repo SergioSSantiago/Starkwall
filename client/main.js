@@ -467,7 +467,15 @@ function setupUIHandlers() {
   const addPostBtn = document.getElementById('addPost')
   const addPaidPostBtn = document.getElementById('addPaidPost')
   const addAuctionPostBtn = document.getElementById('addAuctionPost')
+  const sendStrkBtn = document.getElementById('sendStrkBtn')
   const cancelPostBtn = document.getElementById('cancelPost')
+
+  const sendStrkModal = document.getElementById('sendStrkModal')
+  const sendStrkForm = document.getElementById('sendStrkForm')
+  const sendStrkRecipient = document.getElementById('sendStrkRecipient')
+  const sendStrkAmount = document.getElementById('sendStrkAmount')
+  const cancelSendStrkBtn = document.getElementById('cancelSendStrkBtn')
+  const confirmSendStrkBtn = document.getElementById('confirmSendStrkBtn')
 
   function updatePaidPriceLabel() {
     const size = parseInt(postSizeInput.value) || 2
@@ -627,6 +635,17 @@ function setupUIHandlers() {
     submitPostBtn.disabled = true
   }
 
+  function openSendStrkModal() {
+    if (!sendStrkModal) return
+    sendStrkForm?.reset()
+    sendStrkModal.classList.add('active')
+    setTimeout(() => sendStrkRecipient?.focus(), 0)
+  }
+
+  function closeSendStrkModal() {
+    sendStrkModal?.classList.remove('active')
+  }
+
   document.getElementById('btnWebcam').addEventListener('click', openWebcam)
   btnGallery.addEventListener('click', () => imageFileInput.click())
   imageFileInput.addEventListener('change', (e) => {
@@ -664,6 +683,63 @@ function setupUIHandlers() {
       modal.classList.add('active')
     })
   }
+
+  if (sendStrkBtn) {
+    sendStrkBtn.addEventListener('click', openSendStrkModal)
+  }
+
+  if (cancelSendStrkBtn) {
+    cancelSendStrkBtn.addEventListener('click', closeSendStrkModal)
+  }
+
+  if (sendStrkModal) {
+    sendStrkModal.addEventListener('click', (e) => {
+      if (e.target === sendStrkModal) closeSendStrkModal()
+    })
+  }
+
+  if (sendStrkForm) sendStrkForm.addEventListener('submit', async (e) => {
+    e.preventDefault()
+    if (!dojoManager || !currentAccount) return
+
+    const recipient = String(sendStrkRecipient?.value || '').trim()
+    const amount = Number(sendStrkAmount?.value || 0)
+
+    if (!recipient.startsWith('0x')) {
+      alert('Invalid recipient address. Use 0x...')
+      return
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      alert('Invalid amount.')
+      return
+    }
+
+    const senderBalance = await getChainBalance(currentAccount.address)
+    if (senderBalance < amount) {
+      alert(`Insufficient balance. You have ${senderBalance} STRK and need ${amount} STRK.`)
+      return
+    }
+
+    if (confirmSendStrkBtn) {
+      confirmSendStrkBtn.disabled = true
+      confirmSendStrkBtn.textContent = 'Sending...'
+    }
+
+    try {
+      await dojoManager.sendStrk(recipient, amount)
+      closeSendStrkModal()
+      await updateWalletInfo()
+      showToast(`Sent ${amount} STRK`)
+    } catch (error) {
+      console.error('Send STRK error:', error)
+      alert('Failed to send STRK: ' + (error?.message || 'Unknown error'))
+    } finally {
+      if (confirmSendStrkBtn) {
+        confirmSendStrkBtn.disabled = false
+        confirmSendStrkBtn.textContent = 'Send'
+      }
+    }
+  })
 
   postSizeRadios.forEach((radio) => {
     radio.addEventListener('change', () => {
