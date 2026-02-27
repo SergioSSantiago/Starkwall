@@ -88,6 +88,14 @@
     color: #c9d6e2;
   }
 
+#controls #wallet-logout-btn {
+  min-height: 0;
+  width: 34px;
+  padding: 4px 0;
+  font-size: 14px;
+  text-align: center;
+}
+
   #wallet-info .wallet-address-row {
     display: flex;
     align-items: center;
@@ -856,15 +864,10 @@
     line-height: 1;
   }
 
-  #logout-btn {
-    font-size: 0;
-    min-height: 42px;
-  }
-
-  #logout-btn::before {
-    content: "⎋";
-    font-size: 18px;
-    line-height: 1;
+  #controls #wallet-logout-btn {
+    width: 42px;
+    min-height: 36px;
+    padding: 6px 0;
   }
 
   .owner-feed-header #ownerFeedToCanvasBtn {

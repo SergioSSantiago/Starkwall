@@ -323,31 +323,12 @@ async function unfollowUserLocally(targetAddress) {
 
 let socialRevalidationTimer = null
 
-function updateMobileSocialButtons(followingCount = 0, followersCount = 0) {
-  const mobileFollowingBtn = document.getElementById('mobileFollowingBtn')
-  if (mobileFollowingBtn) mobileFollowingBtn.textContent = `Following ${Number(followingCount) || 0}`
-
-  const mobileFollowersBtn = document.getElementById('mobileFollowersBtn')
-  if (mobileFollowersBtn) mobileFollowersBtn.textContent = `Followers ${Number(followersCount) || 0}`
-}
-
-function syncMobileSocialButtonsFromState() {
-  const me = normalizeSocialAddress(currentAccount?.address)
-  if (!me) {
-    updateMobileSocialButtons(0, 0)
-    return
-  }
-  const { following, followers } = getSocialFollowersFollowing(me)
-  updateMobileSocialButtons(following.length, followers.length)
-}
-
 function scheduleSocialRevalidation(delayMs = 800) {
   if (socialRevalidationTimer) clearTimeout(socialRevalidationTimer)
   socialRevalidationTimer = setTimeout(async () => {
     socialRevalidationTimer = null
     await refreshSocialData().catch(() => {})
     await updateWalletInfo().catch(() => {})
-    syncMobileSocialButtonsFromState()
 
     const followingModal = document.getElementById('followingModal')
     if (followingModal?.classList.contains('active')) {
@@ -470,8 +451,6 @@ async function enterApp(account) {
   connectButton.textContent = '🎮 Connect Wallet'
 
   await updateWalletInfo()
-  const logoutBtn = document.getElementById('logout-btn')
-  if (logoutBtn) logoutBtn.onclick = () => logout()
   console.log('✓ App ready!')
 }
 
@@ -1301,24 +1280,6 @@ function setupUIHandlers() {
 
   // Social modal handlers
   setupSocialModalHandlers()
-
-  const mobileMyFeedBtn = document.getElementById('mobileMyFeedBtn')
-  const mobileFollowingBtn = document.getElementById('mobileFollowingBtn')
-  const mobileFollowersBtn = document.getElementById('mobileFollowersBtn')
-
-  if (mobileMyFeedBtn) {
-    mobileMyFeedBtn.onclick = () => {
-      const me = normalizeSocialAddress(currentAccount?.address)
-      if (!me) return
-      renderOwnerFeed(me, String(currentUsername || '').trim())
-    }
-  }
-  if (mobileFollowingBtn) {
-    mobileFollowingBtn.onclick = async () => { await openFollowingModal() }
-  }
-  if (mobileFollowersBtn) {
-    mobileFollowersBtn.onclick = async () => { await openFollowersModal() }
-  }
 
   // Post details modal handlers
   setupPostDetailsHandlers()
@@ -2554,6 +2515,8 @@ async function updateWalletInfo() {
           <div class="wallet-stats">
             <button id="following-count-btn" class="wallet-stat-btn" type="button">Following ${following.length}</button>
             <button id="followers-count-btn" class="wallet-stat-btn" type="button">Followers ${followers.length}</button>
+            <button id="wallet-my-feed-btn" class="wallet-stat-btn" type="button">My Feed</button>
+            <button id="wallet-logout-btn" class="wallet-stat-btn" type="button" aria-label="Logout">⎋</button>
           </div>
           <div class="wallet-main">
             <span class="wallet-user">● ${currentUsername || shortAddr}</span>
@@ -2589,12 +2552,23 @@ async function updateWalletInfo() {
       followersBtn.onclick = async () => { await openFollowersModal() }
     }
 
-    updateMobileSocialButtons(following.length, followers.length)
+    const myFeedBtn = document.getElementById('wallet-my-feed-btn')
+    if (myFeedBtn) {
+      myFeedBtn.onclick = () => {
+        const me = normalizeSocialAddress(currentAccount?.address)
+        if (!me) return
+        renderOwnerFeed(me, String(currentUsername || '').trim())
+      }
+    }
+
+    const walletLogoutBtn = document.getElementById('wallet-logout-btn')
+    if (walletLogoutBtn) {
+      walletLogoutBtn.onclick = () => logout()
+    }
   } catch (error) {
     console.error('Error updating wallet info:', error)
     const shortAddr = currentAccount ? (String(currentAccount.address).slice(0, 6) + '...' + String(currentAccount.address).slice(-4)) : ''
     walletInfo.innerHTML = `<span style="color: #4CAF50;">● ${currentUsername || shortAddr}</span>`
-    syncMobileSocialButtonsFromState()
   }
 }
 
