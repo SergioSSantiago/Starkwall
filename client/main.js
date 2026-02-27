@@ -2182,15 +2182,29 @@ function renderOwnerFeed(ownerAddress, ownerUsername = '', focusPostId = '', foc
   const normalizedOwner = normalizeSocialAddress(ownerAddress)
   if (!normalizedOwner) return
 
-  const displayName = String(ownerUsername || '').trim() || `${normalizedOwner.slice(0, 8)}...${normalizedOwner.slice(-6)}`
+  if (!socialState.loaded) {
+    ensureSocialDataLoaded()
+      .then(() => {
+        if (activeOwnerFeedAddress === normalizedOwner) {
+          renderOwnerFeed(normalizedOwner, ownerUsername, focusPostId, focusPost)
+        }
+      })
+      .catch(() => {})
+  }
+
+  const knownUsername = String(socialState.usernameByAddress.get(normalizedOwner) || '').trim()
+  const displayName = String(ownerUsername || '').trim() || knownUsername || `${normalizedOwner.slice(0, 8)}...${normalizedOwner.slice(-6)}`
   const ownerPosts = sortPostsNewestFirst(
     dedupePostsById((postManager?.posts || []).filter((post) =>
       normalizeSocialAddress(post?.current_owner) === normalizedOwner
     ))
   )
+  const { following, followers } = getSocialFollowersFollowing(normalizedOwner)
 
-  if (titleEl) titleEl.textContent = `${displayName} · Posts`
-  if (subtitleEl) subtitleEl.textContent = normalizedOwner
+  if (titleEl) titleEl.textContent = displayName
+  if (subtitleEl) {
+    subtitleEl.textContent = `${ownerPosts.length} posts · ${following.length} following · ${followers.length} followers`
+  }
   feedView.classList.add('active')
 
   if (!ownerPosts.length) {
@@ -2482,12 +2496,10 @@ function setupSocialModalHandlers() {
   const closeFollowersBtn = document.getElementById('closeFollowersBtn')
   const closeFollowingBtn = document.getElementById('closeFollowingBtn')
   const closeOwnerFeedBtn = document.getElementById('closeOwnerFeedBtn')
-  const ownerFeedToCanvasBtn = document.getElementById('ownerFeedToCanvasBtn')
 
   closeFollowersBtn?.addEventListener('click', () => closeSocialModalById('followersModal'))
   closeFollowingBtn?.addEventListener('click', () => closeSocialModalById('followingModal'))
   closeOwnerFeedBtn?.addEventListener('click', () => closeOwnerFeedView())
-  ownerFeedToCanvasBtn?.addEventListener('click', () => closeOwnerFeedView())
 
   followersModal?.addEventListener('click', (e) => {
     if (e.target === followersModal) closeSocialModalById('followersModal')
