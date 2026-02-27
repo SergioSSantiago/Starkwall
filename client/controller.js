@@ -8,9 +8,72 @@ import manifest from './manifest.js'
 import { CHAIN_ID_HEX, RPC_URL, PAYMENT_TOKEN_ADDRESS } from './config.js'
 
 const actionsContract = manifest.contracts.find((contract) => contract.tag === 'di-actions')
+const actionsSystems = new Set(actionsContract?.systems || [])
 
 if (!actionsContract?.address) {
   throw new Error('Actions contract not found in manifest (tag: di-actions)')
+}
+
+const actionMethods = [
+  {
+    name: 'Create Post',
+    entrypoint: 'create_post',
+    description: 'Create a new post on the canvas',
+  },
+  {
+    name: 'Set Post Price',
+    entrypoint: 'set_post_price',
+    description: 'Set a price to sell your post',
+  },
+  {
+    name: 'Buy Post',
+    entrypoint: 'buy_post',
+    description: 'Buy a post that is for sale',
+  },
+  {
+    name: 'Create Auction 3x3',
+    entrypoint: 'create_auction_post_3x3',
+    description: 'Create a 3x3 auction post',
+  },
+  {
+    name: 'Place Bid',
+    entrypoint: 'place_bid',
+    description: 'Place bid on auction slot',
+  },
+  {
+    name: 'Finalize Auction Slot',
+    entrypoint: 'finalize_auction_slot',
+    description: 'Finalize auction slot after end time',
+  },
+  {
+    name: 'Set Won Slot Content',
+    entrypoint: 'set_won_slot_content',
+    description: 'Winner sets image and caption for finalized auction slot',
+  },
+]
+
+if (actionsSystems.has('set_profile')) {
+  actionMethods.push({
+    name: 'Set Profile',
+    entrypoint: 'set_profile',
+    description: 'Set on-chain username profile',
+  })
+}
+
+if (actionsSystems.has('follow')) {
+  actionMethods.push({
+    name: 'Follow User',
+    entrypoint: 'follow',
+    description: 'Follow another user on-chain',
+  })
+}
+
+if (actionsSystems.has('unfollow')) {
+  actionMethods.push({
+    name: 'Unfollow User',
+    entrypoint: 'unfollow',
+    description: 'Unfollow another user on-chain',
+  })
 }
 
 const controllerOpts = {
@@ -24,58 +87,7 @@ const controllerOpts = {
       [actionsContract.address]: {
         name: 'Post Actions',
         description: 'Actions contract to create posts',
-        methods: [
-          {
-            name: 'Create Post',
-            entrypoint: 'create_post',
-            description: 'Create a new post on the canvas',
-          },
-          {
-            name: 'Set Post Price',
-            entrypoint: 'set_post_price',
-            description: 'Set a price to sell your post',
-          },
-          {
-            name: 'Buy Post',
-            entrypoint: 'buy_post',
-            description: 'Buy a post that is for sale',
-          },
-          {
-            name: 'Create Auction 3x3',
-            entrypoint: 'create_auction_post_3x3',
-            description: 'Create a 3x3 auction post',
-          },
-          {
-            name: 'Place Bid',
-            entrypoint: 'place_bid',
-            description: 'Place bid on auction slot',
-          },
-          {
-            name: 'Finalize Auction Slot',
-            entrypoint: 'finalize_auction_slot',
-            description: 'Finalize auction slot after end time',
-          },
-          {
-            name: 'Set Won Slot Content',
-            entrypoint: 'set_won_slot_content',
-            description: 'Winner sets image and caption for finalized auction slot',
-          },
-          {
-            name: 'Set Profile',
-            entrypoint: 'set_profile',
-            description: 'Set on-chain username profile',
-          },
-          {
-            name: 'Follow User',
-            entrypoint: 'follow',
-            description: 'Follow another user on-chain',
-          },
-          {
-            name: 'Unfollow User',
-            entrypoint: 'unfollow',
-            description: 'Unfollow another user on-chain',
-          },
-        ],
+        methods: actionMethods,
       },
       [PAYMENT_TOKEN_ADDRESS]: {
         name: 'Payment Token',

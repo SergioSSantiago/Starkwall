@@ -64,6 +64,12 @@ const socialState = {
   followersByUser: new Map(),
 }
 
+const actionsContractMeta = manifest.contracts.find((contract) => contract.tag === 'di-actions') || null
+const actionsSystems = new Set(actionsContractMeta?.systems || [])
+const hasOnchainSocialInManifest = actionsSystems.has('follow') && actionsSystems.has('unfollow')
+let socialOnchainAvailable = hasOnchainSocialInManifest
+let socialOnchainWarned = false
+
 const SOCIAL_FALLBACK_KEY = 'starkwall_social_fallback_v1'
 
 function readSocialFallback() {
@@ -250,12 +256,24 @@ async function followUserLocally(targetAddress) {
   applyFallbackFollow(me, target, true)
   scheduleSocialRevalidation(600)
 
+  if (!socialOnchainAvailable) {
+    if (!socialOnchainWarned) {
+      showToast('Social on-chain not enabled in this deployment yet')
+      socialOnchainWarned = true
+    }
+    return true
+  }
+
   dojoManager.followUser(target)
     .then(() => {
       scheduleSocialRevalidation(900)
     })
     .catch((error) => {
       console.warn('follow on-chain failed, reverting optimistic state:', error?.message || error)
+      const errMsg = String(error?.message || error || '')
+      if (errMsg.includes('ENTRYPOINT_NOT_FOUND')) {
+        socialOnchainAvailable = false
+      }
       applyFallbackFollow(me, target, false)
       scheduleSocialRevalidation(200)
       showToast('Follow failed on-chain')
@@ -273,12 +291,24 @@ async function unfollowUserLocally(targetAddress) {
   applyFallbackFollow(me, target, false)
   scheduleSocialRevalidation(600)
 
+  if (!socialOnchainAvailable) {
+    if (!socialOnchainWarned) {
+      showToast('Social on-chain not enabled in this deployment yet')
+      socialOnchainWarned = true
+    }
+    return true
+  }
+
   dojoManager.unfollowUser(target)
     .then(() => {
       scheduleSocialRevalidation(900)
     })
     .catch((error) => {
       console.warn('unfollow on-chain failed, reverting optimistic state:', error?.message || error)
+      const errMsg = String(error?.message || error || '')
+      if (errMsg.includes('ENTRYPOINT_NOT_FOUND')) {
+        socialOnchainAvailable = false
+      }
       applyFallbackFollow(me, target, true)
       scheduleSocialRevalidation(200)
       showToast('Unfollow failed on-chain')
