@@ -1,0 +1,3 @@
+# One Starknet address per line. Used by scripts/yield-keeper.sh when
+# YIELD_QUEUE_USERS is not provided via environment.
+0x067211ed947e4d145c3f62989ccef277235e2ff4f38a571b46bd31c73b0e250e

@@ -38,7 +38,8 @@ jobs:
         env:
           DOJO_MANIFEST_PATH: ${{ github.workspace }}/contracts/Scarb.toml
           YIELD_KEEPER_RUN_ONCE: "1"
-          # Prefer manual input when workflow_dispatch is used; fallback to repo variable.
+          # Prefer manual input when workflow_dispatch is used; fallback to repo variable;
+          # if still empty, the script reads .github/yield-queue-users.txt.
           YIELD_QUEUE_USERS: ${{ github.event.inputs.queue_users || vars.YIELD_QUEUE_USERS }}
         run: |
           source "$HOME/.dojo/env"

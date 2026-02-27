@@ -6,6 +6,12 @@ INTERVAL_SECONDS="${2:-30}"
 MANIFEST_PATH="${DOJO_MANIFEST_PATH:-/Users/sss/Webs/Starkwall/contracts/Scarb.toml}"
 QUEUE_USERS="${YIELD_QUEUE_USERS:-}"
 RUN_ONCE="${YIELD_KEEPER_RUN_ONCE:-0}"
+DEFAULT_QUEUE_FILE="${YIELD_QUEUE_FILE:-/Users/sss/Webs/Starkwall/.github/yield-queue-users.txt}"
+
+if [[ -z "${QUEUE_USERS}" && -f "${DEFAULT_QUEUE_FILE}" ]]; then
+  # Build comma-separated list from file (ignore comments/empty lines).
+  QUEUE_USERS="$(awk 'NF && $1 !~ /^#/' "${DEFAULT_QUEUE_FILE}" | paste -sd, -)"
+fi
 
 run_iteration() {
   echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] yield_harvest"

@@ -155,6 +155,8 @@ Configura una variable de repositorio opcional:
 
 - `YIELD_QUEUE_USERS`: direcciones separadas por coma para procesar cola de salida.
 
+Si no defines la variable, el keeper toma direcciones por defecto desde `.github/yield-queue-users.txt` (una dirección por línea).
+
 También puedes ejecutarlo manualmente desde **Actions -> Yield Keeper -> Run workflow** y pasar `profile` / `queue_users`.
 
 ### 🎮 Using the App
