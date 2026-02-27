@@ -76,6 +76,63 @@ if (actionsSystems.has('unfollow')) {
   })
 }
 
+if (actionsSystems.has('yield_deposit')) {
+  actionMethods.push({
+    name: 'Yield Deposit',
+    entrypoint: 'yield_deposit',
+    description: 'Deposit STRK into yield vault',
+  })
+}
+
+if (actionsSystems.has('yield_withdraw')) {
+  actionMethods.push({
+    name: 'Yield Withdraw',
+    entrypoint: 'yield_withdraw',
+    description: 'Withdraw principal from yield vault',
+  })
+}
+
+if (actionsSystems.has('yield_claim')) {
+  actionMethods.push({
+    name: 'Yield Claim',
+    entrypoint: 'yield_claim',
+    description: 'Claim available earnings from yield vault',
+  })
+}
+
+if (actionsSystems.has('yield_set_btc_mode')) {
+  actionMethods.push({
+    name: 'Yield BTC Mode',
+    entrypoint: 'yield_set_btc_mode',
+    description: 'Toggle BTC strategy mode for yield position',
+  })
+}
+
+if (actionsSystems.has('yield_rebalance')) {
+  actionMethods.push({
+    name: 'Yield Rebalance',
+    entrypoint: 'yield_rebalance',
+    description: 'Rebalance liquid buffer and staked principal',
+  })
+}
+
+if (actionsSystems.has('yield_harvest')) {
+  actionMethods.push({
+    name: 'Yield Harvest',
+    entrypoint: 'yield_harvest',
+    description: 'Harvest realized rewards into earnings pool',
+  })
+}
+
+if (actionsSystems.has('yield_process_exit_queue')) {
+  actionMethods.push({
+    name: 'Yield Process Exit Queue',
+    entrypoint: 'yield_process_exit_queue',
+    description: 'Process queued principal withdrawals',
+  })
+}
+
+
 const controllerOpts = {
   // Avoid eager iframe mount on page load (Firefox tracking/cookie settings can
   // make this fail early). We'll mount when the user clicks "Connect".

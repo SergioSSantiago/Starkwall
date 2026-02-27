@@ -1,10 +1,13 @@
 {
   "world": {
-    "class_hash": "0x57994b6a75fad550ca18b41ee82e2110e158c59028c4478109a67965a0e5b1e",
+    "class_hash": "0x6df72c274d90a3aa1b263d9697c99e548a49d6395a0eb0affd1cd5abcb5c941",
     "address": "0x4fd367663e253d042fef50014873adba41eb40bfd52a3e686c1c37fe6e3dac0",
     "seed": "dojo_intro",
     "name": "Dojo intro",
     "entrypoints": [
+      "set_entity_test",
+      "delete_entity_test",
+      "emit_event_test",
       "uuid",
       "set_metadata",
       "register_namespace",
@@ -33,82 +36,8 @@
     "abi": [
       {
         "type": "impl",
-        "name": "World",
-        "interface_name": "dojo::world::iworld::IWorld"
-      },
-      {
-        "type": "struct",
-        "name": "core::byte_array::ByteArray",
-        "members": [
-          {
-            "name": "data",
-            "type": "core::array::Array::<core::bytes_31::bytes31>"
-          },
-          {
-            "name": "pending_word",
-            "type": "core::felt252"
-          },
-          {
-            "name": "pending_word_len",
-            "type": "core::integer::u32"
-          }
-        ]
-      },
-      {
-        "type": "enum",
-        "name": "dojo::world::resource::Resource",
-        "variants": [
-          {
-            "name": "Model",
-            "type": "(core::starknet::contract_address::ContractAddress, core::felt252)"
-          },
-          {
-            "name": "Event",
-            "type": "(core::starknet::contract_address::ContractAddress, core::felt252)"
-          },
-          {
-            "name": "Contract",
-            "type": "(core::starknet::contract_address::ContractAddress, core::felt252)"
-          },
-          {
-            "name": "Namespace",
-            "type": "core::byte_array::ByteArray"
-          },
-          {
-            "name": "World",
-            "type": "()"
-          },
-          {
-            "name": "Unregistered",
-            "type": "()"
-          },
-          {
-            "name": "Library",
-            "type": "(core::starknet::class_hash::ClassHash, core::felt252)"
-          },
-          {
-            "name": "ExternalContract",
-            "type": "(core::starknet::contract_address::ContractAddress, core::felt252)"
-          }
-        ]
-      },
-      {
-        "type": "struct",
-        "name": "dojo::model::metadata::ResourceMetadata",
-        "members": [
-          {
-            "name": "resource_id",
-            "type": "core::felt252"
-          },
-          {
-            "name": "metadata_uri",
-            "type": "core::byte_array::ByteArray"
-          },
-          {
-            "name": "metadata_hash",
-            "type": "core::felt252"
-          }
-        ]
+        "name": "WorldTestImpl",
+        "interface_name": "dojo::world::iworld::IWorldTest"
       },
       {
         "type": "struct",
@@ -117,16 +46,6 @@
           {
             "name": "snapshot",
             "type": "@core::array::Array::<core::felt252>"
-          }
-        ]
-      },
-      {
-        "type": "struct",
-        "name": "core::array::Span::<core::array::Span::<core::felt252>>",
-        "members": [
-          {
-            "name": "snapshot",
-            "type": "@core::array::Array::<core::array::Span::<core::felt252>>"
           }
         ]
       },
@@ -223,6 +142,181 @@
           {
             "name": "FixedArray",
             "type": "(core::array::Span::<dojo::meta::layout::Layout>, core::integer::u32)"
+          }
+        ]
+      },
+      {
+        "type": "interface",
+        "name": "dojo::world::iworld::IWorldTest",
+        "items": [
+          {
+            "type": "function",
+            "name": "set_entity_test",
+            "inputs": [
+              {
+                "name": "model_selector",
+                "type": "core::felt252"
+              },
+              {
+                "name": "index",
+                "type": "dojo::model::definition::ModelIndex"
+              },
+              {
+                "name": "values",
+                "type": "core::array::Span::<core::felt252>"
+              },
+              {
+                "name": "layout",
+                "type": "dojo::meta::layout::Layout"
+              }
+            ],
+            "outputs": [],
+            "state_mutability": "external"
+          },
+          {
+            "type": "function",
+            "name": "delete_entity_test",
+            "inputs": [
+              {
+                "name": "model_selector",
+                "type": "core::felt252"
+              },
+              {
+                "name": "index",
+                "type": "dojo::model::definition::ModelIndex"
+              },
+              {
+                "name": "layout",
+                "type": "dojo::meta::layout::Layout"
+              }
+            ],
+            "outputs": [],
+            "state_mutability": "external"
+          },
+          {
+            "type": "function",
+            "name": "emit_event_test",
+            "inputs": [
+              {
+                "name": "event_selector",
+                "type": "core::felt252"
+              },
+              {
+                "name": "keys",
+                "type": "core::array::Span::<core::felt252>"
+              },
+              {
+                "name": "values",
+                "type": "core::array::Span::<core::felt252>"
+              }
+            ],
+            "outputs": [],
+            "state_mutability": "external"
+          },
+          {
+            "type": "function",
+            "name": "dojo_contract_address",
+            "inputs": [
+              {
+                "name": "contract_selector",
+                "type": "core::felt252"
+              }
+            ],
+            "outputs": [
+              {
+                "type": "core::starknet::contract_address::ContractAddress"
+              }
+            ],
+            "state_mutability": "view"
+          }
+        ]
+      },
+      {
+        "type": "impl",
+        "name": "World",
+        "interface_name": "dojo::world::iworld::IWorld"
+      },
+      {
+        "type": "struct",
+        "name": "core::byte_array::ByteArray",
+        "members": [
+          {
+            "name": "data",
+            "type": "core::array::Array::<core::bytes_31::bytes31>"
+          },
+          {
+            "name": "pending_word",
+            "type": "core::felt252"
+          },
+          {
+            "name": "pending_word_len",
+            "type": "core::integer::u32"
+          }
+        ]
+      },
+      {
+        "type": "enum",
+        "name": "dojo::world::resource::Resource",
+        "variants": [
+          {
+            "name": "Model",
+            "type": "(core::starknet::contract_address::ContractAddress, core::felt252)"
+          },
+          {
+            "name": "Event",
+            "type": "(core::starknet::contract_address::ContractAddress, core::felt252)"
+          },
+          {
+            "name": "Contract",
+            "type": "(core::starknet::contract_address::ContractAddress, core::felt252)"
+          },
+          {
+            "name": "Namespace",
+            "type": "core::byte_array::ByteArray"
+          },
+          {
+            "name": "World",
+            "type": "()"
+          },
+          {
+            "name": "Unregistered",
+            "type": "()"
+          },
+          {
+            "name": "Library",
+            "type": "(core::starknet::class_hash::ClassHash, core::felt252)"
+          },
+          {
+            "name": "ExternalContract",
+            "type": "(core::starknet::contract_address::ContractAddress, core::felt252)"
+          }
+        ]
+      },
+      {
+        "type": "struct",
+        "name": "dojo::model::metadata::ResourceMetadata",
+        "members": [
+          {
+            "name": "resource_id",
+            "type": "core::felt252"
+          },
+          {
+            "name": "metadata_uri",
+            "type": "core::byte_array::ByteArray"
+          },
+          {
+            "name": "metadata_hash",
+            "type": "core::felt252"
+          }
+        ]
+      },
+      {
+        "type": "struct",
+        "name": "core::array::Span::<core::array::Span::<core::felt252>>",
+        "members": [
+          {
+            "name": "snapshot",
+            "type": "@core::array::Array::<core::array::Span::<core::felt252>>"
           }
         ]
       },
@@ -1480,7 +1574,7 @@
   "contracts": [
     {
       "address": "0x780b86090105dc999bdcb660155bb5447f24b9f654415f0b0e88185c31c6cb0",
-      "class_hash": "0xbc8fc1cb6925abc98bafd10cc0ac2ce03764d3613d6dc073ba108fd5c1836a",
+      "class_hash": "0x35553e35457e6cf32a115c4e8b8ae44a527f9a0d74a407c4b5f6a2329d5d492",
       "abi": [
         {
           "type": "impl",
@@ -1746,6 +1840,171 @@
               ],
               "outputs": [],
               "state_mutability": "external"
+            },
+            {
+              "type": "function",
+              "name": "yield_deposit",
+              "inputs": [
+                {
+                  "name": "amount",
+                  "type": "core::integer::u128"
+                },
+                {
+                  "name": "use_btc_mode",
+                  "type": "core::bool"
+                }
+              ],
+              "outputs": [],
+              "state_mutability": "external"
+            },
+            {
+              "type": "function",
+              "name": "yield_withdraw",
+              "inputs": [
+                {
+                  "name": "amount",
+                  "type": "core::integer::u128"
+                }
+              ],
+              "outputs": [],
+              "state_mutability": "external"
+            },
+            {
+              "type": "function",
+              "name": "yield_claim",
+              "inputs": [],
+              "outputs": [
+                {
+                  "type": "core::integer::u128"
+                }
+              ],
+              "state_mutability": "external"
+            },
+            {
+              "type": "function",
+              "name": "yield_set_btc_mode",
+              "inputs": [
+                {
+                  "name": "use_btc_mode",
+                  "type": "core::bool"
+                }
+              ],
+              "outputs": [],
+              "state_mutability": "external"
+            },
+            {
+              "type": "function",
+              "name": "yield_fund_earnings_pool",
+              "inputs": [
+                {
+                  "name": "amount",
+                  "type": "core::integer::u128"
+                }
+              ],
+              "outputs": [],
+              "state_mutability": "external"
+            },
+            {
+              "type": "function",
+              "name": "yield_configure_strategy",
+              "inputs": [
+                {
+                  "name": "strategy_kind",
+                  "type": "core::integer::u8"
+                },
+                {
+                  "name": "adapter",
+                  "type": "core::starknet::contract_address::ContractAddress"
+                },
+                {
+                  "name": "staking_target",
+                  "type": "core::starknet::contract_address::ContractAddress"
+                },
+                {
+                  "name": "rewards_target",
+                  "type": "core::starknet::contract_address::ContractAddress"
+                },
+                {
+                  "name": "enabled",
+                  "type": "core::bool"
+                },
+                {
+                  "name": "paused",
+                  "type": "core::bool"
+                }
+              ],
+              "outputs": [],
+              "state_mutability": "external"
+            },
+            {
+              "type": "function",
+              "name": "yield_set_risk_params",
+              "inputs": [
+                {
+                  "name": "target_buffer_bps",
+                  "type": "core::integer::u32"
+                },
+                {
+                  "name": "max_exposure_bps",
+                  "type": "core::integer::u32"
+                },
+                {
+                  "name": "rebalance_threshold",
+                  "type": "core::integer::u128"
+                },
+                {
+                  "name": "protocol_fee_bps",
+                  "type": "core::integer::u32"
+                }
+              ],
+              "outputs": [],
+              "state_mutability": "external"
+            },
+            {
+              "type": "function",
+              "name": "yield_rebalance",
+              "inputs": [],
+              "outputs": [],
+              "state_mutability": "external"
+            },
+            {
+              "type": "function",
+              "name": "yield_harvest",
+              "inputs": [],
+              "outputs": [
+                {
+                  "type": "core::integer::u128"
+                }
+              ],
+              "state_mutability": "external"
+            },
+            {
+              "type": "function",
+              "name": "yield_process_exit_queue",
+              "inputs": [
+                {
+                  "name": "user",
+                  "type": "core::starknet::contract_address::ContractAddress"
+                }
+              ],
+              "outputs": [
+                {
+                  "type": "core::integer::u128"
+                }
+              ],
+              "state_mutability": "external"
+            },
+            {
+              "type": "function",
+              "name": "yield_set_admin",
+              "inputs": [
+                {
+                  "name": "admin",
+                  "type": "core::starknet::contract_address::ContractAddress"
+                }
+              ],
+              "outputs": [],
+              "state_mutability": "external"
             }
           ]
         },
@@ -1878,6 +2137,17 @@
         "unfollow",
         "set_post_price",
         "buy_post",
+        "yield_deposit",
+        "yield_withdraw",
+        "yield_claim",
+        "yield_set_btc_mode",
+        "yield_fund_earnings_pool",
+        "yield_configure_strategy",
+        "yield_set_risk_params",
+        "yield_rebalance",
+        "yield_harvest",
+        "yield_process_exit_queue",
+        "yield_set_admin",
         "upgrade"
       ]
     }
@@ -1898,13 +2168,13 @@
     },
     {
       "members": [],
-      "class_hash": "0x4892dd3ce5fce94d77b4c58d4fa1fdd4292527a8fb196a6f3fee509d2884adc",
+      "class_hash": "0x557e8f98c980bfe22892466948cbdc2e6b2d0c4cad9e36493167130f3fcdbc9",
       "tag": "di-FollowRelation",
       "selector": "0x295751d3340efa0e2745f522efd167d474dc5a31f892159c6538b40822da46f"
     },
     {
       "members": [],
-      "class_hash": "0x198f5211f3c82abc44c5edf92fef968b9019569a36a3c4810176f4e167a2f64",
+      "class_hash": "0x3524feb12689c1392efb97ebaed71c64c9838ce8065a5f4d31db2540c56e7d3",
       "tag": "di-FollowStats",
       "selector": "0x2e86e53a9b9647e4e5e6d3a6b81347f6a1322805b64a1ee5a7b64f9416ce26"
     },
@@ -1922,15 +2192,51 @@
     },
     {
       "members": [],
-      "class_hash": "0x1c98951f83a7b48cf42d833a3081b8fc425654ba936fcb04fd0d2e1242e7b8c",
+      "class_hash": "0x1b3f863ecd88667c14eee0807246e0dab7688314d159a3113b179f9b92ed81",
       "tag": "di-UserProfile",
       "selector": "0x1d286fd6327f8de6fc4e5dd5cdbdfd12415ebfacd1dc9bda511d4a41bdf119d"
     },
     {
       "members": [],
-      "class_hash": "0x7b37f0414d0a432715f73ec6bfd2ca7a5de295e6a1f553201851f651b53aa64",
+      "class_hash": "0x208e98b7e972c0490dd877b9a388a4c22dda1fca23b6df0e843dfd8b40ce15c",
       "tag": "di-UsernameIndex",
       "selector": "0x4ce1cc75b25432bb691e394f726a22cf7e3e23b6b5dd975fc3f423e7295579"
+    },
+    {
+      "members": [],
+      "class_hash": "0x26f73cf11b35634d3f3029700467b4f4035030c78a1e24299826bc37c079d5f",
+      "tag": "di-YieldAdminState",
+      "selector": "0x1a82c4ed5b217c6cb5ee0c7bfd965fa454690397b1d18fd7f5b65118cb9259"
+    },
+    {
+      "members": [],
+      "class_hash": "0x41a198ca5c200a36fa049ea21a35549a3f7e4aa50208081dc6fd129b88052f",
+      "tag": "di-YieldExitQueue",
+      "selector": "0x7f472624726429f9b9520fbe5131a7046317de71eb7c603df969e4c37638fc"
+    },
+    {
+      "members": [],
+      "class_hash": "0x8e7956e86c9ce92781c3af4a9a35850e49955163971ef0568a0861c901edbd",
+      "tag": "di-YieldPoolState",
+      "selector": "0x21651cbc00b447fede5efb64a861f71bacace8e384f57e811f2614ff44cef12"
+    },
+    {
+      "members": [],
+      "class_hash": "0x731d410513689b5f83b757d1d70599ee07b4c61b391b234b22d6e80154e40d2",
+      "tag": "di-YieldPosition",
+      "selector": "0x2dbdab7f192a5d47c9de57993e8f65b9fe3f02a474944e0e6c48727c4facb46"
+    },
+    {
+      "members": [],
+      "class_hash": "0x1cbde04de201b197288147aa094f9788a2c35c691dec0cc0dcb017bac468e2b",
+      "tag": "di-YieldRiskState",
+      "selector": "0x1ce2d9b505507dba1927201462a7e13136fecc3bc5dcb8a617aa44403907d30"
+    },
+    {
+      "members": [],
+      "class_hash": "0x18e9b2f908f8372432a11738d636492698728211fe25494867600a66633ed9f",
+      "tag": "di-YieldStrategyState",
+      "selector": "0x8d81cdaeb107408384124ea0f714db35733b5e64d5ba3242831d55b0a27a50"
     }
   ],
   "events": [],

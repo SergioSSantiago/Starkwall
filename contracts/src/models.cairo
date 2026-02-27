@@ -96,3 +96,73 @@ pub struct FollowStats {
     pub schema_version: u8,
 }
 
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct YieldPoolState {
+    #[key]
+    pub pool_id: u8, // singleton key = 0
+    pub principal_pool: u128, // total principal deposited by users
+    pub earnings_pool: u128, // rewards reserve used to pay claims
+    pub total_pending_rewards: u128, // accounting for user-earned rewards not yet claimed
+    pub apr_bps: u32, // deprecated, kept for backward compatibility
+    pub reward_index: u128, // cumulative user rewards per principal unit (scaled)
+    pub user_share_bps: u32, // share of harvested net rewards routed to users
+}
+
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct YieldPosition {
+    #[key]
+    pub user: ContractAddress,
+    pub principal: u128,
+    pub pending_rewards: u128,
+    pub last_accrual_ts: u64,
+    pub use_btc_mode: bool,
+    pub reward_index_snapshot: u128,
+}
+
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct YieldStrategyState {
+    #[key]
+    pub pool_id: u8, // singleton key = 0
+    pub strategy_kind: u8, // 0=none, 1=mock, 2=official-native
+    pub adapter: ContractAddress, // adapter contract address used by actions
+    pub staking_target: ContractAddress, // external staking contract/entrypoint receiver
+    pub rewards_target: ContractAddress, // optional rewards receiver/source
+    pub enabled: bool,
+    pub paused: bool,
+}
+
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct YieldRiskState {
+    #[key]
+    pub pool_id: u8, // singleton key = 0
+    pub liquid_buffer: u128, // immediately liquid principal available for withdrawals
+    pub staked_principal: u128, // principal currently deployed into strategy
+    pub target_buffer_bps: u32, // desired min liquid buffer as bps of principal
+    pub max_exposure_bps: u32, // hard cap for % of principal deployed to strategy
+    pub rebalance_threshold: u128, // minimum delta before moving funds in/out strategy
+    pub protocol_fee_bps: u32, // fee cut from harvested rewards before earnings_pool credit
+    pub last_harvest_ts: u64,
+}
+
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct YieldExitQueue {
+    #[key]
+    pub user: ContractAddress,
+    pub queued_principal: u128,
+    pub requested_at: u64,
+    pub processed_at: u64,
+}
+
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct YieldAdminState {
+    #[key]
+    pub pool_id: u8, // singleton key = 0
+    pub admin: ContractAddress,
+}
+

@@ -57,6 +57,17 @@
     font-size: 12px;
   }
 
+#wallet-info .wallet-yield-line {
+  color: #9ecbff;
+  font-size: 11px;
+}
+
+#wallet-info .wallet-yield-actions {
+  margin-top: 4px;
+  display: flex;
+  justify-content: flex-end;
+}
+
 #wallet-info .wallet-top-row {
     width: 100%;
     display: flex;
@@ -939,4 +950,18 @@
   color: #9ecbff;
   font-size: 12px;
   text-decoration: underline;
+}
+
+.yield-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  color: #d6e2ef;
+  font-size: 13px;
+}
+
+.yield-check input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
 }

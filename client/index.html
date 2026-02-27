@@ -123,6 +123,44 @@
       </div>
     </div>
 
+    <div id="yieldModal" class="modal">
+      <div class="modal-content">
+        <h2 id="yieldModalTitle">Yield</h2>
+        <p id="yieldModalSummary" class="webcam-hint"></p>
+
+        <div id="yieldDepositFields">
+          <label>
+            Amount to lock (STRK)
+            <input type="number" id="yieldAmountInput" min="0.000001" step="0.000001" />
+          </label>
+          <label class="yield-check">
+            <input type="checkbox" id="yieldBtcModeInput" />
+            Use STRK+BTC strategy mode
+          </label>
+        </div>
+
+        <div id="yieldManageFields" style="display: none;">
+          <p id="yieldManageInfo" class="webcam-hint"></p>
+          <label>
+            Withdraw amount (STRK)
+            <input type="number" id="yieldWithdrawInput" min="0.000001" step="0.000001" />
+          </label>
+          <label class="yield-check">
+            <input type="checkbox" id="yieldManageBtcModeInput" />
+            Use STRK+BTC strategy mode
+          </label>
+        </div>
+
+        <div class="modal-buttons">
+          <button type="button" id="yieldPrimaryBtn">Confirm</button>
+          <button type="button" id="yieldClaimBtn" style="display: none;">Claim Rewards</button>
+          <button type="button" id="yieldModeBtn" style="display: none;">Update Mode</button>
+          <button type="button" id="yieldQueueBtn" style="display: none;">Process Unlock</button>
+          <button type="button" id="yieldCancelBtn">Close</button>
+        </div>
+      </div>
+    </div>
+
     <div id="followersModal" class="modal">
       <div class="modal-content">
         <h2>Followers</h2>

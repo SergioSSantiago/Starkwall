@@ -67,8 +67,10 @@ const socialState = {
 const actionsContractMeta = manifest.contracts.find((contract) => contract.tag === 'di-actions') || null
 const actionsSystems = new Set(actionsContractMeta?.systems || [])
 const hasOnchainSocialInManifest = actionsSystems.has('follow') && actionsSystems.has('unfollow')
+const hasYieldInManifest = actionsSystems.has('yield_deposit') && actionsSystems.has('yield_withdraw') && actionsSystems.has('yield_claim')
 let socialOnchainAvailable = hasOnchainSocialInManifest
 let socialOnchainWarned = false
+let cachedYieldState = null
 
 const SOCIAL_FALLBACK_KEY = 'starkwall_social_fallback_v1'
 
@@ -364,6 +366,179 @@ function getKnownUsersForSearch() {
     address: addr,
     username: socialState.usernameByAddress.get(addr) || (addr.slice(0, 8) + '...' + addr.slice(-6)),
   }))
+}
+
+function computeLiveYieldEarningsStrk(yieldState) {
+  const pending = Number(yieldState?.pending_strk || 0)
+  return Number.isFinite(pending) ? pending : 0
+}
+
+async function handleYieldPrimaryAction() {
+  if (!dojoManager || !currentAccount) return
+  if (!hasYieldInManifest) {
+    showToast('Yield not enabled on this deployment yet')
+    return
+  }
+  const yieldModal = document.getElementById('yieldModal')
+  const titleEl = document.getElementById('yieldModalTitle')
+  const summaryEl = document.getElementById('yieldModalSummary')
+  const depositFields = document.getElementById('yieldDepositFields')
+  const manageFields = document.getElementById('yieldManageFields')
+  const manageInfoEl = document.getElementById('yieldManageInfo')
+  const amountInput = document.getElementById('yieldAmountInput')
+  const btcInput = document.getElementById('yieldBtcModeInput')
+  const withdrawInput = document.getElementById('yieldWithdrawInput')
+  const manageBtcInput = document.getElementById('yieldManageBtcModeInput')
+  const primaryBtn = document.getElementById('yieldPrimaryBtn')
+  const claimBtn = document.getElementById('yieldClaimBtn')
+  const modeBtn = document.getElementById('yieldModeBtn')
+  const queueBtn = document.getElementById('yieldQueueBtn')
+  const cancelBtn = document.getElementById('yieldCancelBtn')
+  if (!yieldModal || !titleEl || !summaryEl || !depositFields || !manageFields || !amountInput || !btcInput || !withdrawInput || !manageBtcInput || !primaryBtn || !claimBtn || !modeBtn || !queueBtn || !cancelBtn || !manageInfoEl) return
+
+  const closeYieldModal = () => {
+    yieldModal.classList.remove('active')
+    primaryBtn.disabled = false
+    claimBtn.disabled = false
+    modeBtn.disabled = false
+    queueBtn.disabled = false
+  }
+  cancelBtn.onclick = closeYieldModal
+  yieldModal.onclick = (e) => {
+    if (e.target === yieldModal) closeYieldModal()
+  }
+
+  const state = cachedYieldState || {
+    principal_strk: 0,
+    pending_strk: 0,
+    last_accrual_ts: 0,
+    use_btc_mode: false,
+    apr_bps: 100,
+    earnings_pool_strk: 0,
+    liquid_buffer_strk: 0,
+    staked_principal_strk: 0,
+    queued_exit_strk: 0,
+  }
+  const walletBalance = await getChainBalance(currentAccount.address).catch(() => 0)
+
+  const queuedExitNow = Number(state.queued_exit_strk || 0)
+  if (Number(state.principal_strk || 0) <= 0 && queuedExitNow <= 0) {
+    titleEl.textContent = 'Activate Yield'
+    summaryEl.textContent = `Available balance: ${Number(walletBalance || 0).toFixed(2)} STRK`
+    depositFields.style.display = 'block'
+    manageFields.style.display = 'none'
+    claimBtn.style.display = 'none'
+    modeBtn.style.display = 'none'
+    queueBtn.style.display = 'none'
+    primaryBtn.style.display = 'inline-block'
+    primaryBtn.textContent = 'Activate'
+    amountInput.value = ''
+    btcInput.checked = false
+
+    primaryBtn.onclick = async () => {
+      const amount = Number(amountInput.value || '0')
+      if (!Number.isFinite(amount) || amount <= 0) {
+        alert('Enter a valid amount.')
+        return
+      }
+      if (walletBalance > 0 && amount > walletBalance) {
+        alert(`Amount exceeds available balance (${Number(walletBalance).toFixed(2)} STRK).`)
+        return
+      }
+      try {
+        primaryBtn.disabled = true
+        await dojoManager.yieldDeposit(amount, Boolean(btcInput.checked))
+        closeYieldModal()
+        showToast('Yield activated')
+        await updateWalletInfo()
+      } catch (error) {
+        primaryBtn.disabled = false
+        throw error
+      }
+    }
+  } else {
+    const principal = Number(state.principal_strk || 0)
+    const earningsNow = computeLiveYieldEarningsStrk(state)
+    const availableNow = Number(state.liquid_buffer_strk || 0)
+    const queuedExit = Number(state.queued_exit_strk || 0)
+    titleEl.textContent = 'Manage Yield'
+    summaryEl.textContent = `Locked: ${principal.toFixed(2)} STRK · Claimable rewards: ${Number(earningsNow || 0).toFixed(4)} STRK · Available now: ${availableNow.toFixed(2)} STRK`
+    depositFields.style.display = 'none'
+    manageFields.style.display = 'block'
+    claimBtn.style.display = 'inline-block'
+    modeBtn.style.display = 'inline-block'
+    queueBtn.style.display = queuedExit > 0 ? 'inline-block' : 'none'
+    primaryBtn.style.display = 'inline-block'
+    primaryBtn.textContent = 'Withdraw'
+    withdrawInput.value = principal.toFixed(6)
+    manageBtcInput.checked = Boolean(state.use_btc_mode)
+    manageInfoEl.textContent = `Current mode: ${state.use_btc_mode ? 'STRK+BTC' : 'STRK'}${queuedExit > 0 ? ` · Queued unlock: ${queuedExit.toFixed(2)} STRK` : ''}`
+
+    primaryBtn.onclick = async () => {
+      const amount = Number(withdrawInput.value || '0')
+      if (!Number.isFinite(amount) || amount <= 0) {
+        alert('Enter a valid withdraw amount.')
+        return
+      }
+      if (amount > principal) {
+        alert(`Amount exceeds staked principal (${principal.toFixed(2)} STRK).`)
+        return
+      }
+      try {
+        primaryBtn.disabled = true
+        await dojoManager.yieldWithdraw(amount)
+        closeYieldModal()
+        if (amount > availableNow) showToast('Withdrawal queued (processing as liquidity unlocks)')
+        else showToast('Principal unlocked')
+        await updateWalletInfo()
+      } catch (error) {
+        primaryBtn.disabled = false
+        throw error
+      }
+    }
+
+    claimBtn.onclick = async () => {
+      try {
+        claimBtn.disabled = true
+        await dojoManager.yieldClaim()
+        closeYieldModal()
+        showToast('Rewards claimed to wallet balance')
+        await updateWalletInfo()
+      } catch (error) {
+        claimBtn.disabled = false
+        throw error
+      }
+    }
+
+    modeBtn.onclick = async () => {
+      try {
+        modeBtn.disabled = true
+        await dojoManager.yieldSetBtcMode(Boolean(manageBtcInput.checked))
+        manageInfoEl.textContent = `Current mode: ${manageBtcInput.checked ? 'STRK+BTC' : 'STRK'}`
+        showToast('Yield mode updated')
+        await updateWalletInfo()
+        modeBtn.disabled = false
+      } catch (error) {
+        modeBtn.disabled = false
+        throw error
+      }
+    }
+
+    queueBtn.onclick = async () => {
+      try {
+        queueBtn.disabled = true
+        const paid = await dojoManager.yieldProcessExitQueue(currentAccount.address)
+        closeYieldModal()
+        showToast(`Unlock processed${paid?.transaction_hash ? '' : ''}`)
+        await updateWalletInfo()
+      } catch (error) {
+        queueBtn.disabled = false
+        throw error
+      }
+    }
+  }
+
+  yieldModal.classList.add('active')
 }
 
 /**
@@ -2521,6 +2696,20 @@ async function updateWalletInfo() {
     const balanceStr = Number.isFinite(num) ? num.toFixed(2) : '0.00'
     const addr = normalizeStarknetAddress(currentAccount.address)
     const shortAddr = addr.slice(0, 8) + '...' + addr.slice(-6)
+    let yieldState = null
+    if (hasYieldInManifest) {
+      yieldState = await dojoManager.queryYieldState(currentAccount.address).catch(() => null)
+    }
+    cachedYieldState = yieldState
+    const stakedStr = yieldState ? Number(yieldState.principal_strk || 0).toFixed(2) : '0.00'
+    const earningsNow = yieldState ? computeLiveYieldEarningsStrk(yieldState) : 0
+    const earningsStr = Number.isFinite(earningsNow) ? earningsNow.toFixed(4) : '0.0000'
+    const availableNowStr = yieldState ? Number(yieldState.liquid_buffer_strk || 0).toFixed(2) : '0.00'
+    const queuedExitStr = yieldState ? Number(yieldState.queued_exit_strk || 0).toFixed(2) : '0.00'
+    const hasPrincipal = yieldState && Number(yieldState.principal_strk || 0) > 0
+    const hasQueue = yieldState && Number(yieldState.queued_exit_strk || 0) > 0
+    const yieldBtnLabel = hasPrincipal || hasQueue ? 'Manage Yield' : 'Activate Yield'
+    const yieldModeLabel = yieldState?.use_btc_mode ? 'STRK+BTC mode' : 'STRK mode'
     walletInfo.innerHTML = `
       <div class="wallet-box">
         <div class="wallet-top-row">
@@ -2533,8 +2722,10 @@ async function updateWalletInfo() {
           <div class="wallet-main">
             <span class="wallet-user">● ${currentUsername || shortAddr}</span>
             <span class="wallet-balance">💰 ${balanceStr} STRK</span>
+            ${hasYieldInManifest ? `<span class="wallet-yield-line">🔒 ${stakedStr} STRK · ✨ ${earningsStr} STRK claimable · 💧 ${availableNowStr} STRK${Number(queuedExitStr) > 0 ? ` · ⏳ ${queuedExitStr} STRK` : ''} · ${yieldModeLabel}</span>` : ''}
           </div>
         </div>
+        ${hasYieldInManifest ? `<div class="wallet-yield-actions"><button id="wallet-yield-btn" class="wallet-stat-btn" type="button">${yieldBtnLabel}</button></div>` : ''}
         <div class="wallet-address-row" title="${addr}">
           <span class="wallet-address">${addr}</span>
           <button id="copy-address-btn" class="wallet-copy-btn" type="button" title="Copiar address">📋</button>
@@ -2589,6 +2780,19 @@ async function updateWalletInfo() {
     if (walletLogoutBtn) {
       walletLogoutBtn.onclick = () => logout()
     }
+
+    const walletYieldBtn = document.getElementById('wallet-yield-btn')
+    if (walletYieldBtn) {
+      walletYieldBtn.onclick = async () => {
+        try {
+          await handleYieldPrimaryAction()
+        } catch (error) {
+          console.error('Yield action error:', error)
+          alert('Yield action failed.\n\nTip: if this happened on deposit, check you have enough STRK balance for the amount.')
+        }
+      }
+    }
+
   } catch (error) {
     console.error('Error updating wallet info:', error)
     const shortAddr = currentAccount ? (String(currentAccount.address).slice(0, 6) + '...' + String(currentAccount.address).slice(-4)) : ''

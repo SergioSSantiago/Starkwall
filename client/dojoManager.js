@@ -237,6 +237,197 @@ export class DojoManager {
     }
   }
 
+  async yieldDeposit(amountStrk, useBtcMode = false) {
+    const amountNum = Number(amountStrk)
+    if (!Number.isFinite(amountNum) || amountNum <= 0) throw new Error('Invalid deposit amount')
+    const amountWei = BigInt(Math.floor(amountNum * 1_000_000)) * (ONE_STRK / 1_000_000n)
+
+    // Deposit pulls STRK via transfer_from in the contract, so approval is required first.
+    const { low, high } = feltToU256(amountWei)
+    const tx = await this.account.execute([
+      {
+        contractAddress: PAYMENT_TOKEN_ADDRESS,
+        entrypoint: 'approve',
+        calldata: [this.actionsContract.address, low, high],
+      },
+      {
+        contractAddress: this.actionsContract.address,
+        entrypoint: 'yield_deposit',
+        calldata: [amountWei.toString(), useBtcMode ? 1 : 0],
+      },
+    ])
+
+    const receipt = await this.account.waitForTransaction(tx.transaction_hash)
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Yield deposit reverted'
+      throw new Error(reason)
+    }
+    return tx
+  }
+
+  async yieldWithdraw(amountStrk) {
+    const amountNum = Number(amountStrk)
+    if (!Number.isFinite(amountNum) || amountNum <= 0) throw new Error('Invalid withdraw amount')
+    const amountWei = BigInt(Math.floor(amountNum * 1_000_000)) * (ONE_STRK / 1_000_000n)
+
+    const tx = await this.account.execute({
+      contractAddress: this.actionsContract.address,
+      entrypoint: 'yield_withdraw',
+      calldata: [amountWei.toString()],
+    })
+
+    const receipt = await this.account.waitForTransaction(tx.transaction_hash)
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Yield withdraw reverted'
+      throw new Error(reason)
+    }
+    return tx
+  }
+
+  async yieldClaim() {
+    const tx = await this.account.execute({
+      contractAddress: this.actionsContract.address,
+      entrypoint: 'yield_claim',
+      calldata: [],
+    })
+
+    const receipt = await this.account.waitForTransaction(tx.transaction_hash)
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Yield claim reverted'
+      throw new Error(reason)
+    }
+    return tx
+  }
+
+  async yieldSetBtcMode(useBtcMode) {
+    const tx = await this.account.execute({
+      contractAddress: this.actionsContract.address,
+      entrypoint: 'yield_set_btc_mode',
+      calldata: [useBtcMode ? 1 : 0],
+    })
+
+    const receipt = await this.account.waitForTransaction(tx.transaction_hash)
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Set BTC mode reverted'
+      throw new Error(reason)
+    }
+    return tx
+  }
+
+  async yieldRebalance() {
+    const tx = await this.account.execute({
+      contractAddress: this.actionsContract.address,
+      entrypoint: 'yield_rebalance',
+      calldata: [],
+    })
+    const receipt = await this.account.waitForTransaction(tx.transaction_hash)
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Yield rebalance reverted'
+      throw new Error(reason)
+    }
+    return tx
+  }
+
+  async yieldHarvest() {
+    const tx = await this.account.execute({
+      contractAddress: this.actionsContract.address,
+      entrypoint: 'yield_harvest',
+      calldata: [],
+    })
+    const receipt = await this.account.waitForTransaction(tx.transaction_hash)
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Yield harvest reverted'
+      throw new Error(reason)
+    }
+    return tx
+  }
+
+  async yieldProcessExitQueue(userAddress) {
+    const user = this.normalizeAddress(userAddress)
+    if (!user) throw new Error('Invalid user address')
+    const tx = await this.account.execute({
+      contractAddress: this.actionsContract.address,
+      entrypoint: 'yield_process_exit_queue',
+      calldata: [user],
+    })
+    const receipt = await this.account.waitForTransaction(tx.transaction_hash)
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Yield queue processing reverted'
+      throw new Error(reason)
+    }
+    return tx
+  }
+
+  async queryYieldState(address) {
+    const target = this.normalizeAddress(address)
+    if (!target) {
+      return {
+        principal_strk: 0,
+        pending_strk: 0,
+        last_accrual_ts: 0,
+        use_btc_mode: false,
+        apr_bps: 0,
+        earnings_pool_strk: 0,
+        liquid_buffer_strk: 0,
+        staked_principal_strk: 0,
+        queued_exit_strk: 0,
+      }
+    }
+
+    const [poolResp, posResp, queueResp, riskResp] = await Promise.all([
+      this.toriiClient.getEntities({
+        query: new ToriiQueryBuilder().withClause(KeysClause(['di-YieldPoolState'], [], 'VariableLen').build()),
+      }).catch(() => ({ items: [] })),
+      this.toriiClient.getEntities({
+        query: new ToriiQueryBuilder().withClause(KeysClause(['di-YieldPosition'], [], 'VariableLen').build()),
+      }).catch(() => ({ items: [] })),
+      this.toriiClient.getEntities({
+        query: new ToriiQueryBuilder().withClause(KeysClause(['di-YieldExitQueue'], [], 'VariableLen').build()),
+      }).catch(() => ({ items: [] })),
+      this.toriiClient.getEntities({
+        query: new ToriiQueryBuilder().withClause(KeysClause(['di-YieldRiskState'], [], 'VariableLen').build()),
+      }).catch(() => ({ items: [] })),
+    ])
+
+    const toBigInt = (v) => {
+      try { return BigInt(String(v ?? 0)) } catch { return 0n }
+    }
+
+    const poolModel = (poolResp?.items || [])
+      .map((x) => x?.models?.di?.YieldPoolState)
+      .find(Boolean) || null
+
+    const posModel = (posResp?.items || [])
+      .map((x) => x?.models?.di?.YieldPosition)
+      .find((m) => this.normalizeAddress(m?.user) === target) || null
+
+    const principalWei = toBigInt(posModel?.principal)
+    const pendingWei = toBigInt(posModel?.pending_rewards ?? posModel?.pendingRewards)
+    const earningsPoolWei = toBigInt(poolModel?.earnings_pool ?? poolModel?.earningsPool)
+    const riskModel = (riskResp?.items || [])
+      .map((x) => x?.models?.di?.YieldRiskState)
+      .find(Boolean) || null
+    const liquidBufferWei = toBigInt(riskModel?.liquid_buffer ?? riskModel?.liquidBuffer)
+    const stakedPrincipalWei = toBigInt(riskModel?.staked_principal ?? riskModel?.stakedPrincipal)
+    const aprBps = Number(poolModel?.apr_bps ?? poolModel?.aprBps ?? 0)
+    const queueModel = (queueResp?.items || [])
+      .map((x) => x?.models?.di?.YieldExitQueue)
+      .find((m) => this.normalizeAddress(m?.user) === target) || null
+    const queuedWei = toBigInt(queueModel?.queued_principal ?? queueModel?.queuedPrincipal)
+
+    return {
+      principal_strk: Number(principalWei / ONE_STRK),
+      pending_strk: Number(pendingWei / ONE_STRK),
+      last_accrual_ts: Number(posModel?.last_accrual_ts ?? posModel?.lastAccrualTs ?? 0),
+      use_btc_mode: Boolean(posModel?.use_btc_mode ?? posModel?.useBtcMode ?? false),
+      apr_bps: Number.isFinite(aprBps) && aprBps > 0 ? aprBps : 0,
+      earnings_pool_strk: Number(earningsPoolWei / ONE_STRK),
+      liquid_buffer_strk: Number(liquidBufferWei / ONE_STRK),
+      staked_principal_strk: Number(stakedPrincipalWei / ONE_STRK),
+      queued_exit_strk: Number(queuedWei / ONE_STRK),
+    }
+  }
+
   async buyPostWithPayment(postId, sellerAddress, price) {
     const tokenAddr = PAYMENT_TOKEN_ADDRESS;
     if (!tokenAddr) throw new Error('No token configured. Set VITE_STRK_TOKEN or deploy STRK (see contracts/DEPLOY_STRK.md).');

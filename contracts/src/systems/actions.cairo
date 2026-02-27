@@ -67,6 +67,52 @@ pub trait IActions<T> {
         ref self: T,
         post_id: u64
     );
+
+    fn yield_deposit(
+        ref self: T,
+        amount: u128,
+        use_btc_mode: bool
+    );
+
+    fn yield_withdraw(
+        ref self: T,
+        amount: u128
+    );
+
+    fn yield_claim(ref self: T) -> u128;
+
+    fn yield_set_btc_mode(
+        ref self: T,
+        use_btc_mode: bool
+    );
+
+    fn yield_fund_earnings_pool(
+        ref self: T,
+        amount: u128
+    );
+
+    fn yield_configure_strategy(
+        ref self: T,
+        strategy_kind: u8,
+        adapter: starknet::ContractAddress,
+        staking_target: starknet::ContractAddress,
+        rewards_target: starknet::ContractAddress,
+        enabled: bool,
+        paused: bool
+    );
+
+    fn yield_set_risk_params(
+        ref self: T,
+        target_buffer_bps: u32,
+        max_exposure_bps: u32,
+        rebalance_threshold: u128,
+        protocol_fee_bps: u32
+    );
+
+    fn yield_rebalance(ref self: T);
+    fn yield_harvest(ref self: T) -> u128;
+    fn yield_process_exit_queue(ref self: T, user: starknet::ContractAddress) -> u128;
+    fn yield_set_admin(ref self: T, admin: starknet::ContractAddress);
 }
 
 #[starknet::interface]
@@ -85,12 +131,28 @@ pub trait IERC20<T> {
     ) -> bool;
 }
 
+#[starknet::interface]
+pub trait IStakingAdapter<T> {
+    fn stake(ref self: T, amount: u128) -> bool;
+    fn request_unstake(ref self: T, amount: u128) -> bool;
+    fn claim_rewards(ref self: T) -> u128;
+    fn staked_balance(self: @T) -> u128;
+    fn pending_unstake(self: @T) -> u128;
+}
+
 #[dojo::contract]
 pub mod actions {
-    use super::{IActions, IERC20Dispatcher, IERC20DispatcherTrait};
+    use super::{
+        IActions, IERC20Dispatcher, IERC20DispatcherTrait, IStakingAdapterDispatcher,
+        IStakingAdapterDispatcherTrait
+    };
     use core::traits::TryInto;
     use starknet::{ContractAddress, get_block_timestamp, get_contract_address};
-    use crate::models::{AuctionGroup, AuctionSlot, FollowRelation, FollowStats, Post, PostCounter, UserProfile, UsernameIndex};
+    use crate::models::{
+        AuctionGroup, AuctionSlot, FollowRelation, FollowStats, Post, PostCounter, UserProfile,
+        UsernameIndex, YieldAdminState, YieldExitQueue, YieldPoolState, YieldPosition, YieldRiskState,
+        YieldStrategyState
+    };
     use dojo::model::ModelStorage;
 
     const STRK_DECIMALS_FACTOR: u128 = 1000000000000000000;
@@ -99,6 +161,13 @@ pub mod actions {
     const POST_KIND_AUCTION_CENTER: u8 = 1;
     const POST_KIND_AUCTION_SLOT: u8 = 2;
     const AUCTION_SLOT_COUNT: u8 = 8;
+    const YIELD_POOL_ID: u8 = 0;
+    const YIELD_DEFAULT_TARGET_BUFFER_BPS: u32 = 3000; // 30%
+    const YIELD_DEFAULT_MAX_EXPOSURE_BPS: u32 = 7000; // 70%
+    const YIELD_DEFAULT_REBALANCE_THRESHOLD: u128 = 1_000_000_000_000_000_000; // 1 STRK
+    const YIELD_DEFAULT_PROTOCOL_FEE_BPS: u32 = 1000; // 10%
+    const YIELD_DEFAULT_USER_SHARE_BPS: u32 = 2500; // 25%
+    const REWARD_INDEX_SCALE: u128 = 1_000_000_000_000_000_000; // 1e18
 
     // Keep aligned with frontend tile dimensions.
     const TILE_W: i32 = 393;
@@ -191,6 +260,152 @@ pub mod actions {
             return FollowStats { user, followers_count: 0, following_count: 0, schema_version: 1 };
         }
         stats
+    }
+
+    fn read_yield_pool_or_default(ref world: dojo::world::WorldStorage) -> YieldPoolState {
+        let mut state: YieldPoolState = world.read_model(YIELD_POOL_ID);
+        if state.pool_id != YIELD_POOL_ID {
+            return YieldPoolState {
+                pool_id: YIELD_POOL_ID,
+                principal_pool: 0,
+                earnings_pool: 0,
+                total_pending_rewards: 0,
+                apr_bps: 0,
+                reward_index: 0,
+                user_share_bps: YIELD_DEFAULT_USER_SHARE_BPS,
+            };
+        }
+        if state.user_share_bps == 0 {
+            state.user_share_bps = YIELD_DEFAULT_USER_SHARE_BPS;
+        }
+        state
+    }
+
+    fn read_risk_state_or_default(ref world: dojo::world::WorldStorage) -> YieldRiskState {
+        let state: YieldRiskState = world.read_model(YIELD_POOL_ID);
+        if state.pool_id != YIELD_POOL_ID {
+            return YieldRiskState {
+                pool_id: YIELD_POOL_ID,
+                liquid_buffer: 0,
+                staked_principal: 0,
+                target_buffer_bps: YIELD_DEFAULT_TARGET_BUFFER_BPS,
+                max_exposure_bps: YIELD_DEFAULT_MAX_EXPOSURE_BPS,
+                rebalance_threshold: YIELD_DEFAULT_REBALANCE_THRESHOLD,
+                protocol_fee_bps: YIELD_DEFAULT_PROTOCOL_FEE_BPS,
+                last_harvest_ts: 0,
+            };
+        }
+        state
+    }
+
+    fn read_strategy_state_or_default(ref world: dojo::world::WorldStorage) -> YieldStrategyState {
+        let state: YieldStrategyState = world.read_model(YIELD_POOL_ID);
+        if state.pool_id != YIELD_POOL_ID {
+            return YieldStrategyState {
+                pool_id: YIELD_POOL_ID,
+                strategy_kind: 0,
+                adapter: zero_address(),
+                staking_target: zero_address(),
+                rewards_target: zero_address(),
+                enabled: false,
+                paused: false,
+            };
+        }
+        state
+    }
+
+    fn read_exit_queue_or_default(
+        ref world: dojo::world::WorldStorage,
+        user: ContractAddress,
+    ) -> YieldExitQueue {
+        let item: YieldExitQueue = world.read_model(user);
+        if item.user == zero_address() {
+            return YieldExitQueue { user, queued_principal: 0, requested_at: 0, processed_at: 0 };
+        }
+        item
+    }
+
+    fn read_admin_or_default(ref world: dojo::world::WorldStorage) -> YieldAdminState {
+        let state: YieldAdminState = world.read_model(YIELD_POOL_ID);
+        if state.pool_id != YIELD_POOL_ID {
+            return YieldAdminState { pool_id: YIELD_POOL_ID, admin: zero_address() };
+        }
+        state
+    }
+
+    fn read_yield_position_or_default(
+        ref world: dojo::world::WorldStorage,
+        user: ContractAddress,
+    ) -> YieldPosition {
+        let position: YieldPosition = world.read_model(user);
+        if position.user == zero_address() {
+            return YieldPosition {
+                user,
+                principal: 0,
+                pending_rewards: 0,
+                last_accrual_ts: 0,
+                use_btc_mode: false,
+                reward_index_snapshot: 0,
+            };
+        }
+        position
+    }
+
+    fn sync_yield_position_timestamp(
+        ref world: dojo::world::WorldStorage,
+        mut position: YieldPosition,
+    ) -> YieldPosition {
+        position.last_accrual_ts = get_block_timestamp();
+        world.write_model(@position);
+        position
+    }
+
+    fn settle_user_rewards(
+        ref world: dojo::world::WorldStorage,
+        mut pool: YieldPoolState,
+        mut position: YieldPosition,
+    ) -> (YieldPoolState, YieldPosition) {
+        if position.principal == 0 {
+            position.reward_index_snapshot = pool.reward_index;
+            world.write_model(@position);
+            world.write_model(@pool);
+            return (pool, position);
+        }
+
+        if pool.reward_index <= position.reward_index_snapshot {
+            return (pool, position);
+        }
+
+        let delta_index = pool.reward_index - position.reward_index_snapshot;
+        let accrued = (position.principal * delta_index) / REWARD_INDEX_SCALE;
+        if accrued > 0 {
+            position.pending_rewards += accrued;
+            pool.total_pending_rewards += accrued;
+        }
+        position.reward_index_snapshot = pool.reward_index;
+        world.write_model(@position);
+        world.write_model(@pool);
+        (pool, position)
+    }
+
+    fn ratio_amount(base: u128, bps: u32) -> u128 {
+        if base == 0 || bps == 0 {
+            return 0;
+        }
+        let bps_u128: u128 = bps.try_into().unwrap();
+        (base * bps_u128) / 10_000
+    }
+
+    fn min_u128(a: u128, b: u128) -> u128 {
+        if a < b { a } else { b }
+    }
+
+    fn assert_yield_admin(ref world: dojo::world::WorldStorage, caller: ContractAddress) {
+        let admin_state = read_admin_or_default(ref world);
+        if admin_state.admin == zero_address() {
+            return;
+        }
+        assert!(caller == admin_state.admin, "Only yield admin");
     }
 
     fn write_post(
@@ -731,12 +946,441 @@ pub mod actions {
 
             world.write_model(@post);
         }
+
+        fn yield_deposit(
+            ref self: ContractState,
+            amount: u128,
+            use_btc_mode: bool
+        ) {
+            assert!(amount > 0, "Amount must be greater than 0");
+            let mut world = self.world_default();
+            let caller = starknet::get_caller_address();
+            let mut pool = read_yield_pool_or_default(ref world);
+            let mut position = read_yield_position_or_default(ref world, caller);
+            let mut risk = read_risk_state_or_default(ref world);
+            let strategy = read_strategy_state_or_default(ref world);
+            let (mut pool, mut position) = settle_user_rewards(ref world, pool, position);
+
+            let token = IERC20Dispatcher { contract_address: payment_token() };
+            let ok = token.transfer_from(
+                caller,
+                get_contract_address(),
+                u256 { low: amount, high: 0 },
+            );
+            assert!(ok, "Deposit transfer failed");
+
+            position.principal += amount;
+            position.use_btc_mode = use_btc_mode;
+            position.reward_index_snapshot = pool.reward_index;
+            pool.principal_pool += amount;
+            risk.liquid_buffer += amount;
+            position = sync_yield_position_timestamp(ref world, position);
+
+            if strategy.enabled && !strategy.paused && strategy.adapter != zero_address() {
+                let target_buffer = ratio_amount(pool.principal_pool, risk.target_buffer_bps);
+                let max_staked = ratio_amount(pool.principal_pool, risk.max_exposure_bps);
+                if risk.liquid_buffer > target_buffer && risk.staked_principal < max_staked {
+                    let excess = risk.liquid_buffer - target_buffer;
+                    let capacity = max_staked - risk.staked_principal;
+                    let to_stake = min_u128(excess, capacity);
+                    if to_stake > 0 {
+                        let moved = token.transfer(strategy.adapter, u256 { low: to_stake, high: 0 });
+                        assert!(moved, "Stake transfer to adapter failed");
+                        let adapter = IStakingAdapterDispatcher { contract_address: strategy.adapter };
+                        let staked = adapter.stake(to_stake);
+                        assert!(staked, "Adapter stake failed");
+                        risk.liquid_buffer -= to_stake;
+                        risk.staked_principal += to_stake;
+                    }
+                }
+            }
+
+            world.write_model(@position);
+            world.write_model(@pool);
+            world.write_model(@risk);
+        }
+
+        fn yield_withdraw(
+            ref self: ContractState,
+            amount: u128
+        ) {
+            assert!(amount > 0, "Amount must be greater than 0");
+            let mut world = self.world_default();
+            let caller = starknet::get_caller_address();
+            let mut pool = read_yield_pool_or_default(ref world);
+            let mut position = read_yield_position_or_default(ref world, caller);
+            let mut risk = read_risk_state_or_default(ref world);
+            let strategy = read_strategy_state_or_default(ref world);
+            let now = get_block_timestamp();
+            let (_pool, mut position) = settle_user_rewards(ref world, pool, position);
+
+            assert!(position.principal >= amount, "Insufficient staked principal");
+            position.principal -= amount;
+            position.reward_index_snapshot = pool.reward_index;
+            position = sync_yield_position_timestamp(ref world, position);
+
+            let immediate = min_u128(amount, risk.liquid_buffer);
+            let queued = amount - immediate;
+
+            let mut queue_item = read_exit_queue_or_default(ref world, caller);
+            if queued > 0 {
+                queue_item.queued_principal += queued;
+            }
+            queue_item.requested_at = now;
+            world.write_model(@queue_item);
+
+            if immediate > 0 {
+                let token = IERC20Dispatcher { contract_address: payment_token() };
+                let paid = token.transfer(caller, u256 { low: immediate, high: 0 });
+                assert!(paid, "Principal withdraw transfer failed");
+                assert!(pool.principal_pool >= immediate, "Principal pool accounting mismatch");
+                pool.principal_pool -= immediate;
+                risk.liquid_buffer -= immediate;
+            }
+
+            if queued > 0 && strategy.enabled && !strategy.paused && strategy.adapter != zero_address() {
+                let adapter = IStakingAdapterDispatcher { contract_address: strategy.adapter };
+                let requested = adapter.request_unstake(queued);
+                if requested {
+                    let token = IERC20Dispatcher { contract_address: payment_token() };
+                    let paid = token.transfer(caller, u256 { low: queued, high: 0 });
+                    if paid {
+                        if queue_item.queued_principal >= queued {
+                            queue_item.queued_principal -= queued;
+                        } else {
+                            queue_item.queued_principal = 0;
+                        }
+                        queue_item.processed_at = now;
+                        world.write_model(@queue_item);
+                        assert!(pool.principal_pool >= queued, "Principal pool accounting mismatch");
+                        pool.principal_pool -= queued;
+                        if risk.staked_principal >= queued {
+                            risk.staked_principal -= queued;
+                        } else {
+                            risk.staked_principal = 0;
+                        }
+                    }
+                }
+            }
+
+            world.write_model(@position);
+            world.write_model(@pool);
+            world.write_model(@risk);
+        }
+
+        fn yield_claim(ref self: ContractState) -> u128 {
+            let mut world = self.world_default();
+            let caller = starknet::get_caller_address();
+            let mut pool = read_yield_pool_or_default(ref world);
+            let mut position = read_yield_position_or_default(ref world, caller);
+            let (mut pool, mut position) = settle_user_rewards(ref world, pool, position);
+
+            let claimable = if position.pending_rewards < pool.earnings_pool {
+                position.pending_rewards
+            } else {
+                pool.earnings_pool
+            };
+            if claimable == 0 {
+                return 0;
+            }
+
+            let token = IERC20Dispatcher { contract_address: payment_token() };
+            let ok = token.transfer(caller, u256 { low: claimable, high: 0 });
+            assert!(ok, "Earnings payout transfer failed");
+
+            pool.earnings_pool -= claimable;
+            if pool.total_pending_rewards >= claimable {
+                pool.total_pending_rewards -= claimable;
+            } else {
+                pool.total_pending_rewards = 0;
+            }
+            if position.pending_rewards >= claimable {
+                position.pending_rewards -= claimable;
+            } else {
+                position.pending_rewards = 0;
+            }
+            position = sync_yield_position_timestamp(ref world, position);
+            world.write_model(@position);
+            world.write_model(@pool);
+            claimable
+        }
+
+        fn yield_set_btc_mode(
+            ref self: ContractState,
+            use_btc_mode: bool
+        ) {
+            let mut world = self.world_default();
+            let caller = starknet::get_caller_address();
+            let mut pool = read_yield_pool_or_default(ref world);
+            let mut position = read_yield_position_or_default(ref world, caller);
+            let (_pool, mut position) = settle_user_rewards(ref world, pool, position);
+            position.use_btc_mode = use_btc_mode;
+            position = sync_yield_position_timestamp(ref world, position);
+            world.write_model(@position);
+        }
+
+        fn yield_fund_earnings_pool(
+            ref self: ContractState,
+            amount: u128
+        ) {
+            assert!(amount > 0, "Amount must be greater than 0");
+            let mut world = self.world_default();
+            let caller = starknet::get_caller_address();
+            let mut pool = read_yield_pool_or_default(ref world);
+            let token = IERC20Dispatcher { contract_address: payment_token() };
+            let ok = token.transfer_from(
+                caller,
+                get_contract_address(),
+                u256 { low: amount, high: 0 },
+            );
+            assert!(ok, "Fund earnings transfer failed");
+            pool.earnings_pool += amount;
+            if pool.principal_pool > 0 {
+                let delta_index = (amount * REWARD_INDEX_SCALE) / pool.principal_pool;
+                if delta_index > 0 {
+                    pool.reward_index += delta_index;
+                }
+            }
+            world.write_model(@pool);
+        }
+
+        fn yield_configure_strategy(
+            ref self: ContractState,
+            strategy_kind: u8,
+            adapter: ContractAddress,
+            staking_target: ContractAddress,
+            rewards_target: ContractAddress,
+            enabled: bool,
+            paused: bool
+        ) {
+            let mut world = self.world_default();
+            let caller = starknet::get_caller_address();
+            assert_yield_admin(ref world, caller);
+            let strategy = YieldStrategyState {
+                pool_id: YIELD_POOL_ID,
+                strategy_kind,
+                adapter,
+                staking_target,
+                rewards_target,
+                enabled,
+                paused,
+            };
+            world.write_model(@strategy);
+        }
+
+        fn yield_set_risk_params(
+            ref self: ContractState,
+            target_buffer_bps: u32,
+            max_exposure_bps: u32,
+            rebalance_threshold: u128,
+            protocol_fee_bps: u32
+        ) {
+            assert!(target_buffer_bps <= 10_000, "target_buffer_bps out of range");
+            assert!(max_exposure_bps <= 10_000, "max_exposure_bps out of range");
+            assert!(protocol_fee_bps <= 10_000, "protocol_fee_bps out of range");
+
+            let mut world = self.world_default();
+            let caller = starknet::get_caller_address();
+            assert_yield_admin(ref world, caller);
+            let mut risk = read_risk_state_or_default(ref world);
+            risk.target_buffer_bps = target_buffer_bps;
+            risk.max_exposure_bps = max_exposure_bps;
+            risk.rebalance_threshold = rebalance_threshold;
+            risk.protocol_fee_bps = protocol_fee_bps;
+            world.write_model(@risk);
+        }
+
+        fn yield_rebalance(ref self: ContractState) {
+            let mut world = self.world_default();
+            let pool = read_yield_pool_or_default(ref world);
+            let mut risk = read_risk_state_or_default(ref world);
+            let strategy = read_strategy_state_or_default(ref world);
+
+            if !strategy.enabled || strategy.paused || strategy.adapter == zero_address() {
+                return;
+            }
+
+            let adapter = IStakingAdapterDispatcher { contract_address: strategy.adapter };
+            let target_buffer = ratio_amount(pool.principal_pool, risk.target_buffer_bps);
+            let max_staked = ratio_amount(pool.principal_pool, risk.max_exposure_bps);
+
+            if risk.liquid_buffer > target_buffer {
+                let excess = risk.liquid_buffer - target_buffer;
+                if excess >= risk.rebalance_threshold && risk.staked_principal < max_staked {
+                    let capacity = max_staked - risk.staked_principal;
+                    let to_stake = min_u128(excess, capacity);
+                    if to_stake > 0 {
+                        let token = IERC20Dispatcher { contract_address: payment_token() };
+                        let moved = token.transfer(strategy.adapter, u256 { low: to_stake, high: 0 });
+                        assert!(moved, "Rebalance transfer to adapter failed");
+                        let ok = adapter.stake(to_stake);
+                        assert!(ok, "Adapter stake failed");
+                        risk.liquid_buffer -= to_stake;
+                        risk.staked_principal += to_stake;
+                    }
+                }
+            } else {
+                let needed = target_buffer - risk.liquid_buffer;
+                if needed >= risk.rebalance_threshold && risk.staked_principal > 0 {
+                    let to_unstake = risk.staked_principal;
+                    if to_unstake > 0 {
+                        let ok = adapter.request_unstake(to_unstake);
+                        if ok {
+                            risk.staked_principal -= to_unstake;
+                            risk.liquid_buffer += to_unstake;
+                        }
+                    }
+                }
+            }
+            world.write_model(@risk);
+        }
+
+        fn yield_harvest(ref self: ContractState) -> u128 {
+            let mut world = self.world_default();
+            let mut pool = read_yield_pool_or_default(ref world);
+            let mut risk = read_risk_state_or_default(ref world);
+            let strategy = read_strategy_state_or_default(ref world);
+
+            if !strategy.enabled || strategy.paused || strategy.adapter == zero_address() {
+                return 0;
+            }
+
+            let adapter = IStakingAdapterDispatcher { contract_address: strategy.adapter };
+            let harvested = adapter.claim_rewards();
+            if harvested == 0 {
+                return 0;
+            }
+
+            let fee_cut = ratio_amount(harvested, risk.protocol_fee_bps);
+            let net_rewards = harvested - fee_cut;
+            let users_cut = ratio_amount(net_rewards, pool.user_share_bps);
+            if users_cut > 0 {
+                pool.earnings_pool += users_cut;
+                if pool.principal_pool > 0 {
+                    let delta_index = (users_cut * REWARD_INDEX_SCALE) / pool.principal_pool;
+                    if delta_index > 0 {
+                        pool.reward_index += delta_index;
+                    }
+                }
+            }
+            risk.last_harvest_ts = get_block_timestamp();
+            world.write_model(@pool);
+            world.write_model(@risk);
+            users_cut
+        }
+
+        fn yield_process_exit_queue(
+            ref self: ContractState,
+            user: ContractAddress
+        ) -> u128 {
+            let mut world = self.world_default();
+            let mut queue_item = read_exit_queue_or_default(ref world, user);
+            if queue_item.queued_principal == 0 {
+                return 0;
+            }
+
+            let strategy = read_strategy_state_or_default(ref world);
+            let mut pool = read_yield_pool_or_default(ref world);
+            let mut risk = read_risk_state_or_default(ref world);
+            let mut total_payout: u128 = 0;
+
+            let immediate = min_u128(queue_item.queued_principal, risk.liquid_buffer);
+            if immediate > 0 {
+                let token = IERC20Dispatcher { contract_address: payment_token() };
+                let ok = token.transfer(user, u256 { low: immediate, high: 0 });
+                assert!(ok, "Queued withdraw transfer failed");
+                risk.liquid_buffer -= immediate;
+                assert!(pool.principal_pool >= immediate, "Principal pool accounting mismatch");
+                pool.principal_pool -= immediate;
+                if queue_item.queued_principal >= immediate {
+                    queue_item.queued_principal -= immediate;
+                } else {
+                    queue_item.queued_principal = 0;
+                }
+                total_payout += immediate;
+            }
+
+            if queue_item.queued_principal > 0 && strategy.enabled && !strategy.paused && strategy.adapter != zero_address() {
+                let payout = queue_item.queued_principal;
+                let adapter = IStakingAdapterDispatcher { contract_address: strategy.adapter };
+                let requested = adapter.request_unstake(payout);
+                if requested {
+                    let token = IERC20Dispatcher { contract_address: payment_token() };
+                    let ok = token.transfer(user, u256 { low: payout, high: 0 });
+                    if ok {
+                        assert!(pool.principal_pool >= payout, "Principal pool accounting mismatch");
+                        pool.principal_pool -= payout;
+                        if queue_item.queued_principal >= payout {
+                            queue_item.queued_principal -= payout;
+                        } else {
+                            queue_item.queued_principal = 0;
+                        }
+                        if risk.staked_principal >= payout {
+                            risk.staked_principal -= payout;
+                        } else {
+                            risk.staked_principal = 0;
+                        }
+                        total_payout += payout;
+                    }
+                }
+            }
+
+            if total_payout > 0 {
+                queue_item.processed_at = get_block_timestamp();
+            }
+
+            world.write_model(@pool);
+            world.write_model(@risk);
+            world.write_model(@queue_item);
+            total_payout
+        }
+
+        fn yield_set_admin(
+            ref self: ContractState,
+            admin: ContractAddress
+        ) {
+            assert!(admin != zero_address(), "admin cannot be zero");
+            let mut world = self.world_default();
+            let caller = starknet::get_caller_address();
+            let current = read_admin_or_default(ref world);
+            if current.admin != zero_address() {
+                assert!(caller == current.admin, "Only current admin");
+            }
+            let next = YieldAdminState { pool_id: YIELD_POOL_ID, admin };
+            world.write_model(@next);
+        }
     }
 
     #[generate_trait]
     impl InternalImpl of InternalTrait {
         fn world_default(self: @ContractState) -> dojo::world::WorldStorage {
             self.world(@"di")
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{min_u128, ratio_amount};
+
+        #[test]
+        fn test_ratio_amount_handles_zero_values() {
+            assert(ratio_amount(0, 5000) == 0, 'ratio zero base');
+            assert(ratio_amount(1000, 0) == 0, 'ratio zero bps');
+        }
+
+        #[test]
+        fn test_ratio_amount_bps_conversion() {
+            // 25% of 2000 = 500
+            assert(ratio_amount(2000, 2500) == 500, 'ratio 25 percent');
+            // 100% of amount should be unchanged.
+            assert(ratio_amount(123456789, 10000) == 123456789, 'ratio 100 percent');
+        }
+
+        #[test]
+        fn test_min_u128_selects_smaller_value() {
+            assert(min_u128(3, 9) == 3, 'min first');
+            assert(min_u128(9, 3) == 3, 'min second');
+            assert(min_u128(7, 7) == 7, 'min equal');
         }
     }
 }

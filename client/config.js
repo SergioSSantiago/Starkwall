@@ -46,3 +46,11 @@ export const PAYMENT_TOKEN_ADDRESS = STRK_TOKEN_ADDRESS || (IS_SEPOLIA ? SEPOLIA
 
 // Optional local-only faucet.
 export const FAUCET_URL = String(import.meta.env?.VITE_FAUCET_URL || 'http://127.0.0.1:3001')
+
+// Yield strategy adapter config (optional runtime metadata used by UI/ops scripts).
+export const YIELD_STRATEGY_KIND = Number(import.meta.env?.VITE_YIELD_STRATEGY_KIND || 0)
+export const YIELD_ADAPTER_ADDRESS = String(import.meta.env?.VITE_YIELD_ADAPTER_ADDRESS || '')
+export const YIELD_STAKING_TARGET = String(import.meta.env?.VITE_YIELD_STAKING_TARGET || '')
+export const YIELD_REWARDS_TARGET = String(import.meta.env?.VITE_YIELD_REWARDS_TARGET || '')
+export const YIELD_OPERATIONAL_TARGET = String(import.meta.env?.VITE_YIELD_OPERATIONAL_TARGET || '')
+export const YIELD_MODE = String(import.meta.env?.VITE_YIELD_MODE || 'user_direct').toLowerCase()
