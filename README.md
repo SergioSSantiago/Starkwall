@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./client/logo-wall.svg" alt="Starkwall logo" width="72" />
+</p>
+
 # Starkwall
 
 Starkwall is an onchain social canvas on Starknet built with Dojo, Torii, and Cartridge Controller.
