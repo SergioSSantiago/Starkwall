@@ -656,6 +656,13 @@
     background-repeat: no-repeat;
     flex: 0 0 auto;
   }
+
+  .logo-wall-img {
+    width: 44px;
+    height: 30px;
+    flex: 0 0 auto;
+    display: block;
+  }
   
   #connect-screen > p {
     font-size: 18px;
@@ -781,7 +788,8 @@
     gap: 10px;
   }
 
-  #connect-screen .logo-wall {
+  #connect-screen .logo-wall,
+  #connect-screen .logo-wall-img {
     width: 36px;
     height: 24px;
     border-radius: 6px;

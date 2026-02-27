@@ -1,3 +1,415 @@
+# Starkwall
+
+Starkwall is an onchain social canvas on Starknet built with Dojo, Torii, and Cartridge Controller.
+
+## Live Deployment
+
+- **Production URL:** `https://www.starkwall.com`
+- **Network:** Starknet Sepolia
+
+## Current Product Status
+
+### Stable and validated
+
+- Wallet auth and session restore with Cartridge Controller
+- Onchain post creation (free/paid), marketplace listing/purchase, and ownership transfer
+- Auction flow (3x3 groups, bids, finalization, winner slot content)
+- Social graph (profile, follow, unfollow, followers/following UI)
+- STRK yield flow:
+  - deposit (`+`)
+  - return to balance (`↩`)
+  - claim rewards (`✨`)
+  - queue handling and direct onchain state reads
+
+### Integrated but pending practical validation
+
+- WBTC strategy path is fully wired (contracts + frontend + wallet policies), but user E2E validation depends on obtaining WBTC test liquidity in Sepolia.
+
+## Tech Stack
+
+- **Contracts:** Cairo `2.12.2`, Dojo `1.7.1`
+- **Indexer:** Torii
+- **Frontend:** Vanilla JS + Vite
+- **Wallet:** Cartridge Controller
+- **Environments:** local Katana + Starknet Sepolia
+
+## Feature Inventory (Actual Behavior)
+
+### Wallet and auth
+
+- Connect/disconnect via Cartridge Controller
+- Session restore when available
+- Network-aware runtime behavior (`dev` vs `sepolia`)
+
+### Posts
+
+- Free and paid post creation onchain
+- Contract-level constraints:
+  - no negative coordinates
+  - no overlap
+- Paid post pricing is size-based exponential
+
+### Marketplace
+
+- Owner can set/remove sale price
+- Buyer flow uses token approval + contract purchase
+- Ownership is transferred onchain
+
+### Auctions
+
+- Create 3x3 auction groups
+- Place bids with previous top-bid refund logic
+- Finalize slots after end time
+- Winner can publish slot content
+
+### Social
+
+- Set unique profile username
+- Follow/unfollow
+- Follower/following counters and modals
+
+### Yield
+
+- Two pools in contract logic:
+  - pool `0`: STRK
+  - pool `1`: BTC-wrapper strategy (currently WBTC config in Sepolia)
+- Direct view method `yield_get_user_state` is used by frontend as source of truth (Torii fallback if needed)
+- Queue processing, harvest, and rebalance entrypoints are permissionless calls
+
+## Contracts Overview
+
+Main system contract:
+- `contracts/src/systems/actions.cairo` (`di-actions`)
+
+Adapter contracts:
+- `contracts/src/systems/yield_adapter.cairo`
+  - `mock_native_staking_adapter`
+  - `official_native_staking_adapter`
+
+Primary entrypoint groups in `di-actions`:
+- Posts: `create_post`, `set_post_price`, `buy_post`
+- Auctions: `create_auction_post_3x3`, `place_bid`, `finalize_auction_slot`, `set_won_slot_content`
+- Social: `set_profile`, `follow`, `unfollow`
+- Yield user: `yield_deposit`, `yield_withdraw`, `yield_claim`, `yield_set_btc_mode`
+- Yield operations: `yield_harvest`, `yield_rebalance`, `yield_process_exit_queue`
+- Yield admin: `yield_set_admin`, `yield_configure_strategy_for_pool`, `yield_set_risk_params_for_pool`, `yield_rebalance_pool`, `yield_harvest_pool`
+- Yield view: `yield_get_user_state`
+
+## Important Addresses (Sepolia config)
+
+- STRK: `0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d`
+- WBTC: `0x00452bd5c0512a61df7c7be8cfea5e4f893cb40e126bdc40aee6054db955129e`
+
+## Local Development
+
+### Prerequisites
+
+- Dojo/Sozo toolchain compatible with this repo (Sozo `1.8.6` used in operations)
+- Node.js 18+
+- pnpm 10+
+
+### Run locally
+
+1) Start Katana
+```bash
+cd contracts
+katana --config katana.toml
+```
+
+2) Build and migrate contracts
+```bash
+cd contracts
+sozo build
+sozo migrate
+```
+
+3) Start Torii
+```bash
+cd contracts
+torii --config torii.toml
+```
+
+4) Start frontend
+```bash
+cd client
+pnpm install
+pnpm run dev
+```
+
+## Client Env Vars
+
+Defined in `client/config.js`:
+
+- `VITE_NETWORK` (`dev` | `sepolia`)
+- `VITE_RPC_URL`
+- `VITE_TORII_URL`
+- `VITE_STRK_TOKEN` (optional override)
+- `VITE_FAUCET_URL` (local/dev helper)
+- `VITE_WBTC_FAUCET_URL` (optional UI helper)
+- `VITE_YIELD_DUAL_POOL_ENABLED`
+- Optional yield metadata:
+  - `VITE_YIELD_STRATEGY_KIND`
+  - `VITE_YIELD_ADAPTER_ADDRESS`
+  - `VITE_YIELD_STAKING_TARGET`
+  - `VITE_YIELD_REWARDS_TARGET`
+  - `VITE_YIELD_OPERATIONAL_TARGET`
+  - `VITE_YIELD_MODE`
+
+## Yield Operations and Keeper
+
+- GitHub Actions cron keeper is intentionally removed.
+- If needed, run the local script manually:
+
+```bash
+./scripts/yield-keeper.sh sepolia 30
+```
+
+## Known Caveats
+
+- WBTC test acquisition on Sepolia can be difficult and is the main blocker for BTC-path E2E user testing.
+- If Torii lags, frontend still relies on direct onchain yield view.
+- Yield admin protections apply after admin initialization.
+
+## Repo Structure
+
+```text
+contracts/
+  src/
+    models.cairo
+    systems/
+      actions.cairo
+      yield_adapter.cairo
+  dojo_dev.toml
+  dojo_sepolia.toml
+  torii.toml
+  torii_sepolia.toml
+
+client/
+  main.js
+  dojoManager.js
+  postManager.js
+  controller.js
+  config.js
+  canvas.js
+  index.html
+  style.css
+
+scripts/
+  faucet.sh
+  yield-e2e.sh
+  yield-keeper.sh
+```
+
+# Starkwall
+
+Starkwall is an onchain social canvas on Starknet built with Dojo + Torii + Cartridge Controller.
+
+The app combines:
+- immutable post ownership,
+- social graph actions (profile/follow),
+- marketplace and auctions,
+- yield flows with a live STRK pool and a WBTC strategy path.
+
+## Current Status
+
+What is production-ready today:
+- STRK staking flow (deposit/withdraw/claim/queue processing) is live and validated on Sepolia.
+- Social and post marketplace flows are live.
+- Auction flows are live (3x3 auction groups, bidding, finalization, winner content).
+
+What is integrated but still pending practical validation:
+- WBTC strategy path is wired end-to-end (contract + client + policies), but Sepolia test liquidity/acquisition remains the blocker for full user validation.
+
+## Tech Stack
+
+- **Contracts:** Cairo 2.12.2, Dojo 1.7.1
+- **Indexer:** Torii
+- **Frontend:** Vanilla JS + Vite
+- **Wallet:** Cartridge Controller
+- **Network targets:** local Katana + Starknet Sepolia
+
+## What The App Actually Does
+
+### Wallet & Auth
+
+- Connects via Cartridge Controller.
+- Restores previous session when possible.
+- Uses manifest-gated feature policies (if an entrypoint is missing in manifest, related UI/actions are disabled or degraded gracefully).
+
+### Posts
+
+- Creates free or paid posts onchain.
+- Enforces non-negative coordinates and no overlap at contract level.
+- Paid posts use exponential pricing by size.
+- Stores image/caption as Cairo byte arrays.
+
+### Marketplace
+
+- Post owners can list/unlist posts with a sale price.
+- Buyers purchase through ERC20 approval + contract purchase.
+- Ownership updates onchain.
+
+### Auctions
+
+- Creates 3x3 auction groups:
+  - center tile (auction center),
+  - 8 auction slots.
+- Supports bidding, refund of previous top bidder, finalization, and winner slot content publishing.
+
+### Social
+
+- Profile username set onchain with uniqueness index.
+- Follow/unfollow onchain.
+- Follower/following counts and modals in UI.
+
+### Yield
+
+- Two pools in contract logic:
+  - pool `0`: STRK
+  - pool `1`: BTC wrapper strategy (currently configured to WBTC address in Sepolia setup)
+- User flow:
+  - deposit (`+`),
+  - return to balance (`↩`, including queued exits),
+  - claim rewards (`✨`).
+- Contract exposes `yield_get_user_state` for direct onchain reads (frontend uses this first, Torii fallback second).
+- Queue processing and rebalance/harvest are permissionless calls.
+
+## Contract Surface (High Level)
+
+Main system contract: `contracts/src/systems/actions.cairo` (`di-actions` tag).
+
+Core families of entrypoints:
+- Posts: `create_post`, `set_post_price`, `buy_post`
+- Auctions: `create_auction_post_3x3`, `place_bid`, `finalize_auction_slot`, `set_won_slot_content`
+- Social: `set_profile`, `follow`, `unfollow`
+- Yield user: `yield_deposit`, `yield_withdraw`, `yield_claim`, `yield_set_btc_mode`
+- Yield operations: `yield_harvest`, `yield_rebalance`, `yield_process_exit_queue`
+- Yield admin: `yield_set_admin`, `yield_configure_strategy_for_pool`, `yield_set_risk_params_for_pool`, `yield_rebalance_pool`, `yield_harvest_pool`
+- Yield view: `yield_get_user_state`
+
+Adapter contracts live in `contracts/src/systems/yield_adapter.cairo`:
+- `mock_native_staking_adapter`
+- `official_native_staking_adapter`
+
+## Local Development
+
+### Prerequisites
+
+- `sozo` / Dojo toolchain compatible with project (`1.8.6` used in this repo flow)
+- Node.js 18+
+- `pnpm` 10+
+
+### 1) Start Katana
+
+```bash
+cd contracts
+katana --config katana.toml
+```
+
+### 2) Build and migrate contracts
+
+```bash
+cd contracts
+sozo build
+sozo migrate
+```
+
+### 3) Start Torii
+
+```bash
+cd contracts
+torii --config torii.toml
+```
+
+### 4) Start frontend
+
+```bash
+cd client
+pnpm install
+pnpm run dev
+```
+
+Open the local URL shown by Vite.
+
+## Sepolia Notes
+
+- Sepolia world is tracked in manifests and `contracts/torii_sepolia.toml`.
+- Client Sepolia token defaults are in `client/config.js`:
+  - STRK token
+  - WBTC token
+- Production UI requires a valid `VITE_TORII_URL`.
+
+Useful addresses currently used by the app config:
+- Sepolia STRK: `0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d`
+- Sepolia WBTC: `0x00452bd5c0512a61df7c7be8cfea5e4f893cb40e126bdc40aee6054db955129e`
+
+## Env Vars (Client)
+
+Defined in `client/config.js`:
+
+- `VITE_NETWORK` (`dev` or `sepolia`)
+- `VITE_RPC_URL`
+- `VITE_TORII_URL`
+- `VITE_STRK_TOKEN` (optional override)
+- `VITE_FAUCET_URL` (local/dev faucet)
+- `VITE_WBTC_FAUCET_URL` (optional helper link in UI)
+- `VITE_YIELD_DUAL_POOL_ENABLED`
+- Optional yield metadata:
+  - `VITE_YIELD_STRATEGY_KIND`
+  - `VITE_YIELD_ADAPTER_ADDRESS`
+  - `VITE_YIELD_STAKING_TARGET`
+  - `VITE_YIELD_REWARDS_TARGET`
+  - `VITE_YIELD_OPERATIONAL_TARGET`
+  - `VITE_YIELD_MODE`
+
+## Yield Operations
+
+There is **no active GitHub Actions cron keeper** in this repo now.
+
+If you need periodic operations, run the local script manually:
+
+```bash
+./scripts/yield-keeper.sh sepolia 30
+```
+
+It executes harvest/rebalance and can process queue users if configured by env vars.
+
+## Known Limitations / Caveats
+
+- WBTC test acquisition on Sepolia is the main practical blocker for full BTC-path user testing.
+- If Torii indexing lags, UI relies on direct onchain yield reads first and then Torii fallback.
+- Yield admin is enforced after admin is set; initialize admin intentionally as part of ops hardening.
+- Some legacy helper scripts may not match latest calldata signatures; prefer current `sozo` commands and manifests.
+
+## Project Structure
+
+```text
+contracts/
+  src/
+    models.cairo
+    systems/
+      actions.cairo
+      yield_adapter.cairo
+  dojo_dev.toml
+  dojo_sepolia.toml
+  torii.toml
+  torii_sepolia.toml
+
+client/
+  main.js
+  dojoManager.js
+  postManager.js
+  controller.js
+  config.js
+  canvas.js
+  index.html
+
+scripts/
+  faucet.sh
+  yield-e2e.sh
+  yield-keeper.sh
+```
+
 # 🌌 Starkwall
 
 > A decentralized social media platform where posts exist as permanent, ownable tiles on an infinite canvas — powered by Dojo on Starknet.
