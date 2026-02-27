@@ -81,6 +81,162 @@ export class DojoManager {
     return 0
   }
 
+  normalizeAddress(address) {
+    const raw = String(address || '').trim().toLowerCase()
+    if (!raw) return ''
+    const hex = raw.startsWith('0x') ? raw.slice(2) : raw
+    const normalized = hex.replace(/^0+/, '')
+    return `0x${normalized || '0'}`
+  }
+
+  normalizeUsername(username) {
+    return String(username || '').trim().toLowerCase()
+  }
+
+  async computeUsernameHash(username) {
+    const normalized = this.normalizeUsername(username)
+    if (!normalized) return '0x0'
+
+    const bytes = new TextEncoder().encode(normalized)
+    const digest = await crypto.subtle.digest('SHA-256', bytes)
+    const hex = Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('')
+    // felt252 fits up to 251 bits, keep first 62 hex chars (248 bits)
+    return `0x${hex.slice(0, 62) || '0'}`
+  }
+
+  async setProfile(username) {
+    const clean = String(username || '').trim()
+    if (!clean) throw new Error('Username is required')
+    const hash = await this.computeUsernameHash(clean)
+    const usernameBytes = stringToByteArray(clean)
+
+    const tx = await this.account.execute({
+      contractAddress: this.actionsContract.address,
+      entrypoint: 'set_profile',
+      calldata: [...usernameBytes, hash],
+    })
+
+    const receipt = await this.account.waitForTransaction(tx.transaction_hash)
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Set profile transaction reverted'
+      throw new Error(reason)
+    }
+
+    return tx
+  }
+
+  async followUser(followingAddress) {
+    const target = this.normalizeAddress(followingAddress)
+    if (!target) throw new Error('Invalid target address')
+
+    const tx = await this.account.execute({
+      contractAddress: this.actionsContract.address,
+      entrypoint: 'follow',
+      calldata: [target],
+    })
+
+    const receipt = await this.account.waitForTransaction(tx.transaction_hash)
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Follow transaction reverted'
+      throw new Error(reason)
+    }
+
+    return tx
+  }
+
+  async unfollowUser(followingAddress) {
+    const target = this.normalizeAddress(followingAddress)
+    if (!target) throw new Error('Invalid target address')
+
+    const tx = await this.account.execute({
+      contractAddress: this.actionsContract.address,
+      entrypoint: 'unfollow',
+      calldata: [target],
+    })
+
+    const receipt = await this.account.waitForTransaction(tx.transaction_hash)
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Unfollow transaction reverted'
+      throw new Error(reason)
+    }
+
+    return tx
+  }
+
+  async querySocialData() {
+    const [profilesResp, relationsResp, statsResp] = await Promise.all([
+      this.toriiClient.getEntities({
+        query: new ToriiQueryBuilder().withClause(KeysClause(['di-UserProfile'], [], 'VariableLen').build()),
+      }).catch(() => ({ items: [] })),
+      this.toriiClient.getEntities({
+        query: new ToriiQueryBuilder().withClause(KeysClause(['di-FollowRelation'], [], 'VariableLen').build()),
+      }).catch(() => ({ items: [] })),
+      this.toriiClient.getEntities({
+        query: new ToriiQueryBuilder().withClause(KeysClause(['di-FollowStats'], [], 'VariableLen').build()),
+      }).catch(() => ({ items: [] })),
+    ])
+
+    const profiles = []
+    for (const item of (profilesResp?.items || [])) {
+      const model = item?.models?.di?.UserProfile
+      if (!model?.user) continue
+      profiles.push({
+        user: this.normalizeAddress(model.user),
+        username: this.byteArrayToString(model.username),
+        username_norm_hash: model.username_norm_hash,
+      })
+    }
+
+    const relations = []
+    for (const item of (relationsResp?.items || [])) {
+      const model = item?.models?.di?.FollowRelation
+      if (!model?.follower || !model?.following) continue
+      const createdAt = Number(model.created_at ?? model.createdAt ?? 0)
+      if (createdAt <= 0) continue
+      relations.push({
+        follower: this.normalizeAddress(model.follower),
+        following: this.normalizeAddress(model.following),
+        created_at: createdAt,
+      })
+    }
+
+    const stats = []
+    for (const item of (statsResp?.items || [])) {
+      const model = item?.models?.di?.FollowStats
+      if (!model?.user) continue
+      stats.push({
+        user: this.normalizeAddress(model.user),
+        followers_count: Number(model.followers_count ?? model.followersCount ?? 0),
+        following_count: Number(model.following_count ?? model.followingCount ?? 0),
+      })
+    }
+
+    return { profiles, relations, stats }
+  }
+
+  async getFollowCounts(address) {
+    const target = this.normalizeAddress(address)
+    if (!target) return { following: 0, followers: 0 }
+
+    try {
+      const social = await this.querySocialData()
+      const stat = social.stats.find((s) => s.user === target)
+      if (stat) {
+        return { following: Number(stat.following_count || 0), followers: Number(stat.followers_count || 0) }
+      }
+
+      let following = 0
+      let followers = 0
+      for (const rel of social.relations) {
+        if (rel.follower === target) following += 1
+        if (rel.following === target) followers += 1
+      }
+      return { following, followers }
+    } catch {
+      return { following: 0, followers: 0 }
+    }
+  }
+
   async buyPostWithPayment(postId, sellerAddress, price) {
     const tokenAddr = PAYMENT_TOKEN_ADDRESS;
     if (!tokenAddr) throw new Error('No token configured. Set VITE_STRK_TOKEN or deploy STRK (see contracts/DEPLOY_STRK.md).');

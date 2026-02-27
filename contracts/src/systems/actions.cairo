@@ -41,6 +41,22 @@ pub trait IActions<T> {
         caption: ByteArray
     );
 
+    fn set_profile(
+        ref self: T,
+        username: ByteArray,
+        username_norm_hash: felt252
+    );
+
+    fn follow(
+        ref self: T,
+        following: starknet::ContractAddress
+    );
+
+    fn unfollow(
+        ref self: T,
+        following: starknet::ContractAddress
+    );
+
     fn set_post_price(
         ref self: T,
         post_id: u64,
@@ -74,7 +90,7 @@ pub mod actions {
     use super::{IActions, IERC20Dispatcher, IERC20DispatcherTrait};
     use core::traits::TryInto;
     use starknet::{ContractAddress, get_block_timestamp, get_contract_address};
-    use crate::models::{AuctionGroup, AuctionSlot, Post, PostCounter};
+    use crate::models::{AuctionGroup, AuctionSlot, FollowRelation, FollowStats, Post, PostCounter, UserProfile, UsernameIndex};
     use dojo::model::ModelStorage;
 
     const STRK_DECIMALS_FACTOR: u128 = 1000000000000000000;
@@ -160,6 +176,21 @@ pub mod actions {
 
             existing_id += 1;
         };
+    }
+
+    fn zero_address() -> ContractAddress {
+        0.try_into().unwrap()
+    }
+
+    fn read_follow_stats_or_default(
+        ref world: dojo::world::WorldStorage,
+        user: ContractAddress,
+    ) -> FollowStats {
+        let stats: FollowStats = world.read_model(user);
+        if stats.user == zero_address() {
+            return FollowStats { user, followers_count: 0, following_count: 0 };
+        }
+        stats
     }
 
     fn write_post(
@@ -527,6 +558,91 @@ pub mod actions {
                 content_initialized: true,
             };
             world.write_model(@updated_slot);
+        }
+
+        fn set_profile(
+            ref self: ContractState,
+            username: ByteArray,
+            username_norm_hash: felt252
+        ) {
+            let mut world = self.world_default();
+            let caller = starknet::get_caller_address();
+            let zero = zero_address();
+
+            let existing_profile: UserProfile = world.read_model(caller);
+            if existing_profile.user != zero {
+                let old_hash = existing_profile.username_norm_hash;
+                if old_hash != username_norm_hash {
+                    let old_index = UsernameIndex { username_norm_hash: old_hash, user: zero };
+                    world.write_model(@old_index);
+                }
+            }
+
+            let existing_index: UsernameIndex = world.read_model(username_norm_hash);
+            assert!(
+                existing_index.user == zero || existing_index.user == caller,
+                "Username already taken"
+            );
+
+            let profile = UserProfile { user: caller, username, username_norm_hash };
+            world.write_model(@profile);
+
+            let index = UsernameIndex { username_norm_hash, user: caller };
+            world.write_model(@index);
+        }
+
+        fn follow(
+            ref self: ContractState,
+            following: starknet::ContractAddress
+        ) {
+            let mut world = self.world_default();
+            let follower = starknet::get_caller_address();
+            assert!(follower != following, "Cannot follow yourself");
+
+            let existing: FollowRelation = world.read_model((follower, following));
+            assert!(existing.created_at == 0, "Already following");
+
+            let relation = FollowRelation {
+                follower,
+                following,
+                created_at: get_block_timestamp(),
+            };
+            world.write_model(@relation);
+
+            let mut follower_stats = read_follow_stats_or_default(ref world, follower);
+            follower_stats.following_count += 1;
+            world.write_model(@follower_stats);
+
+            let mut following_stats = read_follow_stats_or_default(ref world, following);
+            following_stats.followers_count += 1;
+            world.write_model(@following_stats);
+        }
+
+        fn unfollow(
+            ref self: ContractState,
+            following: starknet::ContractAddress
+        ) {
+            let mut world = self.world_default();
+            let follower = starknet::get_caller_address();
+            assert!(follower != following, "Cannot unfollow yourself");
+
+            let existing: FollowRelation = world.read_model((follower, following));
+            assert!(existing.created_at > 0, "Follow relation does not exist");
+
+            let relation = FollowRelation { follower, following, created_at: 0 };
+            world.write_model(@relation);
+
+            let mut follower_stats = read_follow_stats_or_default(ref world, follower);
+            if follower_stats.following_count > 0 {
+                follower_stats.following_count -= 1;
+            }
+            world.write_model(@follower_stats);
+
+            let mut following_stats = read_follow_stats_or_default(ref world, following);
+            if following_stats.followers_count > 0 {
+                following_stats.followers_count -= 1;
+            }
+            world.write_model(@following_stats);
         }
 
         fn set_post_price(

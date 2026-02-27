@@ -33,6 +33,17 @@
       <button id="faucet-btn" type="button" title="Obtener 1000 STRK para desarrollo">💧 Obtener STRK</button>
       <button id="logout-btn" type="button">Logout</button>
     </div>
+
+    <div id="ownerFeedView" class="owner-feed-view">
+      <div class="owner-feed-header">
+        <button type="button" id="closeOwnerFeedBtn">← Back</button>
+        <div>
+          <h2 id="ownerFeedTitle">User Posts</h2>
+          <p id="ownerFeedSubtitle"></p>
+        </div>
+      </div>
+      <div id="ownerFeedList" class="owner-feed-list"></div>
+    </div>
     <div id="modal" class="modal">
       <div class="modal-content">
         <h2>Create New Post</h2>
@@ -105,6 +116,29 @@
       </div>
     </div>
 
+    <div id="followersModal" class="modal">
+      <div class="modal-content">
+        <h2>Followers</h2>
+        <div id="followersList" class="social-list"></div>
+        <div class="modal-buttons">
+          <button type="button" id="closeFollowersBtn">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="followingModal" class="modal">
+      <div class="modal-content">
+        <h2>Following</h2>
+        <input type="text" id="followingSearchInput" placeholder="Search by username or wallet (0x...)" />
+        <div id="followingSearchResults" class="social-list"></div>
+        <h3 class="social-subtitle">Users you follow</h3>
+        <div id="followingList" class="social-list"></div>
+        <div class="modal-buttons">
+          <button type="button" id="closeFollowingBtn">Close</button>
+        </div>
+      </div>
+    </div>
+
     <div id="postDetailsModal" class="modal">
       <div class="modal-content">
         <h2>Post Details</h2>
@@ -112,6 +146,11 @@
           <p><strong>Creator:</strong> <span id="postCreator"></span></p>
           <p><strong>Current owner:</strong> <span id="postCurrentOwner"></span></p>
           <p><strong>Caption:</strong> <span id="postCaption"></span></p>
+          <p><strong>On-chain ref:</strong> <span id="postOnchainRef"></span></p>
+          <div class="post-ref-actions">
+            <button type="button" id="copyPostRefBtn">Copy Ref</button>
+            <a id="openPostVoyagerLink" href="#" target="_blank" rel="noreferrer">Open Contract in Voyager</a>
+          </div>
           <p id="postSaleInfo"></p>
           <p id="postAuctionInfo" style="display: none;"></p>
           <div id="auctionBidRow" class="sale-price-row" style="display: none;">
@@ -124,6 +163,8 @@
           </div>
         </div>
         <div id="postDetailsButtons" class="modal-buttons">
+          <button type="button" id="openInOwnerFeedBtn">📚 Open in Owner Feed</button>
+          <button type="button" id="locateOnCanvasBtn">🧭 Locate on Canvas</button>
           <button type="button" id="sellPostBtn" style="display: none;">💰 Sell Post</button>
           <button type="button" id="removeSaleBtn" style="display: none;">❌ Remove from Sale</button>
           <button type="button" id="buyPostBtn" style="display: none;">🛒 Buy Post</button>

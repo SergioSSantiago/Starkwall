@@ -55,3 +55,40 @@ pub struct AuctionSlot {
     pub finalized: bool,
     pub content_initialized: bool, // winner can set image/caption exactly once
 }
+
+#[derive(Drop, Serde)]
+#[dojo::model]
+pub struct UserProfile {
+    #[key]
+    pub user: ContractAddress,
+    pub username: ByteArray,
+    pub username_norm_hash: felt252,
+}
+
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct UsernameIndex {
+    #[key]
+    pub username_norm_hash: felt252,
+    pub user: ContractAddress,
+}
+
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct FollowRelation {
+    #[key]
+    pub follower: ContractAddress,
+    #[key]
+    pub following: ContractAddress,
+    pub created_at: u64,
+}
+
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct FollowStats {
+    #[key]
+    pub user: ContractAddress,
+    pub followers_count: u64,
+    pub following_count: u64,
+}
+

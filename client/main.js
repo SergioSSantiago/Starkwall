@@ -56,6 +56,281 @@ function saveLastSession(address, username) {
   }
 }
 
+const socialState = {
+  loaded: false,
+  profilesByAddress: new Map(),
+  usernameByAddress: new Map(),
+  followingByUser: new Map(),
+  followersByUser: new Map(),
+}
+
+const SOCIAL_FALLBACK_KEY = 'starkwall_social_fallback_v1'
+
+function readSocialFallback() {
+  try {
+    const raw = localStorage.getItem(SOCIAL_FALLBACK_KEY)
+    const parsed = raw ? JSON.parse(raw) : {}
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeSocialFallback(data) {
+  try {
+    localStorage.setItem(SOCIAL_FALLBACK_KEY, JSON.stringify(data || {}))
+  } catch {
+    // ignore
+  }
+}
+
+function applyFallbackFollow(follower, following, shouldFollow) {
+  const f = normalizeSocialAddress(follower)
+  const t = normalizeSocialAddress(following)
+  if (!f || !t || f === t) return false
+
+  const store = readSocialFallback()
+  const list = new Set(Array.isArray(store[f]) ? store[f].map(normalizeSocialAddress).filter(Boolean) : [])
+  if (shouldFollow) list.add(t)
+  else list.delete(t)
+  store[f] = [...list]
+  writeSocialFallback(store)
+  return true
+}
+
+function mergeFallbackIntoSocialState() {
+  const store = readSocialFallback()
+  for (const [follower, list] of Object.entries(store)) {
+    const f = normalizeSocialAddress(follower)
+    if (!f) continue
+    if (!socialState.followingByUser.has(f)) socialState.followingByUser.set(f, new Set())
+
+    for (const targetRaw of (Array.isArray(list) ? list : [])) {
+      const t = normalizeSocialAddress(targetRaw)
+      if (!t || t === f) continue
+      socialState.followingByUser.get(f).add(t)
+      if (!socialState.followersByUser.has(t)) socialState.followersByUser.set(t, new Set())
+      socialState.followersByUser.get(t).add(f)
+    }
+  }
+}
+
+function normalizeSocialAddress(address) {
+  if (address === null || address === undefined) return ''
+
+  try {
+    if (typeof address === 'bigint') {
+      const hex = address.toString(16).replace(/^0+/, '')
+      return `0x${hex || '0'}`
+    }
+    if (typeof address === 'number' && Number.isFinite(address)) {
+      const hex = BigInt(Math.trunc(address)).toString(16).replace(/^0+/, '')
+      return `0x${hex || '0'}`
+    }
+    if (typeof address === 'object') {
+      const low = address?.low
+      const high = address?.high
+      if (low !== undefined || high !== undefined) {
+        const lowBn = BigInt(low || 0)
+        const highBn = BigInt(high || 0)
+        const asHex = ((highBn << 128n) + lowBn).toString(16).replace(/^0+/, '')
+        return `0x${asHex || '0'}`
+      }
+    }
+  } catch {}
+
+  const raw = String(address || '').trim().toLowerCase()
+  if (!raw) return ''
+
+  try {
+    if (raw.startsWith('0x')) {
+      const normalizedHex = raw.slice(2).replace(/^0+/, '')
+      return `0x${normalizedHex || '0'}`
+    }
+    if (/^[0-9]+$/.test(raw)) {
+      const asHex = BigInt(raw).toString(16).replace(/^0+/, '')
+      return `0x${asHex || '0'}`
+    }
+    const normalizedHex = raw.replace(/^0+/, '')
+    return `0x${normalizedHex || '0'}`
+  } catch {
+    const hex = raw.startsWith('0x') ? raw.slice(2) : raw
+    const normalized = hex.replace(/^0+/, '')
+    return `0x${normalized || '0'}`
+  }
+}
+
+function rememberUsername(address, username) {
+  const addr = normalizeSocialAddress(address)
+  const name = String(username || '').trim()
+  if (!addr || !name) return
+  socialState.usernameByAddress.set(addr, name)
+}
+
+function rememberUsersFromPosts(posts = []) {
+  if (!Array.isArray(posts)) return
+  for (const post of posts) {
+    const createdBy = normalizeSocialAddress(post?.created_by)
+    const owner = normalizeSocialAddress(post?.current_owner)
+    const creatorName = String(post?.creator_username || '').trim()
+
+    if (createdBy && creatorName) socialState.usernameByAddress.set(createdBy, creatorName)
+    if (owner && !socialState.usernameByAddress.has(owner)) {
+      socialState.usernameByAddress.set(owner, owner.slice(0, 8) + '...' + owner.slice(-6))
+    }
+  }
+}
+
+function rebuildSocialMapsFromRelations(relations = []) {
+  socialState.followingByUser = new Map()
+  socialState.followersByUser = new Map()
+
+  for (const rel of relations) {
+    const follower = normalizeSocialAddress(rel?.follower)
+    const following = normalizeSocialAddress(rel?.following)
+    if (!follower || !following) continue
+
+    if (!socialState.followingByUser.has(follower)) socialState.followingByUser.set(follower, new Set())
+    if (!socialState.followersByUser.has(following)) socialState.followersByUser.set(following, new Set())
+
+    socialState.followingByUser.get(follower).add(following)
+    socialState.followersByUser.get(following).add(follower)
+  }
+}
+
+async function refreshSocialData() {
+  if (!dojoManager) return
+
+  const social = await dojoManager.querySocialData()
+
+  socialState.profilesByAddress = new Map()
+  for (const profile of social.profiles || []) {
+    const addr = normalizeSocialAddress(profile.user)
+    const username = String(profile.username || '').trim()
+    if (!addr) continue
+    socialState.profilesByAddress.set(addr, profile)
+    if (username) socialState.usernameByAddress.set(addr, username)
+  }
+
+  rebuildSocialMapsFromRelations(social.relations || [])
+  mergeFallbackIntoSocialState()
+  rememberUsersFromPosts(postManager?.posts || [])
+  socialState.loaded = true
+}
+
+async function ensureSocialDataLoaded() {
+  if (socialState.loaded) return
+  await refreshSocialData()
+}
+
+function getSocialFollowersFollowing(targetAddress) {
+  const target = normalizeSocialAddress(targetAddress)
+  const followingSet = socialState.followingByUser.get(target) || new Set()
+  const followersSet = socialState.followersByUser.get(target) || new Set()
+
+  return {
+    followers: [...followersSet],
+    following: [...followingSet],
+    usernames: Object.fromEntries(socialState.usernameByAddress.entries()),
+  }
+}
+
+function setFollowingForUser(userAddress, followingList) {
+  const user = normalizeSocialAddress(userAddress)
+  if (!user) return
+  socialState.followingByUser.set(user, new Set((followingList || []).map(normalizeSocialAddress).filter(Boolean)))
+}
+
+async function followUserLocally(targetAddress) {
+  const me = normalizeSocialAddress(currentAccount?.address)
+  const target = normalizeSocialAddress(targetAddress)
+  if (!me || !target || me === target) return false
+
+  // Update UI immediately for snappy UX, then reconcile in background.
+  applyFallbackFollow(me, target, true)
+  scheduleSocialRevalidation(600)
+
+  dojoManager.followUser(target)
+    .then(() => {
+      scheduleSocialRevalidation(900)
+    })
+    .catch((error) => {
+      console.warn('follow on-chain failed, reverting optimistic state:', error?.message || error)
+      applyFallbackFollow(me, target, false)
+      scheduleSocialRevalidation(200)
+      showToast('Follow failed on-chain')
+    })
+
+  return true
+}
+
+async function unfollowUserLocally(targetAddress) {
+  const me = normalizeSocialAddress(currentAccount?.address)
+  const target = normalizeSocialAddress(targetAddress)
+  if (!me || !target || me === target) return false
+
+  // Update UI immediately for snappy UX, then reconcile in background.
+  applyFallbackFollow(me, target, false)
+  scheduleSocialRevalidation(600)
+
+  dojoManager.unfollowUser(target)
+    .then(() => {
+      scheduleSocialRevalidation(900)
+    })
+    .catch((error) => {
+      console.warn('unfollow on-chain failed, reverting optimistic state:', error?.message || error)
+      applyFallbackFollow(me, target, true)
+      scheduleSocialRevalidation(200)
+      showToast('Unfollow failed on-chain')
+    })
+
+  return true
+}
+
+let socialRevalidationTimer = null
+function scheduleSocialRevalidation(delayMs = 800) {
+  if (socialRevalidationTimer) clearTimeout(socialRevalidationTimer)
+  socialRevalidationTimer = setTimeout(async () => {
+    socialRevalidationTimer = null
+    await refreshSocialData().catch(() => {})
+    await updateWalletInfo().catch(() => {})
+
+    const followingModal = document.getElementById('followingModal')
+    if (followingModal?.classList.contains('active')) {
+      const term = String(document.getElementById('followingSearchInput')?.value || '')
+      renderFollowingModal(term)
+    }
+
+    const followersModal = document.getElementById('followersModal')
+    if (followersModal?.classList.contains('active')) {
+      await openFollowersModal().catch(() => {})
+    }
+  }, Math.max(0, Number(delayMs) || 0))
+}
+
+function getKnownUsersForSearch() {
+  const users = new Set()
+
+  for (const addr of socialState.usernameByAddress.keys()) users.add(normalizeSocialAddress(addr))
+  for (const [addr, set] of socialState.followingByUser.entries()) {
+    users.add(normalizeSocialAddress(addr))
+    for (const x of set) users.add(normalizeSocialAddress(x))
+  }
+
+  for (const post of (postManager?.posts || [])) {
+    users.add(normalizeSocialAddress(post?.created_by))
+    users.add(normalizeSocialAddress(post?.current_owner))
+  }
+
+  const me = normalizeSocialAddress(currentAccount?.address)
+  users.delete(me)
+
+  return [...users].filter(Boolean).map((addr) => ({
+    address: addr,
+    username: socialState.usernameByAddress.get(addr) || (addr.slice(0, 8) + '...' + addr.slice(-6)),
+  }))
+}
+
 /**
  */
 
@@ -86,6 +361,7 @@ async function enterApp(account) {
     currentUsername = cached?.username || null
   }
   saveLastSession(account.address, currentUsername)
+  rememberUsername(account.address, currentUsername || '')
   console.log('✓ Wallet:', currentAccount.address, '| Username:', currentUsername)
 
   if (IS_SEPOLIA && (!TORII_URL || TORII_URL === '')) {
@@ -110,10 +386,16 @@ async function enterApp(account) {
   postManager = new PostManager(canvas, dojoManager)
 
   setupUIHandlers()
-  canvas.setPostClickHandler((post) => showPostDetails(post))
+  canvas.setPostClickHandler((post) => showPostDetails(post, 'canvas'))
 
   connectStatus.textContent = 'Loading posts...'
   await postManager.loadPosts()
+  rememberUsersFromPosts(postManager.posts)
+  await refreshSocialData().catch(() => {})
+
+  // Keep wallet connect flow read-only: do not auto-send profile tx here.
+  // Some wallets/sessions may still resolve stale policies/contracts and fail on connect.
+
   console.log('✓ Loaded', postManager.posts.length, 'posts')
 
   if (postManager.posts.length > 0) {
@@ -926,6 +1208,9 @@ function setupUIHandlers() {
     }
   })
 
+  // Social modal handlers
+  setupSocialModalHandlers()
+
   // Post details modal handlers
   setupPostDetailsHandlers()
 }
@@ -933,6 +1218,8 @@ function setupUIHandlers() {
 function setupPostDetailsHandlers() {
   const postDetailsModal = document.getElementById('postDetailsModal')
   const closePostDetailsBtn = document.getElementById('closePostDetails')
+  const openInOwnerFeedBtn = document.getElementById('openInOwnerFeedBtn')
+  const locateOnCanvasBtn = document.getElementById('locateOnCanvasBtn')
   const sellPostBtn = document.getElementById('sellPostBtn')
   const removeSaleBtn = document.getElementById('removeSaleBtn')
   const buyPostBtn = document.getElementById('buyPostBtn')
@@ -1141,6 +1428,33 @@ function setupPostDetailsHandlers() {
     delete postDetailsModal.dataset.postId
   })
 
+  if (openInOwnerFeedBtn) {
+    openInOwnerFeedBtn.addEventListener('click', () => {
+      if (!currentPost) return
+      const targetPost = (postManager?.posts || []).find((p) => String(p?.id ?? '') === String(currentPost?.id ?? '')) || currentPost
+      const ownerAddress = normalizeSocialAddress(
+        postDetailsModal?.dataset?.ownerAddress || targetPost.current_owner || targetPost.created_by
+      )
+      if (!ownerAddress) return
+      const ownerName = String(document.getElementById('postCurrentOwner')?.textContent || '').trim()
+      postDetailsModal.classList.remove('active')
+      renderOwnerFeed(ownerAddress, ownerName, String(targetPost.id || ''), targetPost)
+    })
+  }
+
+  if (locateOnCanvasBtn) {
+    locateOnCanvasBtn.addEventListener('click', () => {
+      if (!currentPost) return
+      closeOwnerFeedView()
+      postDetailsModal.classList.remove('active')
+      const size = Math.max(1, Number(currentPost.size || 1))
+      const centerX = Number(currentPost.x_position || 0) + (canvas.postWidth * size) / 2
+      const centerY = Number(currentPost.y_position || 0) + (canvas.postHeight * size) / 2
+      canvas.centerOn(centerX, centerY, 0.3)
+      canvas.highlightPost(Number(currentPost.id || 0), 2500)
+    })
+  }
+
   postDetailsModal.addEventListener('click', (e) => {
     if (e.target === postDetailsModal) {
       postDetailsModal.classList.remove('active')
@@ -1249,7 +1563,7 @@ function setupPostDetailsHandlers() {
         if (isUnbidSlotSale) {
           const boughtSlot = postManager.posts.find((p) => Number(p.id) === boughtPostId)
           if (boughtSlot) {
-            showPostDetails(boughtSlot)
+            showPostDetails(boughtSlot, 'canvas')
             showToast('Slot purchased. Now publish your image and caption.')
           }
         }
@@ -1306,13 +1620,18 @@ function setupPostDetailsHandlers() {
   }
 }
 
-function showPostDetails(post) {
+function showPostDetails(post, source = 'canvas') {
   const postDetailsModal = document.getElementById('postDetailsModal')
   const postCreator = document.getElementById('postCreator')
   const postCaption = document.getElementById('postCaption')
   const postCurrentOwner = document.getElementById('postCurrentOwner')
   const postSaleInfo = document.getElementById('postSaleInfo')
   const postAuctionInfo = document.getElementById('postAuctionInfo')
+  const postOnchainRef = document.getElementById('postOnchainRef')
+  const copyPostRefBtn = document.getElementById('copyPostRefBtn')
+  const openPostVoyagerLink = document.getElementById('openPostVoyagerLink')
+  const openInOwnerFeedBtn = document.getElementById('openInOwnerFeedBtn')
+  const locateOnCanvasBtn = document.getElementById('locateOnCanvasBtn')
   const sellPostBtn = document.getElementById('sellPostBtn')
   const removeSaleBtn = document.getElementById('removeSaleBtn')
   const buyPostBtn = document.getElementById('buyPostBtn')
@@ -1327,10 +1646,38 @@ function showPostDetails(post) {
   // Set current post
   window.postDetailsHandlers.setCurrentPost(post)
   postDetailsModal.dataset.postId = String(post.id)
+  postDetailsModal.dataset.ownerAddress = normalizeSocialAddress(post?.current_owner || post?.created_by || '')
+  postDetailsModal.dataset.source = String(source || 'canvas')
+
+  if (openInOwnerFeedBtn) {
+    openInOwnerFeedBtn.style.display = source === 'owner-feed' ? 'none' : 'inline-block'
+  }
+  if (locateOnCanvasBtn) {
+    locateOnCanvasBtn.style.display = source === 'canvas' ? 'none' : 'inline-block'
+  }
 
   // Update content
   postCreator.textContent = post.creator_username || 'Unknown'
   postCaption.textContent = post.caption || 'No caption'
+
+  const worldAddress = String(manifest?.world?.address || '')
+  const postId = Number(post?.id || 0)
+  const onchainRefRaw = `world:${worldAddress}|post_id:${postId}`
+  const onchainRefDisplay = worldAddress
+    ? `${worldAddress.slice(0, 10)}...${worldAddress.slice(-8)} · Post #${postId}`
+    : `Post #${postId}`
+
+  if (postOnchainRef) postOnchainRef.textContent = onchainRefDisplay
+  if (copyPostRefBtn) {
+    copyPostRefBtn.onclick = async () => {
+      const ok = await copyToClipboard(onchainRefRaw)
+      if (ok) showToast('Post ref copied')
+      else alert('Could not copy post reference.')
+    }
+  }
+  if (openPostVoyagerLink) {
+    openPostVoyagerLink.href = worldAddress ? `https://voyager.online/contract/${worldAddress}` : '#'
+  }
 
   const normalizeLocalAddress = (addr) => {
     if (!addr) return ''
@@ -1531,8 +1878,10 @@ async function subscribeToPostUpdates(toriiClient) {
         if (data) {
           console.log('🔔 New post detected, reloading...')
           await postManager.loadPosts()
+          rememberUsersFromPosts(postManager.posts)
           await postManager.loadImages()
           canvas.setPosts(postManager.posts)
+          if (activeOwnerFeedAddress) renderOwnerFeed(activeOwnerFeedAddress, activeOwnerFeedUsername)
         }
         if (error) {
           console.error('Subscription error:', error)
@@ -1553,19 +1902,553 @@ async function subscribeToPostUpdates(toriiClient) {
   }
 }
 
+let activeOwnerFeedAddress = ''
+let activeOwnerFeedUsername = ''
+
+function sortPostsNewestFirst(posts = []) {
+  const parsePostId = (value) => {
+    const raw = String(value ?? '').trim()
+    if (!raw) return 0n
+    try {
+      return BigInt(raw)
+    } catch {
+      return 0n
+    }
+  }
+
+  return [...posts].sort((a, b) => {
+    const aTime = Date.parse(a?.created_at || '')
+    const bTime = Date.parse(b?.created_at || '')
+    const aSafe = Number.isFinite(aTime) ? aTime : 0
+    const bSafe = Number.isFinite(bTime) ? bTime : 0
+    if (bSafe !== aSafe) return bSafe - aSafe
+
+    const aId = parsePostId(a?.id)
+    const bId = parsePostId(b?.id)
+    if (bId > aId) return 1
+    if (bId < aId) return -1
+    return 0
+  })
+}
+
+function dedupePostsById(posts = []) {
+  const byId = new Map()
+  const normalizePostId = (value) => String(value ?? '').trim()
+  for (const post of posts) {
+    const id = normalizePostId(post?.id)
+    if (!id || id === '0') continue
+    if (!byId.has(id)) byId.set(id, post)
+  }
+  return [...byId.values()]
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function drawOwnerFeedPostCanvas(canvasEl, post) {
+  if (!canvasEl) return
+
+  const baseW = 393
+  const baseH = 852
+  // Keep a consistent preview size in owner feed so larger on-chain tiles
+  // (2x2, 3x3, etc.) do not look squashed in the vertical list.
+  const width = baseW
+  const height = baseH
+
+  canvasEl.width = width
+  canvasEl.height = height
+
+  const ctx = canvasEl.getContext('2d')
+  if (!ctx) return
+
+  if (!post) {
+    ctx.clearRect(0, 0, width, height)
+    ctx.fillStyle = '#111'
+    ctx.fillRect(0, 0, width, height)
+    ctx.strokeStyle = '#333'
+    ctx.lineWidth = 2
+    ctx.strokeRect(0, 0, width, height)
+    ctx.fillStyle = '#777'
+    ctx.font = '16px sans-serif'
+    ctx.textAlign = 'center'
+    ctx.fillText('Post unavailable', width / 2, height / 2)
+    ctx.textAlign = 'left'
+    return
+  }
+
+  const isAuctionSlot = Number(post.post_kind) === 2
+  const hasSlotState = Boolean(post.auction_slot)
+  const isFinalizedSlot = Boolean(post.auction_slot?.finalized)
+  const showAuctionPlaceholder = isAuctionSlot && hasSlotState && !isFinalizedSlot
+
+  ctx.clearRect(0, 0, width, height)
+  ctx.fillStyle = '#1a1a1a'
+  ctx.fillRect(0, 0, width, height)
+
+  if (showAuctionPlaceholder) ctx.strokeStyle = '#38b6ff'
+  else if (Number(post.sale_price || 0) > 0) ctx.strokeStyle = '#4CAF50'
+  else if (Boolean(post.is_paid)) ctx.strokeStyle = '#FFD700'
+  else ctx.strokeStyle = '#333'
+  ctx.lineWidth = 2
+  ctx.strokeRect(0, 0, width, height)
+
+  if (!showAuctionPlaceholder && post.imageElement && post.imageElement.complete) {
+    ctx.save()
+    ctx.beginPath()
+    ctx.rect(0, 0, width, height)
+    ctx.clip()
+
+    const imgAspect = post.imageElement.width / post.imageElement.height
+    const postAspect = width / height
+
+    // Owner feed uses contain mode: show full image without cropping.
+    let drawWidth, drawHeight, offsetX, offsetY
+    if (imgAspect > postAspect) {
+      drawWidth = width
+      drawHeight = width / imgAspect
+      offsetX = 0
+      offsetY = (height - drawHeight) / 2
+    } else {
+      drawHeight = height
+      drawWidth = height * imgAspect
+      offsetX = (width - drawWidth) / 2
+      offsetY = 0
+    }
+
+    ctx.drawImage(post.imageElement, offsetX, offsetY, drawWidth, drawHeight)
+    ctx.restore()
+
+    if (post.creator_username) {
+      const ownerHeight = 50
+      const gradient = ctx.createLinearGradient(0, 0, 0, ownerHeight)
+      gradient.addColorStop(0, 'rgba(0, 0, 0, 0.7)')
+      gradient.addColorStop(1, 'rgba(0, 0, 0, 0)')
+      ctx.fillStyle = gradient
+      ctx.fillRect(0, 0, width, ownerHeight)
+
+      ctx.fillStyle = '#fff'
+      ctx.font = 'bold 14px sans-serif'
+      ctx.fillText(String(post.creator_username), 12, 25)
+    }
+
+    if (post.caption) {
+      const captionHeight = 80
+      const gradient = ctx.createLinearGradient(0, height - captionHeight, 0, height)
+      gradient.addColorStop(0, 'rgba(0, 0, 0, 0)')
+      gradient.addColorStop(1, 'rgba(0, 0, 0, 0.8)')
+      ctx.fillStyle = gradient
+      ctx.fillRect(0, height - captionHeight, width, captionHeight)
+
+      ctx.fillStyle = '#fff'
+      ctx.font = '14px sans-serif'
+      ctx.fillText(String(post.caption).substring(0, 50), 10, height - 20)
+    }
+
+    if (Number(post.sale_price || 0) > 0) {
+      const badgeWidth = 120
+      const badgeHeight = 35
+      const badgeX = width - badgeWidth - 10
+      const badgeY = 10
+      ctx.fillStyle = 'rgba(76, 175, 80, 0.9)'
+      ctx.fillRect(badgeX, badgeY, badgeWidth, badgeHeight)
+
+      ctx.fillStyle = '#fff'
+      ctx.font = 'bold 12px sans-serif'
+      ctx.textAlign = 'center'
+      ctx.fillText('FOR SALE', badgeX + badgeWidth / 2, badgeY + 13)
+      ctx.font = '10px sans-serif'
+      ctx.fillText(`${post.sale_price} STRK`, badgeX + badgeWidth / 2, badgeY + 26)
+      ctx.textAlign = 'left'
+    }
+  } else {
+    ctx.fillStyle = '#2a2a2a'
+    ctx.fillRect(10, 10, width - 20, height - 20)
+
+    if (showAuctionPlaceholder) {
+      const highest = Number(post.auction_slot?.highest_bid || 0)
+      const endTs = Number(post.auction_group?.end_time || 0)
+      const now = Math.floor(Date.now() / 1000)
+      const remaining = Math.max(0, endTs - now)
+      const h = Math.floor(remaining / 3600)
+      const m = Math.floor((remaining % 3600) / 60)
+
+      ctx.fillStyle = '#9ecbff'
+      ctx.textAlign = 'center'
+      ctx.font = 'bold 16px sans-serif'
+      ctx.fillText('AUCTION SLOT', width / 2, 70)
+      ctx.font = '13px sans-serif'
+      ctx.fillText(`Highest: ${highest} STRK`, width / 2, 105)
+      ctx.fillText(`Ends in: ${h}h ${m}m`, width / 2, 128)
+      ctx.textAlign = 'left'
+    } else {
+      ctx.fillStyle = '#666'
+      ctx.font = '16px sans-serif'
+      ctx.textAlign = 'center'
+      ctx.fillText(String(post.caption || 'Loading...'), width / 2, height / 2)
+      ctx.textAlign = 'left'
+    }
+  }
+}
+
+function drawOwnerFeedPostDataUrl(post) {
+  const offscreen = document.createElement('canvas')
+  drawOwnerFeedPostCanvas(offscreen, post)
+  return offscreen.toDataURL('image/png')
+}
+
+function renderOwnerFeed(ownerAddress, ownerUsername = '', focusPostId = '', focusPost = null) {
+  const feedView = document.getElementById('ownerFeedView')
+  const feedList = document.getElementById('ownerFeedList')
+  const titleEl = document.getElementById('ownerFeedTitle')
+  const subtitleEl = document.getElementById('ownerFeedSubtitle')
+  if (!feedView || !feedList) return
+
+  const normalizedOwner = normalizeSocialAddress(ownerAddress)
+  if (!normalizedOwner) return
+
+  const displayName = String(ownerUsername || '').trim() || `${normalizedOwner.slice(0, 8)}...${normalizedOwner.slice(-6)}`
+  const ownerPosts = sortPostsNewestFirst(
+    dedupePostsById((postManager?.posts || []).filter((post) =>
+      normalizeSocialAddress(post?.current_owner) === normalizedOwner
+    ))
+  )
+
+  if (titleEl) titleEl.textContent = `${displayName} · Posts`
+  if (subtitleEl) subtitleEl.textContent = normalizedOwner
+  feedView.classList.add('active')
+
+  if (!ownerPosts.length) {
+    feedList.innerHTML = '<p class="owner-feed-empty">No posts owned by this user yet.</p>'
+  } else {
+    feedList.innerHTML = ownerPosts.map((post) => {
+      return `
+        <article class="owner-post-card" data-post-id="${String(post.id)}"> 
+          <img class="owner-post-render" alt="Post preview" />
+        </article>
+      `
+    }).join('')
+
+    const postById = new Map(ownerPosts.map((p) => [String(p.id), p]))
+    const cards = feedList.querySelectorAll('.owner-post-card')
+    cards.forEach((card) => {
+      const postId = String(card.getAttribute('data-post-id') || '')
+      const post = postById.get(postId) || null
+      const imgEl = card.querySelector('.owner-post-render')
+      if (!imgEl) return
+      imgEl.src = drawOwnerFeedPostDataUrl(post)
+
+      if (post) {
+        card.style.cursor = 'pointer'
+        card.onclick = () => {
+          showPostDetails(post, 'owner-feed')
+        }
+      }
+    })
+
+    const focusPostIdStr = String(focusPostId || '').trim()
+    if (focusPostIdStr) {
+      let focusedCard = null
+      const cardsList = [...feedList.querySelectorAll('.owner-post-card')]
+      focusedCard = cardsList.find((card) => String(card.getAttribute('data-post-id') || '').trim() === focusPostIdStr) || null
+
+      if (!focusedCard && focusPost) {
+        const targetX = String(focusPost.x_position ?? '')
+        const targetY = String(focusPost.y_position ?? '')
+        const targetSize = String(focusPost.size ?? '1')
+        focusedCard = cardsList.find((card) => {
+          const postId = String(card.getAttribute('data-post-id') || '')
+          const p = postById.get(postId)
+          if (!p) return false
+          return String(p.x_position ?? '') === targetX &&
+            String(p.y_position ?? '') === targetY &&
+            String(p.size ?? '1') === targetSize
+        }) || null
+      }
+
+      if (focusedCard) {
+        focusedCard.classList.add('owner-post-card-focused')
+        requestAnimationFrame(() => {
+          focusedCard.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        })
+        setTimeout(() => focusedCard.classList.remove('owner-post-card-focused'), 1600)
+      }
+    }
+  }
+
+
+  activeOwnerFeedAddress = normalizedOwner
+  activeOwnerFeedUsername = displayName
+}
+
+function closeOwnerFeedView() {
+  const feedView = document.getElementById('ownerFeedView')
+  if (feedView) feedView.classList.remove('active')
+  activeOwnerFeedAddress = ''
+  activeOwnerFeedUsername = ''
+}
+
+function openOwnerFeedFromSocial(address, username) {
+  closeSocialModalById('followersModal')
+  closeSocialModalById('followingModal')
+  renderOwnerFeed(address, username)
+}
+
+function renderSocialUserRows(container, users, actionLabel = '', actionHandler = null, profileClickHandler = null) {
+  if (!container) return
+
+  if (!users.length) {
+    container.innerHTML = '<p class="social-empty">No users found.</p>'
+    return
+  }
+
+  container.innerHTML = users.map((user) => {
+    const safeAddress = String(user.address || '')
+    const safeName = String(user.username || safeAddress)
+    return `
+      <div class="social-row" data-address="${safeAddress}">
+        <div class="social-user-text">
+          <button type="button" class="social-user-link">${safeName}</button>
+          <span>${safeAddress}</span>
+        </div>
+        ${actionLabel ? `<button type="button" class="social-action-btn">${actionLabel}</button>` : ''}
+      </div>
+    `
+  }).join('')
+
+  if (actionLabel && actionHandler) {
+    const rows = container.querySelectorAll('.social-row')
+    rows.forEach((row) => {
+      const btn = row.querySelector('.social-action-btn')
+      if (!btn) return
+      btn.onclick = () => actionHandler(row.getAttribute('data-address') || '')
+    })
+  }
+
+  if (profileClickHandler) {
+    const rows = container.querySelectorAll('.social-row')
+    rows.forEach((row) => {
+      const linkBtn = row.querySelector('.social-user-link')
+      if (!linkBtn) return
+      linkBtn.onclick = () => {
+        const addr = row.getAttribute('data-address') || ''
+        profileClickHandler(addr, linkBtn.textContent || '')
+      }
+    })
+  }
+}
+
+function closeSocialModalById(modalId) {
+  const modal = document.getElementById(modalId)
+  if (modal) modal.classList.remove('active')
+}
+
+async function openFollowersModal() {
+  const me = normalizeSocialAddress(currentAccount?.address)
+  if (!me) return
+  await ensureSocialDataLoaded().catch(() => {})
+
+  const followersModal = document.getElementById('followersModal')
+  const followersList = document.getElementById('followersList')
+  const { followers, usernames } = getSocialFollowersFollowing(me)
+  const users = followers.map((addr) => ({
+    address: addr,
+    username: usernames[addr] || (addr.slice(0, 8) + '...' + addr.slice(-6)),
+  }))
+
+  renderSocialUserRows(followersList, users, '', null, (addr, name) => openOwnerFeedFromSocial(addr, name))
+  followersModal?.classList.add('active')
+}
+
+function renderFollowingModal(term = '') {
+  const me = normalizeSocialAddress(currentAccount?.address)
+  if (!me) return
+
+  const followingListEl = document.getElementById('followingList')
+  const searchResultsEl = document.getElementById('followingSearchResults')
+  const { following, usernames } = getSocialFollowersFollowing(me)
+
+  const followingUsers = following.map((addr) => ({
+    address: addr,
+    username: usernames[addr] || (addr.slice(0, 8) + '...' + addr.slice(-6)),
+  }))
+  renderSocialUserRows(followingListEl, followingUsers, 'Unfollow', async (target) => {
+    try {
+      const ok = await unfollowUserLocally(target)
+      if (!ok) {
+        showToast('Cannot unfollow this user')
+        return
+      }
+
+      showToast('Unfollowed user')
+      renderFollowingModal(term)
+      await updateWalletInfo()
+    } catch (error) {
+      alert('Failed to unfollow: ' + (error?.message || 'Unknown error'))
+    }
+  }, (addr, name) => openOwnerFeedFromSocial(addr, name))
+
+  const q = String(term || '').trim().toLowerCase()
+  const knownUsers = getKnownUsersForSearch()
+  const filtered = q
+    ? knownUsers.filter((u) => u.address.toLowerCase().includes(q) || u.username.toLowerCase().includes(q))
+    : knownUsers
+
+  const decorated = filtered.map((u) => ({
+    ...u,
+    isFollowing: following.includes(normalizeSocialAddress(u.address)),
+  }))
+
+  if (!searchResultsEl) return
+  if (!decorated.length) {
+    searchResultsEl.innerHTML = '<p class="social-empty">No matches. You can paste a wallet address (0x...) and follow directly.</p>'
+  } else {
+    searchResultsEl.innerHTML = decorated.map((user) => `
+      <div class="social-row" data-address="${user.address}">
+        <div class="social-user-text">
+          <button type="button" class="social-user-link">${user.username}</button>
+          <span>${user.address}</span>
+        </div>
+        <button type="button" class="social-action-btn">${user.isFollowing ? 'Unfollow' : 'Follow'}</button>
+      </div>
+    `).join('')
+  }
+
+  searchResultsEl.querySelectorAll('.social-row').forEach((row) => {
+    const linkBtn = row.querySelector('.social-user-link')
+    if (linkBtn) {
+      linkBtn.onclick = () => openOwnerFeedFromSocial(row.getAttribute('data-address') || '', linkBtn.textContent || '')
+    }
+
+    const btn = row.querySelector('.social-action-btn')
+    if (!btn) return
+    btn.onclick = async () => {
+      const target = row.getAttribute('data-address') || ''
+      const isFollowing = btn.textContent === 'Unfollow'
+
+      try {
+        if (isFollowing) {
+          const ok = await unfollowUserLocally(target)
+          if (!ok) {
+            showToast('Cannot unfollow this user')
+            return
+          }
+          showToast('Unfollowed user')
+        } else {
+          const ok = await followUserLocally(target)
+          if (!ok) {
+            showToast('Cannot follow this user')
+            return
+          }
+          showToast('Now following user')
+        }
+
+        renderFollowingModal(term)
+        await updateWalletInfo()
+      } catch (error) {
+        const action = isFollowing ? 'unfollow' : 'follow'
+        alert(`Failed to ${action}: ` + (error?.message || 'Unknown error'))
+      }
+    }
+  })
+
+  if (q.startsWith('0x') && q.length > 8) {
+    const normalized = normalizeSocialAddress(q)
+    const exists = decorated.some((u) => normalizeSocialAddress(u.address) === normalized)
+    if (!exists && normalized !== me) {
+      const quickFollow = document.createElement('div')
+      quickFollow.className = 'social-row'
+      quickFollow.innerHTML = `
+        <div class="social-user-text">
+          <button type="button" class="social-user-link">${normalized.slice(0, 8)}...${normalized.slice(-6)}</button>
+          <span>${normalized}</span>
+        </div>
+        <button type="button" class="social-action-btn">Follow</button>
+      `
+      quickFollow.querySelector('.social-user-link')?.addEventListener('click', () => {
+        openOwnerFeedFromSocial(normalized, `${normalized.slice(0, 8)}...${normalized.slice(-6)}`)
+      })
+      quickFollow.querySelector('.social-action-btn')?.addEventListener('click', async () => {
+        try {
+          const ok = await followUserLocally(normalized)
+          if (!ok) {
+            showToast('Cannot follow this user')
+            return
+          }
+          showToast('Now following user')
+          renderFollowingModal(term)
+          await updateWalletInfo()
+        } catch (error) {
+          alert('Failed to follow: ' + (error?.message || 'Unknown error'))
+        }
+      })
+      searchResultsEl.appendChild(quickFollow)
+    }
+  }
+}
+
+async function openFollowingModal() {
+  const followingModal = document.getElementById('followingModal')
+  const searchInput = document.getElementById('followingSearchInput')
+
+  await ensureSocialDataLoaded().catch(() => {})
+  renderFollowingModal('')
+  if (searchInput) {
+    searchInput.value = ''
+    searchInput.oninput = () => renderFollowingModal(searchInput.value)
+  }
+
+  followingModal?.classList.add('active')
+}
+
+function setupSocialModalHandlers() {
+  const followersModal = document.getElementById('followersModal')
+  const followingModal = document.getElementById('followingModal')
+  const closeFollowersBtn = document.getElementById('closeFollowersBtn')
+  const closeFollowingBtn = document.getElementById('closeFollowingBtn')
+  const closeOwnerFeedBtn = document.getElementById('closeOwnerFeedBtn')
+
+  closeFollowersBtn?.addEventListener('click', () => closeSocialModalById('followersModal'))
+  closeFollowingBtn?.addEventListener('click', () => closeSocialModalById('followingModal'))
+  closeOwnerFeedBtn?.addEventListener('click', () => closeOwnerFeedView())
+
+  followersModal?.addEventListener('click', (e) => {
+    if (e.target === followersModal) closeSocialModalById('followersModal')
+  })
+  followingModal?.addEventListener('click', (e) => {
+    if (e.target === followingModal) closeSocialModalById('followingModal')
+  })
+}
+
 async function updateWalletInfo() {
   const walletInfo = document.getElementById('wallet-info')
   if (!currentAccount) return
   try {
     const balance = await getChainBalance(currentAccount.address)
+    await ensureSocialDataLoaded().catch(() => {})
+    const me = normalizeSocialAddress(currentAccount.address)
+    const { following, followers } = getSocialFollowersFollowing(me)
     const num = Number(balance)
     const balanceStr = Number.isFinite(num) ? num.toFixed(2) : '0.00'
     const addr = normalizeStarknetAddress(currentAccount.address)
     const shortAddr = addr.slice(0, 8) + '...' + addr.slice(-6)
     walletInfo.innerHTML = `
       <div class="wallet-box">
-        <span class="wallet-user">● ${currentUsername || shortAddr}</span>
-        <span class="wallet-balance">💰 ${balanceStr} STRK</span>
+        <div class="wallet-top-row">
+          <div class="wallet-stats">
+            <button id="following-count-btn" class="wallet-stat-btn" type="button">Following ${following.length}</button>
+            <button id="followers-count-btn" class="wallet-stat-btn" type="button">Followers ${followers.length}</button>
+          </div>
+          <div class="wallet-main">
+            <span class="wallet-user">● ${currentUsername || shortAddr}</span>
+            <span class="wallet-balance">💰 ${balanceStr} STRK</span>
+          </div>
+        </div>
         <div class="wallet-address-row" title="${addr}">
           <span class="wallet-address">${addr}</span>
           <button id="copy-address-btn" class="wallet-copy-btn" type="button" title="Copiar address">📋</button>
@@ -1584,12 +2467,23 @@ async function updateWalletInfo() {
         }
       }
     }
+
+    const followingBtn = document.getElementById('following-count-btn')
+    if (followingBtn) {
+      followingBtn.onclick = async () => { await openFollowingModal() }
+    }
+
+    const followersBtn = document.getElementById('followers-count-btn')
+    if (followersBtn) {
+      followersBtn.onclick = async () => { await openFollowersModal() }
+    }
   } catch (error) {
     console.error('Error updating wallet info:', error)
     const shortAddr = currentAccount ? (String(currentAccount.address).slice(0, 6) + '...' + String(currentAccount.address).slice(-4)) : ''
     walletInfo.innerHTML = `<span style="color: #4CAF50;">● ${currentUsername || shortAddr}</span>`
   }
 }
+
 
 // Inicializar cuando el DOM esté listo
 function initApp() {

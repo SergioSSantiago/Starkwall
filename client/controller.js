@@ -60,6 +60,21 @@ const controllerOpts = {
             entrypoint: 'set_won_slot_content',
             description: 'Winner sets image and caption for finalized auction slot',
           },
+          {
+            name: 'Set Profile',
+            entrypoint: 'set_profile',
+            description: 'Set on-chain username profile',
+          },
+          {
+            name: 'Follow User',
+            entrypoint: 'follow',
+            description: 'Follow another user on-chain',
+          },
+          {
+            name: 'Unfollow User',
+            entrypoint: 'unfollow',
+            description: 'Unfollow another user on-chain',
+          },
         ],
       },
       [PAYMENT_TOKEN_ADDRESS]: {
