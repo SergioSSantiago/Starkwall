@@ -131,6 +131,7 @@ pub mod official_native_staking_adapter {
         token: ContractAddress,
         rewards_address: ContractAddress,
         operational_address: ContractAddress,
+        operational_declared: bool,
         staked_local: u128,
         unstake_intent_open: bool,
     }
@@ -149,6 +150,7 @@ pub mod official_native_staking_adapter {
         self.token.write(token);
         self.rewards_address.write(rewards_address);
         self.operational_address.write(operational_address);
+        self.operational_declared.write(false);
         self.staked_local.write(0);
         self.unstake_intent_open.write(false);
     }
@@ -217,6 +219,16 @@ pub mod official_native_staking_adapter {
         (*data.at(0)).try_into().unwrap_or(0)
     }
 
+    fn call_declare_operational(self: @ContractState, staker: ContractAddress) -> bool {
+        let target = self.staking_target.read();
+        if target.into() == 0 {
+            return false;
+        }
+        let mut calldata = array![];
+        calldata.append(staker.into());
+        call_contract_syscall(target, selector!("declare_operational_address"), calldata.span()).is_ok()
+    }
+
     #[abi(embed_v0)]
     impl OfficialAdminImpl of IOfficialNativeAdapterAdmin<ContractState> {
         fn set_owner(ref self: ContractState, owner: ContractAddress) {
@@ -236,6 +248,7 @@ pub mod official_native_staking_adapter {
             self.token.write(token);
             self.rewards_address.write(rewards_address);
             self.operational_address.write(operational_address);
+            self.operational_declared.write(false);
         }
     }
 
@@ -256,6 +269,12 @@ pub mod official_native_staking_adapter {
                 return false;
             }
             let self_addr = get_contract_address();
+            // Some native staking setups require operational address declaration before stake.
+            if self.operational_address.read() == self_addr && !self.operational_declared.read() {
+                if call_declare_operational(@self, self_addr) {
+                    self.operational_declared.write(true);
+                }
+            }
             let increased = call_single_addr_u128_mut(ref self, selector!("increase_stake"), self_addr, amount);
             if increased {
                 self.staked_local.write(self.staked_local.read() + amount);

@@ -459,7 +459,8 @@ async function handleYieldPrimaryAction() {
   } else {
     const principal = Number(state.principal_strk || 0)
     const earningsNow = computeLiveYieldEarningsStrk(state)
-    const availableNow = Number(state.liquid_buffer_strk || 0)
+    const principalNow = Number(state.principal_strk || 0)
+    const availableNow = Math.min(Number(state.liquid_buffer_strk || 0), principalNow)
     const queuedExit = Number(state.queued_exit_strk || 0)
     titleEl.textContent = 'Manage Yield'
     summaryEl.textContent = `Locked: ${principal.toFixed(2)} STRK · Claimable rewards: ${Number(earningsNow || 0).toFixed(4)} STRK · Available now: ${availableNow.toFixed(2)} STRK`
@@ -2704,7 +2705,12 @@ async function updateWalletInfo() {
     const stakedStr = yieldState ? Number(yieldState.principal_strk || 0).toFixed(2) : '0.00'
     const earningsNow = yieldState ? computeLiveYieldEarningsStrk(yieldState) : 0
     const earningsStr = Number.isFinite(earningsNow) ? earningsNow.toFixed(4) : '0.0000'
-    const availableNowStr = yieldState ? Number(yieldState.liquid_buffer_strk || 0).toFixed(2) : '0.00'
+    const availableNowStr = yieldState
+      ? Math.min(
+          Number(yieldState.liquid_buffer_strk || 0),
+          Number(yieldState.principal_strk || 0),
+        ).toFixed(2)
+      : '0.00'
     const queuedExitStr = yieldState ? Number(yieldState.queued_exit_strk || 0).toFixed(2) : '0.00'
     const hasPrincipal = yieldState && Number(yieldState.principal_strk || 0) > 0
     const hasQueue = yieldState && Number(yieldState.queued_exit_strk || 0) > 0
