@@ -219,7 +219,11 @@ async function refreshSocialData() {
   }
 
   rebuildSocialMapsFromRelations(social.relations || [])
-  mergeFallbackIntoSocialState()
+  // In Sepolia/prod we want deterministic cross-device values (Torii/indexed state),
+  // so avoid mixing local fallback follows from browser storage.
+  if (!IS_SEPOLIA) {
+    mergeFallbackIntoSocialState()
+  }
   rememberUsersFromPosts(postManager?.posts || [])
   socialState.loaded = true
 }
