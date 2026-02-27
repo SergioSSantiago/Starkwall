@@ -758,13 +758,13 @@
     bottom: 0;
     flex-direction: row;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 6px;
     align-items: center;
     justify-content: space-between;
-    padding: 10px 12px;
-    padding-left: calc(12px + env(safe-area-inset-left));
-    padding-right: calc(12px + env(safe-area-inset-right));
-    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+    padding: 6px 8px;
+    padding-left: calc(8px + env(safe-area-inset-left));
+    padding-right: calc(8px + env(safe-area-inset-right));
+    padding-bottom: calc(6px + env(safe-area-inset-bottom));
     background: rgba(10, 10, 10, 0.65);
     border: 1px solid #333;
     border-left: none;
@@ -780,18 +780,18 @@
 
   #controls button {
     flex: 1 1 calc(50% - 8px);
-    padding: 12px 12px;
-    font-size: 13px;
+    padding: 9px 10px;
+    font-size: 12px;
     border-radius: 10px;
-    min-height: 44px;
+    min-height: 38px;
   }
 
   #wallet-info {
     order: 10;
     flex: 1 1 100%;
     width: 100%;
-    padding: 8px 12px;
-    text-align: right;
+    padding: 6px 8px;
+    text-align: left;
   }
 
   .mobile-only-control {
@@ -806,8 +806,8 @@
 
   #controls .mobile-only-control {
     flex: 1 1 calc(33.33% - 8px);
-    min-height: 42px;
-    padding: 10px 8px;
+    min-height: 38px;
+    padding: 8px 6px;
     font-size: 12px;
   }
 
@@ -818,9 +818,9 @@
 
   #mobileCreateBtn {
     width: 100%;
-    min-height: 42px;
+    min-height: 38px;
     border-radius: 12px;
-    font-size: 24px;
+    font-size: 22px;
     line-height: 1;
     padding: 0;
   }
@@ -855,19 +855,61 @@
 
   #sendStrkBtn {
     font-size: 0;
-    min-height: 42px;
+    min-height: 38px;
   }
 
   #sendStrkBtn::before {
     content: "⇄";
-    font-size: 18px;
+    font-size: 16px;
     line-height: 1;
   }
 
+  #wallet-info .wallet-box {
+    align-items: stretch;
+    gap: 4px;
+  }
+
+  #wallet-info .wallet-top-row {
+    align-items: center;
+    gap: 6px;
+  }
+
+  #wallet-info .wallet-main {
+    align-items: flex-end;
+    gap: 1px;
+  }
+
+  #wallet-info .wallet-user {
+    font-size: 11px;
+  }
+
+  #wallet-info .wallet-balance {
+    font-size: 11px;
+  }
+
+  #wallet-info .wallet-stats {
+    flex-direction: row;
+    align-items: center;
+    gap: 4px;
+  }
+
+  #controls .wallet-stat-btn {
+    min-height: 28px;
+    padding: 4px 6px;
+    font-size: 11px;
+    border-radius: 7px;
+    line-height: 1.1;
+  }
+
+  #wallet-info .wallet-address-row {
+    display: none;
+  }
+
   #controls #wallet-logout-btn {
-    width: 42px;
-    min-height: 36px;
-    padding: 6px 0;
+    width: 30px;
+    min-height: 28px;
+    padding: 4px 0;
+    font-size: 13px;
   }
 
   .owner-feed-header #ownerFeedToCanvasBtn {

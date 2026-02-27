@@ -2544,16 +2544,28 @@ async function updateWalletInfo() {
 
     const followingBtn = document.getElementById('following-count-btn')
     if (followingBtn) {
+      if (window.matchMedia('(max-width: 640px)').matches) {
+        followingBtn.textContent = `↗ ${following.length}`
+        followingBtn.title = `Following ${following.length}`
+      }
       followingBtn.onclick = async () => { await openFollowingModal() }
     }
 
     const followersBtn = document.getElementById('followers-count-btn')
     if (followersBtn) {
+      if (window.matchMedia('(max-width: 640px)').matches) {
+        followersBtn.textContent = `↙ ${followers.length}`
+        followersBtn.title = `Followers ${followers.length}`
+      }
       followersBtn.onclick = async () => { await openFollowersModal() }
     }
 
     const myFeedBtn = document.getElementById('wallet-my-feed-btn')
     if (myFeedBtn) {
+      if (window.matchMedia('(max-width: 640px)').matches) {
+        myFeedBtn.textContent = '🗂'
+        myFeedBtn.title = 'My Feed'
+      }
       myFeedBtn.onclick = () => {
         const me = normalizeSocialAddress(currentAccount?.address)
         if (!me) return
