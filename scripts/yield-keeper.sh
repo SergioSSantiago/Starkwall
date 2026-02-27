@@ -5,9 +5,9 @@ PROFILE="${1:-sepolia}"
 INTERVAL_SECONDS="${2:-30}"
 MANIFEST_PATH="${DOJO_MANIFEST_PATH:-/Users/sss/Webs/Starkwall/contracts/Scarb.toml}"
 QUEUE_USERS="${YIELD_QUEUE_USERS:-}"
+RUN_ONCE="${YIELD_KEEPER_RUN_ONCE:-0}"
 
-echo "Starting yield keeper: profile=${PROFILE}, interval=${INTERVAL_SECONDS}s"
-while true; do
+run_iteration() {
   echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] yield_harvest"
   sozo --manifest-path "${MANIFEST_PATH}" -P "${PROFILE}" execute di-actions yield_harvest --wait || true
   echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] yield_rebalance"
@@ -22,5 +22,15 @@ while true; do
       fi
     done
   fi
+}
+
+echo "Starting yield keeper: profile=${PROFILE}, interval=${INTERVAL_SECONDS}s, run_once=${RUN_ONCE}"
+if [[ "${RUN_ONCE}" == "1" ]]; then
+  run_iteration
+  exit 0
+fi
+
+while true; do
+  run_iteration
   sleep "${INTERVAL_SECONDS}"
 done

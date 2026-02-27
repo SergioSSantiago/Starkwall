@@ -121,6 +121,7 @@ pub mod official_native_staking_adapter {
     #[starknet::interface]
     pub trait IERC20<T> {
         fn transfer(ref self: T, recipient: ContractAddress, amount: u256) -> bool;
+        fn approve(ref self: T, spender: ContractAddress, amount: u256) -> bool;
     }
 
     #[storage]
@@ -244,6 +245,16 @@ pub mod official_native_staking_adapter {
             if amount == 0 {
                 return false;
             }
+            let staking_target = self.staking_target.read();
+            if staking_target.into() == 0 {
+                return false;
+            }
+            // Native staking pulls STRK via transfer_from, so the adapter must approve first.
+            let token = IERC20Dispatcher { contract_address: self.token.read() };
+            let approved = token.approve(staking_target, u256 { low: amount, high: 0 });
+            if !approved {
+                return false;
+            }
             let self_addr = get_contract_address();
             let increased = call_single_addr_u128_mut(ref self, selector!("increase_stake"), self_addr, amount);
             if increased {
@@ -252,15 +263,11 @@ pub mod official_native_staking_adapter {
                 return true;
             }
 
-            let target = self.staking_target.read();
-            if target.into() == 0 {
-                return false;
-            }
             let mut calldata = array![];
             calldata.append(self.rewards_address.read().into());
             calldata.append(self.operational_address.read().into());
             calldata.append(amount.into());
-            let ok = call_contract_syscall(target, selector!("stake"), calldata.span()).is_ok();
+            let ok = call_contract_syscall(staking_target, selector!("stake"), calldata.span()).is_ok();
             if ok {
                 self.staked_local.write(self.staked_local.read() + amount);
                 self.unstake_intent_open.write(false);

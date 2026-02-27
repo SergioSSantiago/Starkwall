@@ -1,0 +1,47 @@
+name: Yield Keeper
+
+on:
+  schedule:
+    # Every 5 minutes (minimum granularity supported by GitHub Actions cron).
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Sozo profile to use"
+        required: false
+        default: "sepolia"
+      queue_users:
+        description: "Comma-separated user addresses to process exit queue"
+        required: false
+        default: ""
+
+jobs:
+  run-keeper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Dojo (sozo 1.8.6)
+        shell: bash
+        run: |
+          curl -L https://install.dojoengine.org | bash
+          source "$HOME/.dojo/env"
+          dojoup --version 1.8.6
+          sozo --version
+
+      - name: Run keeper iteration
+        shell: bash
+        env:
+          DOJO_MANIFEST_PATH: ${{ github.workspace }}/contracts/Scarb.toml
+          YIELD_KEEPER_RUN_ONCE: "1"
+          # Prefer manual input when workflow_dispatch is used; fallback to repo variable.
+          YIELD_QUEUE_USERS: ${{ github.event.inputs.queue_users || vars.YIELD_QUEUE_USERS }}
+        run: |
+          source "$HOME/.dojo/env"
+          PROFILE_INPUT="${{ github.event.inputs.profile }}"
+          PROFILE="${PROFILE_INPUT:-sepolia}"
+          bash "${{ github.workspace }}/scripts/yield-keeper.sh" "${PROFILE}" 30

@@ -143,6 +143,20 @@ Tu balance está a 0 porque **Cartridge usa tu wallet personal**; Katana solo pr
 
 Copia tu dirección desde la app (o desde Cartridge) y pégala en el comando. Luego haz clic en **"💧 Obtener STRK"** en la app (o recarga) para actualizar el balance.
 
+### Yield keeper automático (producción)
+
+El repositorio incluye un keeper automático en `.github/workflows/yield-keeper.yml` que ejecuta cada 5 minutos:
+
+- `yield_harvest`
+- `yield_rebalance`
+- `yield_process_exit_queue` para usuarios en cola (si se define lista)
+
+Configura una variable de repositorio opcional:
+
+- `YIELD_QUEUE_USERS`: direcciones separadas por coma para procesar cola de salida.
+
+También puedes ejecutarlo manualmente desde **Actions -> Yield Keeper -> Run workflow** y pasar `profile` / `queue_users`.
+
 ### 🎮 Using the App
 
 1. **Click "Connect Wallet"** - Cartridge Controller popup will appear
