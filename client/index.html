@@ -129,13 +129,20 @@
         <p id="yieldModalSummary" class="webcam-hint"></p>
 
         <div id="yieldDepositFields">
-          <label>
+          <div class="yield-strategy-group">
+            <p class="yield-strategy-title">Select strategy</p>
+            <label class="yield-check">
+              <input type="radio" id="yieldStrategyStrkInput" name="yieldStrategy" value="strk" checked />
+              Native staking STRK
+            </label>
+            <label class="yield-check">
+              <input type="radio" id="yieldStrategyBtcInput" name="yieldStrategy" value="btc" />
+              BTC strategy (WBTC)
+            </label>
+          </div>
+          <label id="yieldAmountLabel">
             Amount to lock (STRK)
             <input type="number" id="yieldAmountInput" min="0.000001" step="0.000001" />
-          </label>
-          <label class="yield-check">
-            <input type="checkbox" id="yieldBtcModeInput" />
-            Use STRK+BTC strategy mode
           </label>
         </div>
 
@@ -144,10 +151,6 @@
           <label>
             Withdraw amount (STRK)
             <input type="number" id="yieldWithdrawInput" min="0.000001" step="0.000001" />
-          </label>
-          <label class="yield-check">
-            <input type="checkbox" id="yieldManageBtcModeInput" />
-            Use STRK+BTC strategy mode
           </label>
         </div>
 

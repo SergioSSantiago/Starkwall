@@ -6,7 +6,9 @@ import Controller from '@cartridge/controller'
 import { init as initDojo, KeysClause, ToriiQueryBuilder } from '@dojoengine/sdk'
 import controllerOpts from './controller.js'
 import manifest from './manifest.js'
-import { DOMAIN_CHAIN_ID, TORII_URL, IS_SEPOLIA, FAUCET_URL } from './config.js'
+import {
+  DOMAIN_CHAIN_ID, TORII_URL, IS_SEPOLIA, FAUCET_URL, WBTC_FAUCET_URL, YIELD_DUAL_POOL_ENABLED, SEPOLIA_WBTC_TOKEN,
+} from './config.js'
 
 // Evitar que un rechazo de promesa no capturado provoque recarga o cierre de la app
 window.addEventListener('unhandledrejection', (event) => {
@@ -373,6 +375,15 @@ function computeLiveYieldEarningsStrk(yieldState) {
   return Number.isFinite(pending) ? pending : 0
 }
 
+function withTimeout(promise, timeoutMs, label = 'operation') {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out`)), Math.max(1, Number(timeoutMs) || 1)),
+    ),
+  ])
+}
+
 async function handleYieldPrimaryAction() {
   if (!dojoManager || !currentAccount) return
   if (!hasYieldInManifest) {
@@ -385,23 +396,21 @@ async function handleYieldPrimaryAction() {
   const depositFields = document.getElementById('yieldDepositFields')
   const manageFields = document.getElementById('yieldManageFields')
   const manageInfoEl = document.getElementById('yieldManageInfo')
+  const amountLabel = document.getElementById('yieldAmountLabel')
   const amountInput = document.getElementById('yieldAmountInput')
-  const btcInput = document.getElementById('yieldBtcModeInput')
+  const strategyStrkInput = document.getElementById('yieldStrategyStrkInput')
+  const strategyBtcInput = document.getElementById('yieldStrategyBtcInput')
   const withdrawInput = document.getElementById('yieldWithdrawInput')
-  const manageBtcInput = document.getElementById('yieldManageBtcModeInput')
   const primaryBtn = document.getElementById('yieldPrimaryBtn')
   const claimBtn = document.getElementById('yieldClaimBtn')
   const modeBtn = document.getElementById('yieldModeBtn')
   const queueBtn = document.getElementById('yieldQueueBtn')
   const cancelBtn = document.getElementById('yieldCancelBtn')
-  if (!yieldModal || !titleEl || !summaryEl || !depositFields || !manageFields || !amountInput || !btcInput || !withdrawInput || !manageBtcInput || !primaryBtn || !claimBtn || !modeBtn || !queueBtn || !cancelBtn || !manageInfoEl) return
+  if (!yieldModal || !titleEl || !summaryEl || !depositFields || !manageFields || !manageInfoEl || !amountLabel || !amountInput || !strategyStrkInput || !strategyBtcInput || !withdrawInput || !primaryBtn || !claimBtn || !modeBtn || !queueBtn || !cancelBtn) return
 
   const closeYieldModal = () => {
     yieldModal.classList.remove('active')
     primaryBtn.disabled = false
-    claimBtn.disabled = false
-    modeBtn.disabled = false
-    queueBtn.disabled = false
   }
   cancelBtn.onclick = closeYieldModal
   yieldModal.onclick = (e) => {
@@ -411,6 +420,8 @@ async function handleYieldPrimaryAction() {
   const state = cachedYieldState || {
     principal_strk: 0,
     pending_strk: 0,
+    pool_id: 0,
+    pool_token_symbol: 'STRK',
     last_accrual_ts: 0,
     use_btc_mode: false,
     apr_bps: 100,
@@ -419,123 +430,61 @@ async function handleYieldPrimaryAction() {
     staked_principal_strk: 0,
     queued_exit_strk: 0,
   }
-  const walletBalance = await getChainBalance(currentAccount.address).catch(() => 0)
+  const activeSymbol = String(state.pool_token_symbol || (state.use_btc_mode ? 'WBTC' : 'STRK'))
+  strategyStrkInput.checked = !Boolean(state.use_btc_mode)
+  strategyBtcInput.checked = Boolean(state.use_btc_mode)
+  strategyBtcInput.disabled = !YIELD_DUAL_POOL_ENABLED
+  modeBtn.style.display = 'none'
+  const strkBalance = await getChainBalance(currentAccount.address).catch(() => 0)
+  const tbtcBalance = YIELD_DUAL_POOL_ENABLED
+    ? await dojoManager.getTokenBalance(currentAccount.address, SEPOLIA_WBTC_TOKEN).catch(() => 0)
+    : 0
+  const needsTbtc = YIELD_DUAL_POOL_ENABLED && Number(tbtcBalance || 0) <= 0
 
-  const queuedExitNow = Number(state.queued_exit_strk || 0)
-  if (Number(state.principal_strk || 0) <= 0 && queuedExitNow <= 0) {
-    titleEl.textContent = 'Activate Yield'
-    summaryEl.textContent = `Available balance: ${Number(walletBalance || 0).toFixed(2)} STRK`
-    depositFields.style.display = 'block'
-    manageFields.style.display = 'none'
-    claimBtn.style.display = 'none'
-    modeBtn.style.display = 'none'
-    queueBtn.style.display = 'none'
-    primaryBtn.style.display = 'inline-block'
-    primaryBtn.textContent = 'Activate'
-    amountInput.value = ''
-    btcInput.checked = false
-
-    primaryBtn.onclick = async () => {
-      const amount = Number(amountInput.value || '0')
-      if (!Number.isFinite(amount) || amount <= 0) {
-        alert('Enter a valid amount.')
-        return
-      }
-      if (walletBalance > 0 && amount > walletBalance) {
-        alert(`Amount exceeds available balance (${Number(walletBalance).toFixed(2)} STRK).`)
-        return
-      }
-      try {
-        primaryBtn.disabled = true
-        await dojoManager.yieldDeposit(amount, Boolean(btcInput.checked))
-        closeYieldModal()
-        showToast('Yield activated')
-        await updateWalletInfo()
-      } catch (error) {
-        primaryBtn.disabled = false
-        throw error
-      }
+  titleEl.textContent = 'Stake Assets'
+  summaryEl.innerHTML = YIELD_DUAL_POOL_ENABLED
+    ? `Available: ${Number(strkBalance || 0).toFixed(2)} STRK · ${Number(tbtcBalance || 0).toFixed(6)} WBTC`
+    : `Available balance: ${Number(strkBalance || 0).toFixed(2)} STRK`
+  if (needsTbtc) {
+    summaryEl.innerHTML += `<br><span class="yield-token-help">Need WBTC for BTC strategy.</span>${WBTC_FAUCET_URL ? ` <span class="yield-token-help-actions"><a href="${WBTC_FAUCET_URL}" target="_blank" rel="noreferrer">Get WBTC</a></span>` : ''}`
+  }
+  depositFields.style.display = 'block'
+  manageFields.style.display = 'none'
+  claimBtn.style.display = 'none'
+  modeBtn.style.display = 'none'
+  queueBtn.style.display = 'none'
+  primaryBtn.style.display = 'inline-block'
+  primaryBtn.textContent = 'Stake'
+  amountInput.value = ''
+  amountLabel.firstChild.textContent = strategyBtcInput.checked ? 'Amount to lock (WBTC) ' : 'Amount to lock (STRK) '
+  strategyStrkInput.onchange = () => {
+    amountLabel.firstChild.textContent = 'Amount to lock (STRK) '
+  }
+  strategyBtcInput.onchange = () => {
+    amountLabel.firstChild.textContent = 'Amount to lock (WBTC) '
+  }
+  primaryBtn.onclick = async () => {
+    const amount = Number(amountInput.value || '0')
+    const useBtcMode = YIELD_DUAL_POOL_ENABLED ? Boolean(strategyBtcInput.checked) : false
+    const symbol = useBtcMode ? 'WBTC' : 'STRK'
+    if (!Number.isFinite(amount) || amount <= 0) {
+      alert('Enter a valid amount.')
+      return
     }
-  } else {
-    const principal = Number(state.principal_strk || 0)
-    const earningsNow = computeLiveYieldEarningsStrk(state)
-    const principalNow = Number(state.principal_strk || 0)
-    const availableNow = Math.min(Number(state.liquid_buffer_strk || 0), principalNow)
-    const queuedExit = Number(state.queued_exit_strk || 0)
-    titleEl.textContent = 'Manage Yield'
-    summaryEl.textContent = `Locked: ${principal.toFixed(2)} STRK · Claimable rewards: ${Number(earningsNow || 0).toFixed(4)} STRK · Available now: ${availableNow.toFixed(2)} STRK`
-    depositFields.style.display = 'none'
-    manageFields.style.display = 'block'
-    claimBtn.style.display = 'inline-block'
-    modeBtn.style.display = 'inline-block'
-    queueBtn.style.display = queuedExit > 0 ? 'inline-block' : 'none'
-    primaryBtn.style.display = 'inline-block'
-    primaryBtn.textContent = 'Withdraw'
-    withdrawInput.value = principal.toFixed(6)
-    manageBtcInput.checked = Boolean(state.use_btc_mode)
-    manageInfoEl.textContent = `Current mode: ${state.use_btc_mode ? 'STRK+BTC' : 'STRK'}${queuedExit > 0 ? ` · Queued unlock: ${queuedExit.toFixed(2)} STRK` : ''}`
-
-    primaryBtn.onclick = async () => {
-      const amount = Number(withdrawInput.value || '0')
-      if (!Number.isFinite(amount) || amount <= 0) {
-        alert('Enter a valid withdraw amount.')
-        return
-      }
-      if (amount > principal) {
-        alert(`Amount exceeds staked principal (${principal.toFixed(2)} STRK).`)
-        return
-      }
-      try {
-        primaryBtn.disabled = true
-        await dojoManager.yieldWithdraw(amount)
-        closeYieldModal()
-        if (amount > availableNow) showToast('Withdrawal queued (processing as liquidity unlocks)')
-        else showToast('Principal unlocked')
-        await updateWalletInfo()
-      } catch (error) {
-        primaryBtn.disabled = false
-        throw error
-      }
+    const selectedBalance = useBtcMode ? Number(tbtcBalance || 0) : Number(strkBalance || 0)
+    if (selectedBalance > 0 && amount > selectedBalance) {
+      alert(`Amount exceeds available balance (${selectedBalance.toFixed(useBtcMode ? 6 : 2)} ${symbol}).`)
+      return
     }
-
-    claimBtn.onclick = async () => {
-      try {
-        claimBtn.disabled = true
-        await dojoManager.yieldClaim()
-        closeYieldModal()
-        showToast('Rewards claimed to wallet balance')
-        await updateWalletInfo()
-      } catch (error) {
-        claimBtn.disabled = false
-        throw error
-      }
-    }
-
-    modeBtn.onclick = async () => {
-      try {
-        modeBtn.disabled = true
-        await dojoManager.yieldSetBtcMode(Boolean(manageBtcInput.checked))
-        manageInfoEl.textContent = `Current mode: ${manageBtcInput.checked ? 'STRK+BTC' : 'STRK'}`
-        showToast('Yield mode updated')
-        await updateWalletInfo()
-        modeBtn.disabled = false
-      } catch (error) {
-        modeBtn.disabled = false
-        throw error
-      }
-    }
-
-    queueBtn.onclick = async () => {
-      try {
-        queueBtn.disabled = true
-        const paid = await dojoManager.yieldProcessExitQueue(currentAccount.address)
-        closeYieldModal()
-        showToast(`Unlock processed${paid?.transaction_hash ? '' : ''}`)
-        await updateWalletInfo()
-      } catch (error) {
-        queueBtn.disabled = false
-        throw error
-      }
+    try {
+      primaryBtn.disabled = true
+      await dojoManager.yieldDeposit(amount, useBtcMode)
+      closeYieldModal()
+      showToast(`Staked ${amount.toFixed(useBtcMode ? 6 : 2)} ${symbol}`)
+      await updateWalletInfo()
+    } catch (error) {
+      primaryBtn.disabled = false
+      throw error
     }
   }
 
@@ -583,13 +532,13 @@ async function enterApp(account) {
   connectStatus.textContent = 'Loading blockchain...'
   connectStatus.style.color = '#4CAF50'
 
-  const toriiClient = await initDojo({
+  const toriiClient = await withTimeout(initDojo({
     client: {
       worldAddress: manifest.world.address,
       toriiUrl: TORII_URL,
     },
     domain: DOMAIN_SEPARATOR,
-  })
+  }), 12000, 'initDojo')
   console.log('✓ Torii client initialized')
 
   canvas = new InfiniteCanvas(canvasElement)
@@ -600,24 +549,14 @@ async function enterApp(account) {
   canvas.setPostClickHandler((post) => showPostDetails(post, 'canvas'))
 
   connectStatus.textContent = 'Loading posts...'
-  await postManager.loadPosts()
-  rememberUsersFromPosts(postManager.posts)
-  await refreshSocialData().catch(() => {})
+  const hydrated = postManager.loadPostsFromCache()
+  if (hydrated) {
+    console.log('✓ Posts hydrated from cache')
+    rememberUsersFromPosts(postManager.posts)
+  }
 
   // Keep wallet connect flow read-only: do not auto-send profile tx here.
   // Some wallets/sessions may still resolve stale policies/contracts and fail on connect.
-
-  console.log('✓ Loaded', postManager.posts.length, 'posts')
-
-  if (postManager.posts.length > 0) {
-    const firstPost = postManager.posts[0]
-    canvas.centerOn(firstPost.x_position, firstPost.y_position, 0.3)
-  } else {
-    canvas.centerOn(0, 0, 0.3)
-  }
-
-  await subscribeToPostUpdates(toriiClient)
-  console.log('✓ Subscribed to updates')
 
   document.getElementById('loading-screen').style.display = 'none'
   connectScreen.style.display = 'none'
@@ -626,8 +565,36 @@ async function enterApp(account) {
   connectButton.disabled = false
   connectButton.textContent = '🎮 Connect Wallet'
 
-  await updateWalletInfo()
-  console.log('✓ App ready!')
+  if (postManager.posts.length > 0) {
+    const firstPost = postManager.posts[0]
+    canvas.centerOn(firstPost.x_position, firstPost.y_position, 0.3)
+  } else {
+    canvas.centerOn(0, 0, 0.3)
+  }
+
+  await updateWalletInfo().catch(() => {})
+
+  // Sync fresh posts and subscriptions in background to keep login snappy.
+  void (async () => {
+    try {
+      await withTimeout(postManager.loadPosts(), 18000, 'loadPosts')
+      rememberUsersFromPosts(postManager.posts)
+      await refreshSocialData().catch(() => {})
+      console.log('✓ Loaded', postManager.posts.length, 'posts')
+    } catch (e) {
+      console.warn('Initial post load failed, continuing with cached/empty view:', e?.message || e)
+    }
+
+    try {
+      await withTimeout(subscribeToPostUpdates(toriiClient), 12000, 'subscribeToPostUpdates')
+      console.log('✓ Subscribed to updates')
+    } catch (e) {
+      console.warn('Post updates subscription skipped:', e?.message || e)
+    }
+
+    await updateWalletInfo().catch(() => {})
+    console.log('✓ App ready!')
+  })()
 }
 
 // Cartridge Controller helper.
@@ -878,7 +845,7 @@ async function connectWallet() {
   connectStatus.innerHTML = ''
 
   try {
-    const account = await c.connect()
+    const account = await withTimeout(c.connect(), 90000, 'wallet connect')
     if (!account) {
       connectStatus.innerHTML = '<span style="color: #f44336;">No se obtuvo cuenta. Completa el login en Cartridge y vuelve a intentar.</span>'
       connectButton.disabled = false
@@ -919,10 +886,14 @@ async function tryRestoreSessionOnLoad() {
 
   try {
     // probe() = restauración completamente silenciosa, sin abrir ningún popup ni modal
-    const account = await c.probe()
+    const account = await withTimeout(c.probe(), 8000, 'session restore')
     if (account) {
-      await enterApp(account)
-      return
+      try {
+        await enterApp(account)
+        return
+      } catch (e) {
+        console.warn('enterApp restore failed:', e?.message || e)
+      }
     }
   } catch (e) {
     console.warn('probe() restore failed:', e?.message || e)
@@ -2688,34 +2659,56 @@ function setupSocialModalHandlers() {
 async function updateWalletInfo() {
   const walletInfo = document.getElementById('wallet-info')
   if (!currentAccount) return
+  const addr = normalizeStarknetAddress(currentAccount.address)
+  const shortAddr = addr.slice(0, 8) + '...' + addr.slice(-6)
+  // Render immediately so wallet info never appears stuck.
+  walletInfo.innerHTML = `<span style="color: #4CAF50;">● ${currentUsername || shortAddr}</span>`
   try {
-    const balance = await getChainBalance(currentAccount.address)
-    await ensureSocialDataLoaded().catch(() => {})
+    const balance = await withTimeout(getChainBalance(currentAccount.address), 7000, 'wallet balance').catch(() => null)
+    const tbtcBalance = (hasYieldInManifest && YIELD_DUAL_POOL_ENABLED)
+      ? await withTimeout(
+        dojoManager.getTokenBalance(currentAccount.address, SEPOLIA_WBTC_TOKEN),
+        7000,
+        'tbtc balance',
+      ).catch(() => 0)
+      : 0
+    // Don't block wallet rendering on social indexing/network.
+    if (!socialState.loaded) {
+      scheduleSocialRevalidation(0)
+    }
     const me = normalizeSocialAddress(currentAccount.address)
     const { following, followers } = getSocialFollowersFollowing(me)
-    const num = Number(balance)
+    const num = Number(balance ?? 0)
     const balanceStr = Number.isFinite(num) ? num.toFixed(2) : '0.00'
-    const addr = normalizeStarknetAddress(currentAccount.address)
-    const shortAddr = addr.slice(0, 8) + '...' + addr.slice(-6)
     let yieldState = null
     if (hasYieldInManifest) {
-      yieldState = await dojoManager.queryYieldState(currentAccount.address).catch(() => null)
+      const fetchedYieldState = await withTimeout(
+        dojoManager.queryYieldState(currentAccount.address),
+        7000,
+        'yield state',
+      ).catch(() => null)
+      // Keep previous known-good state only if the fetch actually fails.
+      yieldState = fetchedYieldState || cachedYieldState || null
     }
-    cachedYieldState = yieldState
-    const stakedStr = yieldState ? Number(yieldState.principal_strk || 0).toFixed(2) : '0.00'
+    if (yieldState) cachedYieldState = yieldState
+    const principalNum = yieldState ? Number(yieldState.principal_strk || 0) : 0
+    const queuedNum = yieldState ? Number(yieldState.queued_exit_strk || 0) : 0
+    const lockedTotalStr = (principalNum + queuedNum).toFixed(2)
     const earningsNow = yieldState ? computeLiveYieldEarningsStrk(yieldState) : 0
     const earningsStr = Number.isFinite(earningsNow) ? earningsNow.toFixed(4) : '0.0000'
-    const availableNowStr = yieldState
-      ? Math.min(
-          Number(yieldState.liquid_buffer_strk || 0),
-          Number(yieldState.principal_strk || 0),
-        ).toFixed(2)
-      : '0.00'
-    const queuedExitStr = yieldState ? Number(yieldState.queued_exit_strk || 0).toFixed(2) : '0.00'
+    const queuedExitNum = queuedNum
+    const queuedExitStr = Number.isFinite(queuedExitNum) ? queuedExitNum.toFixed(2) : '0.00'
     const hasPrincipal = yieldState && Number(yieldState.principal_strk || 0) > 0
     const hasQueue = yieldState && Number(yieldState.queued_exit_strk || 0) > 0
-    const yieldBtnLabel = hasPrincipal || hasQueue ? 'Manage Yield' : 'Activate Yield'
-    const yieldModeLabel = yieldState?.use_btc_mode ? 'STRK+BTC mode' : 'STRK mode'
+    const yieldDepositBtnLabel = '+'
+    const yieldWithdrawBtnLabel = '↩'
+    const yieldClaimBtnLabel = '✨'
+    const poolSymbol = yieldState ? String(yieldState.pool_token_symbol || (yieldState.use_btc_mode ? 'WBTC' : 'STRK')) : 'STRK'
+    const yieldModeLabel = `${poolSymbol} real staking`
+    const tbtcFundingHint = hasYieldInManifest && YIELD_DUAL_POOL_ENABLED && Number(tbtcBalance || 0) <= 0
+    const tbtcFaucetAction = WBTC_FAUCET_URL
+      ? `<a href="${WBTC_FAUCET_URL}" target="_blank" rel="noreferrer">Get WBTC</a>`
+      : ''
     walletInfo.innerHTML = `
       <div class="wallet-box">
         <div class="wallet-top-row">
@@ -2728,14 +2721,22 @@ async function updateWalletInfo() {
           <div class="wallet-main">
             <span class="wallet-user">● ${currentUsername || shortAddr}</span>
             <span class="wallet-balance">💰 ${balanceStr} STRK</span>
-            ${hasYieldInManifest ? `<span class="wallet-yield-line">🔒 ${stakedStr} STRK · ✨ ${earningsStr} STRK claimable · 💧 ${availableNowStr} STRK${Number(queuedExitStr) > 0 ? ` · ⏳ ${queuedExitStr} STRK` : ''} · ${yieldModeLabel}</span>` : ''}
+            ${hasYieldInManifest ? `<span class="wallet-yield-line">🔒 ${lockedTotalStr} ${poolSymbol} · ✨ ${earningsStr} ${poolSymbol} claimable${queuedExitNum > 0 ? ` · (Unstaking ${queuedExitStr} ${poolSymbol})` : ''} · ${yieldModeLabel}</span>` : ''}
           </div>
         </div>
-        ${hasYieldInManifest ? `<div class="wallet-yield-actions"><button id="wallet-yield-btn" class="wallet-stat-btn" type="button">${yieldBtnLabel}</button></div>` : ''}
+        ${hasYieldInManifest ? `<div class="wallet-yield-actions">
+          <button id="wallet-yield-deposit-btn" class="wallet-stat-btn" type="button" title="Stake STRK/WBTC">${yieldDepositBtnLabel}</button>
+          <button id="wallet-yield-withdraw-btn" class="wallet-stat-btn" type="button" title="Return staked funds to balance">${yieldWithdrawBtnLabel}</button>
+          <button id="wallet-yield-claim-btn" class="wallet-stat-btn" type="button" title="Claim rewards">${yieldClaimBtnLabel}</button>
+        </div>` : ''}
         <div class="wallet-address-row" title="${addr}">
           <span class="wallet-address">${addr}</span>
           <button id="copy-address-btn" class="wallet-copy-btn" type="button" title="Copiar address">📋</button>
         </div>
+        ${tbtcFundingHint ? `<div class="wallet-token-help">
+          <span>BTC strategy needs WBTC.</span>
+          ${tbtcFaucetAction ? `<span class="wallet-token-help-actions">${tbtcFaucetAction}</span>` : ''}
+        </div>` : ''}
       </div>
     `
 
@@ -2787,14 +2788,62 @@ async function updateWalletInfo() {
       walletLogoutBtn.onclick = () => logout()
     }
 
-    const walletYieldBtn = document.getElementById('wallet-yield-btn')
-    if (walletYieldBtn) {
-      walletYieldBtn.onclick = async () => {
+    const walletYieldDepositBtn = document.getElementById('wallet-yield-deposit-btn')
+    if (walletYieldDepositBtn) {
+      walletYieldDepositBtn.onclick = async () => {
         try {
           await handleYieldPrimaryAction()
         } catch (error) {
-          console.error('Yield action error:', error)
-          alert('Yield action failed.\n\nTip: if this happened on deposit, check you have enough STRK balance for the amount.')
+          console.error('Yield deposit modal error:', error)
+          alert('Stake flow failed. Check balance and retry.')
+        }
+      }
+    }
+
+    const walletYieldWithdrawBtn = document.getElementById('wallet-yield-withdraw-btn')
+    if (walletYieldWithdrawBtn) {
+      walletYieldWithdrawBtn.onclick = async () => {
+        try {
+          const latest = await dojoManager.queryYieldState(currentAccount.address).catch(() => cachedYieldState || null)
+          const principal = Number(latest?.principal_strk || 0)
+          const queuedExit = Number(latest?.queued_exit_strk || 0)
+          if (principal > 0) {
+            await dojoManager.yieldWithdraw(principal)
+            showToast(`Withdraw requested: ${principal.toFixed(2)} STRK`)
+            await updateWalletInfo()
+            return
+          }
+          if (queuedExit > 0) {
+            const beforeBalance = await getChainBalance(currentAccount.address).catch(() => null)
+            await dojoManager.yieldProcessExitQueue(currentAccount.address)
+            const afterBalance = await getChainBalance(currentAccount.address).catch(() => null)
+            const delta = Number(afterBalance ?? 0) - Number(beforeBalance ?? 0)
+            if (delta > 0.0000001) {
+              showToast(`Returned to balance: +${delta.toFixed(4)} STRK`)
+            } else {
+              showToast('No hay STRK liberable todavía. Sigue en cooldown/cola.')
+            }
+            await updateWalletInfo()
+            return
+          }
+          showToast('No staked or unstaking funds to return.')
+        } catch (error) {
+          console.error('Yield withdraw error:', error)
+          alert('Return-to-balance action failed. Try again in a moment.')
+        }
+      }
+    }
+
+    const walletYieldClaimBtn = document.getElementById('wallet-yield-claim-btn')
+    if (walletYieldClaimBtn) {
+      walletYieldClaimBtn.onclick = async () => {
+        try {
+          await dojoManager.yieldClaim()
+          showToast('Rewards claimed to wallet balance')
+          await updateWalletInfo()
+        } catch (error) {
+          console.error('Yield claim error:', error)
+          alert('Claim rewards failed. Try again in a moment.')
         }
       }
     }

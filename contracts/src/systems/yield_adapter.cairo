@@ -275,7 +275,10 @@ pub mod official_native_staking_adapter {
                     self.operational_declared.write(true);
                 }
             }
-            let increased = call_single_addr_u128_mut(ref self, selector!("increase_stake"), self_addr, amount);
+            // Canonical path: try increase for existing stakers, then fallback to first-time stake.
+            let increased = call_single_addr_u128_mut(
+                ref self, selector!("increase_stake"), self_addr, amount
+            );
             if increased {
                 self.staked_local.write(self.staked_local.read() + amount);
                 self.unstake_intent_open.write(false);

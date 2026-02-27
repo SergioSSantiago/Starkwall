@@ -68,6 +68,31 @@
   justify-content: flex-end;
 }
 
+#wallet-info .wallet-token-help {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  color: #f6d58a;
+  font-size: 11px;
+}
+
+#wallet-info .wallet-token-help-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#wallet-info .wallet-token-help-actions a {
+  color: #9ecbff;
+  text-decoration: none;
+}
+
+#wallet-info .wallet-token-help-actions a:hover {
+  text-decoration: underline;
+}
+
 #wallet-info .wallet-top-row {
     width: 100%;
     display: flex;
@@ -964,4 +989,39 @@
 .yield-check input[type='checkbox'] {
   width: 16px;
   height: 16px;
+}
+
+.yield-check input[type='radio'] {
+  width: 16px;
+  height: 16px;
+}
+
+.yield-strategy-group {
+  margin-bottom: 10px;
+  border: 1px solid #2f3b46;
+  border-radius: 10px;
+  padding: 10px;
+  background: rgba(22, 28, 34, 0.55);
+}
+
+.yield-strategy-title {
+  margin: 0 0 8px 0;
+  color: #9ecbff;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.yield-token-help {
+  color: #f6d58a;
+}
+
+.yield-token-help-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.yield-token-help-actions a {
+  color: #9ecbff;
 }

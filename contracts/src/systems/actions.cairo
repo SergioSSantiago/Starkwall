@@ -113,6 +113,30 @@ pub trait IActions<T> {
     fn yield_harvest(ref self: T) -> u128;
     fn yield_process_exit_queue(ref self: T, user: starknet::ContractAddress) -> u128;
     fn yield_set_admin(ref self: T, admin: starknet::ContractAddress);
+    fn yield_configure_strategy_for_pool(
+        ref self: T,
+        pool_id: u8,
+        strategy_kind: u8,
+        adapter: starknet::ContractAddress,
+        staking_target: starknet::ContractAddress,
+        rewards_target: starknet::ContractAddress,
+        enabled: bool,
+        paused: bool
+    );
+    fn yield_set_risk_params_for_pool(
+        ref self: T,
+        pool_id: u8,
+        target_buffer_bps: u32,
+        max_exposure_bps: u32,
+        rebalance_threshold: u128,
+        protocol_fee_bps: u32
+    );
+    fn yield_rebalance_pool(ref self: T, pool_id: u8);
+    fn yield_harvest_pool(ref self: T, pool_id: u8) -> u128;
+    fn yield_get_user_state(
+        self: @T,
+        user: starknet::ContractAddress
+    ) -> (u128, u128, u128, bool, u8, u128, u128, u32);
 }
 
 #[starknet::interface]
@@ -129,6 +153,17 @@ pub trait IERC20<T> {
         recipient: starknet::ContractAddress,
         amount: u256
     ) -> bool;
+
+    fn balance_of(
+        self: @T,
+        account: starknet::ContractAddress
+    ) -> u256;
+
+    fn allowance(
+        self: @T,
+        owner: starknet::ContractAddress,
+        spender: starknet::ContractAddress
+    ) -> u256;
 }
 
 #[starknet::interface]
@@ -161,7 +196,8 @@ pub mod actions {
     const POST_KIND_AUCTION_CENTER: u8 = 1;
     const POST_KIND_AUCTION_SLOT: u8 = 2;
     const AUCTION_SLOT_COUNT: u8 = 8;
-    const YIELD_POOL_ID: u8 = 0;
+    const YIELD_POOL_STRK_ID: u8 = 0;
+    const YIELD_POOL_BTC_ID: u8 = 1;
     const YIELD_DEFAULT_TARGET_BUFFER_BPS: u32 = 3000; // 30%
     const YIELD_DEFAULT_MAX_EXPOSURE_BPS: u32 = 7000; // 70%
     const YIELD_DEFAULT_REBALANCE_THRESHOLD: u128 = 1_000_000_000_000_000_000; // 1 STRK
@@ -173,14 +209,28 @@ pub mod actions {
     const TILE_W: i32 = 393;
     const TILE_H: i32 = 852;
 
-    fn payment_token() -> ContractAddress {
+    fn assert_supported_pool(pool_id: u8) {
+        assert!(pool_id == YIELD_POOL_STRK_ID || pool_id == YIELD_POOL_BTC_ID, "Unsupported pool");
+    }
+
+    fn pool_id_from_mode(use_btc_mode: bool) -> u8 {
+        if use_btc_mode { YIELD_POOL_BTC_ID } else { YIELD_POOL_STRK_ID }
+    }
+
+    fn payment_token(pool_id: u8) -> ContractAddress {
+        assert_supported_pool(pool_id);
+        if pool_id == YIELD_POOL_BTC_ID {
+            // WBTC wrapper on Starknet Sepolia.
+            return 0x00452bd5c0512a61df7c7be8cfea5e4f893cb40e126bdc40aee6054db955129e
+                .try_into()
+                .unwrap();
+        }
+
         let chain_id = starknet::get_tx_info().unbox().chain_id;
 
         // Use official STRK on Sepolia; keep local dev token for Katana.
         if chain_id == 'SN_SEPOLIA' {
-            return 0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d
-                .try_into()
-                .unwrap();
+            return 0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d.try_into().unwrap();
         }
 
         0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7.try_into().unwrap()
@@ -262,11 +312,11 @@ pub mod actions {
         stats
     }
 
-    fn read_yield_pool_or_default(ref world: dojo::world::WorldStorage) -> YieldPoolState {
-        let mut state: YieldPoolState = world.read_model(YIELD_POOL_ID);
-        if state.pool_id != YIELD_POOL_ID {
+    fn read_yield_pool_or_default(ref world: dojo::world::WorldStorage, pool_id: u8) -> YieldPoolState {
+        let mut state: YieldPoolState = world.read_model(pool_id);
+        if state.pool_id != pool_id {
             return YieldPoolState {
-                pool_id: YIELD_POOL_ID,
+                pool_id,
                 principal_pool: 0,
                 earnings_pool: 0,
                 total_pending_rewards: 0,
@@ -281,11 +331,11 @@ pub mod actions {
         state
     }
 
-    fn read_risk_state_or_default(ref world: dojo::world::WorldStorage) -> YieldRiskState {
-        let state: YieldRiskState = world.read_model(YIELD_POOL_ID);
-        if state.pool_id != YIELD_POOL_ID {
+    fn read_risk_state_or_default(ref world: dojo::world::WorldStorage, pool_id: u8) -> YieldRiskState {
+        let state: YieldRiskState = world.read_model(pool_id);
+        if state.pool_id != pool_id {
             return YieldRiskState {
-                pool_id: YIELD_POOL_ID,
+                pool_id,
                 liquid_buffer: 0,
                 staked_principal: 0,
                 target_buffer_bps: YIELD_DEFAULT_TARGET_BUFFER_BPS,
@@ -298,11 +348,11 @@ pub mod actions {
         state
     }
 
-    fn read_strategy_state_or_default(ref world: dojo::world::WorldStorage) -> YieldStrategyState {
-        let state: YieldStrategyState = world.read_model(YIELD_POOL_ID);
-        if state.pool_id != YIELD_POOL_ID {
+    fn read_strategy_state_or_default(ref world: dojo::world::WorldStorage, pool_id: u8) -> YieldStrategyState {
+        let state: YieldStrategyState = world.read_model(pool_id);
+        if state.pool_id != pool_id {
             return YieldStrategyState {
-                pool_id: YIELD_POOL_ID,
+                pool_id,
                 strategy_kind: 0,
                 adapter: zero_address(),
                 staking_target: zero_address(),
@@ -326,9 +376,9 @@ pub mod actions {
     }
 
     fn read_admin_or_default(ref world: dojo::world::WorldStorage) -> YieldAdminState {
-        let state: YieldAdminState = world.read_model(YIELD_POOL_ID);
-        if state.pool_id != YIELD_POOL_ID {
-            return YieldAdminState { pool_id: YIELD_POOL_ID, admin: zero_address() };
+        let state: YieldAdminState = world.read_model(YIELD_POOL_STRK_ID);
+        if state.pool_id != YIELD_POOL_STRK_ID {
+            return YieldAdminState { pool_id: YIELD_POOL_STRK_ID, admin: zero_address() };
         }
         state
     }
@@ -400,12 +450,99 @@ pub mod actions {
         if a < b { a } else { b }
     }
 
+    fn u256_covers_u128(value: u256, needed: u128) -> bool {
+        if value.high > 0 {
+            true
+        } else {
+            value.low >= needed
+        }
+    }
+
     fn assert_yield_admin(ref world: dojo::world::WorldStorage, caller: ContractAddress) {
         let admin_state = read_admin_or_default(ref world);
         if admin_state.admin == zero_address() {
             return;
         }
         assert!(caller == admin_state.admin, "Only yield admin");
+    }
+
+    fn rebalance_pool_impl(ref world: dojo::world::WorldStorage, pool_id: u8) {
+        assert_supported_pool(pool_id);
+        let pool = read_yield_pool_or_default(ref world, pool_id);
+        let mut risk = read_risk_state_or_default(ref world, pool_id);
+        let strategy = read_strategy_state_or_default(ref world, pool_id);
+
+        if !strategy.enabled || strategy.paused || strategy.adapter == zero_address() {
+            return;
+        }
+
+        let adapter = IStakingAdapterDispatcher { contract_address: strategy.adapter };
+        let target_buffer = ratio_amount(pool.principal_pool, risk.target_buffer_bps);
+        let max_staked = ratio_amount(pool.principal_pool, risk.max_exposure_bps);
+
+        if risk.liquid_buffer > target_buffer {
+            let excess = risk.liquid_buffer - target_buffer;
+            if excess >= risk.rebalance_threshold && risk.staked_principal < max_staked {
+                let capacity = max_staked - risk.staked_principal;
+                let to_stake = min_u128(excess, capacity);
+                if to_stake > 0 {
+                    let token = IERC20Dispatcher { contract_address: payment_token(pool_id) };
+                    let moved = token.transfer(strategy.adapter, u256 { low: to_stake, high: 0 });
+                    assert!(moved, "Rebalance transfer to adapter failed");
+                    let ok = adapter.stake(to_stake);
+                    assert!(ok, "Adapter stake failed");
+                    risk.liquid_buffer -= to_stake;
+                    risk.staked_principal += to_stake;
+                }
+            }
+        } else {
+            let needed = target_buffer - risk.liquid_buffer;
+            if needed >= risk.rebalance_threshold && risk.staked_principal > 0 {
+                let to_unstake = risk.staked_principal;
+                if to_unstake > 0 {
+                    let ok = adapter.request_unstake(to_unstake);
+                    if ok {
+                        risk.staked_principal -= to_unstake;
+                        risk.liquid_buffer += to_unstake;
+                    }
+                }
+            }
+        }
+        world.write_model(@risk);
+    }
+
+    fn harvest_pool_impl(ref world: dojo::world::WorldStorage, pool_id: u8) -> u128 {
+        assert_supported_pool(pool_id);
+        let mut pool = read_yield_pool_or_default(ref world, pool_id);
+        let mut risk = read_risk_state_or_default(ref world, pool_id);
+        let strategy = read_strategy_state_or_default(ref world, pool_id);
+
+        if !strategy.enabled || strategy.paused || strategy.adapter == zero_address() {
+            return 0;
+        }
+
+        let adapter = IStakingAdapterDispatcher { contract_address: strategy.adapter };
+        let harvested = adapter.claim_rewards();
+        if harvested == 0 {
+            return 0;
+        }
+
+        let fee_cut = ratio_amount(harvested, risk.protocol_fee_bps);
+        let net_rewards = harvested - fee_cut;
+        let users_cut = ratio_amount(net_rewards, pool.user_share_bps);
+        if users_cut > 0 {
+            pool.earnings_pool += users_cut;
+            if pool.principal_pool > 0 {
+                let delta_index = (users_cut * REWARD_INDEX_SCALE) / pool.principal_pool;
+                if delta_index > 0 {
+                    pool.reward_index += delta_index;
+                }
+            }
+        }
+        risk.last_harvest_ts = get_block_timestamp();
+        world.write_model(@pool);
+        world.write_model(@risk);
+        users_cut
     }
 
     fn write_post(
@@ -480,7 +617,7 @@ pub mod actions {
                 assert!(price_strk > 0, "Invalid paid post price");
 
                 let amount_low: u128 = price_strk * STRK_DECIMALS_FACTOR;
-                let token = IERC20Dispatcher { contract_address: payment_token() };
+                let token = IERC20Dispatcher { contract_address: payment_token(YIELD_POOL_STRK_ID) };
                 let paid = token.transfer_from(
                     caller,
                     get_contract_address(),
@@ -527,7 +664,7 @@ pub mod actions {
             assert!(end_time > now, "Auction end time must be in the future");
 
             let auction_fee_low: u128 = AUCTION_POST_CREATION_PRICE_STRK * STRK_DECIMALS_FACTOR;
-            let token = IERC20Dispatcher { contract_address: payment_token() };
+            let token = IERC20Dispatcher { contract_address: payment_token(YIELD_POOL_STRK_ID) };
             let fee_paid = token.transfer_from(
                 caller,
                 get_contract_address(),
@@ -644,7 +781,7 @@ pub mod actions {
             assert!(post.post_kind == POST_KIND_AUCTION_SLOT, "Not an auction slot");
             assert!(post.current_owner != bidder, "Owner cannot bid on this slot");
 
-            let token = IERC20Dispatcher { contract_address: payment_token() };
+            let token = IERC20Dispatcher { contract_address: payment_token(YIELD_POOL_STRK_ID) };
 
             // Pull new bidder funds into auction escrow (this contract)
             let new_amount_low: u128 = bid_amount * STRK_DECIMALS_FACTOR;
@@ -697,7 +834,7 @@ pub mod actions {
             if slot.has_bid {
                 // Release escrowed winning bid to auction creator.
                 let amount_low: u128 = slot.highest_bid * STRK_DECIMALS_FACTOR;
-                let token = IERC20Dispatcher { contract_address: payment_token() };
+                let token = IERC20Dispatcher { contract_address: payment_token(YIELD_POOL_STRK_ID) };
                 let paid_out = token.transfer(
                     group.creator,
                     u256 { low: amount_low, high: 0 },
@@ -930,7 +1067,7 @@ pub mod actions {
 
             let seller = post.current_owner;
             let amount_low: u128 = post.sale_price * STRK_DECIMALS_FACTOR;
-            let token = IERC20Dispatcher { contract_address: payment_token() };
+            let token = IERC20Dispatcher { contract_address: payment_token(YIELD_POOL_STRK_ID) };
             let paid = token.transfer_from(
                 caller,
                 seller,
@@ -955,13 +1092,32 @@ pub mod actions {
             assert!(amount > 0, "Amount must be greater than 0");
             let mut world = self.world_default();
             let caller = starknet::get_caller_address();
-            let mut pool = read_yield_pool_or_default(ref world);
             let mut position = read_yield_position_or_default(ref world, caller);
-            let mut risk = read_risk_state_or_default(ref world);
-            let strategy = read_strategy_state_or_default(ref world);
+            let target_pool_id = pool_id_from_mode(use_btc_mode);
+            if position.principal > 0 {
+                assert!(
+                    pool_id_from_mode(position.use_btc_mode) == target_pool_id,
+                    "Active position in another pool"
+                );
+            }
+            let queue_item = read_exit_queue_or_default(ref world, caller);
+            if queue_item.queued_principal > 0 {
+                assert!(
+                    pool_id_from_mode(position.use_btc_mode) == target_pool_id,
+                    "Queued exit in another pool"
+                );
+            }
+
+            let mut pool = read_yield_pool_or_default(ref world, target_pool_id);
+            let mut risk = read_risk_state_or_default(ref world, target_pool_id);
+            let strategy = read_strategy_state_or_default(ref world, target_pool_id);
             let (mut pool, mut position) = settle_user_rewards(ref world, pool, position);
 
-            let token = IERC20Dispatcher { contract_address: payment_token() };
+            let token = IERC20Dispatcher { contract_address: payment_token(target_pool_id) };
+            let balance = token.balance_of(caller);
+            assert!(u256_covers_u128(balance, amount), "Insufficient token balance");
+            let allowance = token.allowance(caller, get_contract_address());
+            assert!(u256_covers_u128(allowance, amount), "Insufficient token allowance");
             let ok = token.transfer_from(
                 caller,
                 get_contract_address(),
@@ -1007,10 +1163,11 @@ pub mod actions {
             assert!(amount > 0, "Amount must be greater than 0");
             let mut world = self.world_default();
             let caller = starknet::get_caller_address();
-            let mut pool = read_yield_pool_or_default(ref world);
             let mut position = read_yield_position_or_default(ref world, caller);
-            let mut risk = read_risk_state_or_default(ref world);
-            let strategy = read_strategy_state_or_default(ref world);
+            let pool_id = pool_id_from_mode(position.use_btc_mode);
+            let mut pool = read_yield_pool_or_default(ref world, pool_id);
+            let mut risk = read_risk_state_or_default(ref world, pool_id);
+            let strategy = read_strategy_state_or_default(ref world, pool_id);
             let now = get_block_timestamp();
             let (_pool, mut position) = settle_user_rewards(ref world, pool, position);
 
@@ -1030,7 +1187,7 @@ pub mod actions {
             world.write_model(@queue_item);
 
             if immediate > 0 {
-                let token = IERC20Dispatcher { contract_address: payment_token() };
+                let token = IERC20Dispatcher { contract_address: payment_token(pool_id) };
                 let paid = token.transfer(caller, u256 { low: immediate, high: 0 });
                 assert!(paid, "Principal withdraw transfer failed");
                 assert!(pool.principal_pool >= immediate, "Principal pool accounting mismatch");
@@ -1040,25 +1197,68 @@ pub mod actions {
 
             if queued > 0 && strategy.enabled && !strategy.paused && strategy.adapter != zero_address() {
                 let adapter = IStakingAdapterDispatcher { contract_address: strategy.adapter };
-                let requested = adapter.request_unstake(queued);
+                let to_unstake = risk.staked_principal;
+                let requested = if to_unstake > 0 { adapter.request_unstake(to_unstake) } else { false };
                 if requested {
-                    let token = IERC20Dispatcher { contract_address: payment_token() };
-                    let paid = token.transfer(caller, u256 { low: queued, high: 0 });
+                    risk.staked_principal = 0;
+                    risk.liquid_buffer += to_unstake;
+                }
+            }
+
+            if queue_item.queued_principal > 0 && risk.liquid_buffer > 0 {
+                let queued_ready = min_u128(queue_item.queued_principal, risk.liquid_buffer);
+                if queued_ready > 0 {
+                    let token = IERC20Dispatcher { contract_address: payment_token(pool_id) };
+                    let paid = token.transfer(caller, u256 { low: queued_ready, high: 0 });
                     if paid {
-                        if queue_item.queued_principal >= queued {
-                            queue_item.queued_principal -= queued;
+                        if queue_item.queued_principal >= queued_ready {
+                            queue_item.queued_principal -= queued_ready;
                         } else {
                             queue_item.queued_principal = 0;
                         }
                         queue_item.processed_at = now;
                         world.write_model(@queue_item);
-                        assert!(pool.principal_pool >= queued, "Principal pool accounting mismatch");
-                        pool.principal_pool -= queued;
-                        if risk.staked_principal >= queued {
-                            risk.staked_principal -= queued;
+                        assert!(pool.principal_pool >= queued_ready, "Principal pool accounting mismatch");
+                        pool.principal_pool -= queued_ready;
+                        risk.liquid_buffer -= queued_ready;
+                    }
+                }
+            }
+
+            if queue_item.queued_principal > 0 {
+                let token = IERC20Dispatcher { contract_address: payment_token(pool_id) };
+                let contract_balance = token.balance_of(get_contract_address());
+                let contract_balance_u128 = if contract_balance.high == 0 {
+                    contract_balance.low
+                } else {
+                    contract_balance.low
+                };
+                let observed_liquid = if contract_balance_u128 > pool.earnings_pool {
+                    contract_balance_u128 - pool.earnings_pool
+                } else {
+                    0
+                };
+                if observed_liquid > risk.liquid_buffer {
+                    risk.liquid_buffer = observed_liquid;
+                }
+            }
+
+            if queue_item.queued_principal > 0 && risk.liquid_buffer > 0 {
+                let queued_ready = min_u128(queue_item.queued_principal, risk.liquid_buffer);
+                if queued_ready > 0 {
+                    let token = IERC20Dispatcher { contract_address: payment_token(pool_id) };
+                    let paid = token.transfer(caller, u256 { low: queued_ready, high: 0 });
+                    if paid {
+                        if queue_item.queued_principal >= queued_ready {
+                            queue_item.queued_principal -= queued_ready;
                         } else {
-                            risk.staked_principal = 0;
+                            queue_item.queued_principal = 0;
                         }
+                        queue_item.processed_at = now;
+                        world.write_model(@queue_item);
+                        assert!(pool.principal_pool >= queued_ready, "Principal pool accounting mismatch");
+                        pool.principal_pool -= queued_ready;
+                        risk.liquid_buffer -= queued_ready;
                     }
                 }
             }
@@ -1071,8 +1271,9 @@ pub mod actions {
         fn yield_claim(ref self: ContractState) -> u128 {
             let mut world = self.world_default();
             let caller = starknet::get_caller_address();
-            let mut pool = read_yield_pool_or_default(ref world);
             let mut position = read_yield_position_or_default(ref world, caller);
+            let pool_id = pool_id_from_mode(position.use_btc_mode);
+            let mut pool = read_yield_pool_or_default(ref world, pool_id);
             let (mut pool, mut position) = settle_user_rewards(ref world, pool, position);
 
             let claimable = if position.pending_rewards < pool.earnings_pool {
@@ -1084,7 +1285,7 @@ pub mod actions {
                 return 0;
             }
 
-            let token = IERC20Dispatcher { contract_address: payment_token() };
+            let token = IERC20Dispatcher { contract_address: payment_token(pool_id) };
             let ok = token.transfer(caller, u256 { low: claimable, high: 0 });
             assert!(ok, "Earnings payout transfer failed");
 
@@ -1111,9 +1312,13 @@ pub mod actions {
         ) {
             let mut world = self.world_default();
             let caller = starknet::get_caller_address();
-            let mut pool = read_yield_pool_or_default(ref world);
             let mut position = read_yield_position_or_default(ref world, caller);
+            let current_pool = pool_id_from_mode(position.use_btc_mode);
+            let mut pool = read_yield_pool_or_default(ref world, current_pool);
             let (_pool, mut position) = settle_user_rewards(ref world, pool, position);
+            let queue_item = read_exit_queue_or_default(ref world, caller);
+            assert!(position.principal == 0, "Withdraw before switching pool");
+            assert!(queue_item.queued_principal == 0, "Queue must be empty");
             position.use_btc_mode = use_btc_mode;
             position = sync_yield_position_timestamp(ref world, position);
             world.write_model(@position);
@@ -1126,8 +1331,10 @@ pub mod actions {
             assert!(amount > 0, "Amount must be greater than 0");
             let mut world = self.world_default();
             let caller = starknet::get_caller_address();
-            let mut pool = read_yield_pool_or_default(ref world);
-            let token = IERC20Dispatcher { contract_address: payment_token() };
+            let position = read_yield_position_or_default(ref world, caller);
+            let pool_id = pool_id_from_mode(position.use_btc_mode);
+            let mut pool = read_yield_pool_or_default(ref world, pool_id);
+            let token = IERC20Dispatcher { contract_address: payment_token(pool_id) };
             let ok = token.transfer_from(
                 caller,
                 get_contract_address(),
@@ -1157,7 +1364,7 @@ pub mod actions {
             let caller = starknet::get_caller_address();
             assert_yield_admin(ref world, caller);
             let strategy = YieldStrategyState {
-                pool_id: YIELD_POOL_ID,
+                pool_id: YIELD_POOL_STRK_ID,
                 strategy_kind,
                 adapter,
                 staking_target,
@@ -1182,7 +1389,7 @@ pub mod actions {
             let mut world = self.world_default();
             let caller = starknet::get_caller_address();
             assert_yield_admin(ref world, caller);
-            let mut risk = read_risk_state_or_default(ref world);
+            let mut risk = read_risk_state_or_default(ref world, YIELD_POOL_STRK_ID);
             risk.target_buffer_bps = target_buffer_bps;
             risk.max_exposure_bps = max_exposure_bps;
             risk.rebalance_threshold = rebalance_threshold;
@@ -1192,81 +1399,15 @@ pub mod actions {
 
         fn yield_rebalance(ref self: ContractState) {
             let mut world = self.world_default();
-            let pool = read_yield_pool_or_default(ref world);
-            let mut risk = read_risk_state_or_default(ref world);
-            let strategy = read_strategy_state_or_default(ref world);
-
-            if !strategy.enabled || strategy.paused || strategy.adapter == zero_address() {
-                return;
-            }
-
-            let adapter = IStakingAdapterDispatcher { contract_address: strategy.adapter };
-            let target_buffer = ratio_amount(pool.principal_pool, risk.target_buffer_bps);
-            let max_staked = ratio_amount(pool.principal_pool, risk.max_exposure_bps);
-
-            if risk.liquid_buffer > target_buffer {
-                let excess = risk.liquid_buffer - target_buffer;
-                if excess >= risk.rebalance_threshold && risk.staked_principal < max_staked {
-                    let capacity = max_staked - risk.staked_principal;
-                    let to_stake = min_u128(excess, capacity);
-                    if to_stake > 0 {
-                        let token = IERC20Dispatcher { contract_address: payment_token() };
-                        let moved = token.transfer(strategy.adapter, u256 { low: to_stake, high: 0 });
-                        assert!(moved, "Rebalance transfer to adapter failed");
-                        let ok = adapter.stake(to_stake);
-                        assert!(ok, "Adapter stake failed");
-                        risk.liquid_buffer -= to_stake;
-                        risk.staked_principal += to_stake;
-                    }
-                }
-            } else {
-                let needed = target_buffer - risk.liquid_buffer;
-                if needed >= risk.rebalance_threshold && risk.staked_principal > 0 {
-                    let to_unstake = risk.staked_principal;
-                    if to_unstake > 0 {
-                        let ok = adapter.request_unstake(to_unstake);
-                        if ok {
-                            risk.staked_principal -= to_unstake;
-                            risk.liquid_buffer += to_unstake;
-                        }
-                    }
-                }
-            }
-            world.write_model(@risk);
+            rebalance_pool_impl(ref world, YIELD_POOL_STRK_ID);
+            rebalance_pool_impl(ref world, YIELD_POOL_BTC_ID);
         }
 
         fn yield_harvest(ref self: ContractState) -> u128 {
             let mut world = self.world_default();
-            let mut pool = read_yield_pool_or_default(ref world);
-            let mut risk = read_risk_state_or_default(ref world);
-            let strategy = read_strategy_state_or_default(ref world);
-
-            if !strategy.enabled || strategy.paused || strategy.adapter == zero_address() {
-                return 0;
-            }
-
-            let adapter = IStakingAdapterDispatcher { contract_address: strategy.adapter };
-            let harvested = adapter.claim_rewards();
-            if harvested == 0 {
-                return 0;
-            }
-
-            let fee_cut = ratio_amount(harvested, risk.protocol_fee_bps);
-            let net_rewards = harvested - fee_cut;
-            let users_cut = ratio_amount(net_rewards, pool.user_share_bps);
-            if users_cut > 0 {
-                pool.earnings_pool += users_cut;
-                if pool.principal_pool > 0 {
-                    let delta_index = (users_cut * REWARD_INDEX_SCALE) / pool.principal_pool;
-                    if delta_index > 0 {
-                        pool.reward_index += delta_index;
-                    }
-                }
-            }
-            risk.last_harvest_ts = get_block_timestamp();
-            world.write_model(@pool);
-            world.write_model(@risk);
-            users_cut
+            let strk = harvest_pool_impl(ref world, YIELD_POOL_STRK_ID);
+            let tbtc = harvest_pool_impl(ref world, YIELD_POOL_BTC_ID);
+            strk + tbtc
         }
 
         fn yield_process_exit_queue(
@@ -1279,14 +1420,16 @@ pub mod actions {
                 return 0;
             }
 
-            let strategy = read_strategy_state_or_default(ref world);
-            let mut pool = read_yield_pool_or_default(ref world);
-            let mut risk = read_risk_state_or_default(ref world);
+            let position = read_yield_position_or_default(ref world, user);
+            let pool_id = pool_id_from_mode(position.use_btc_mode);
+            let strategy = read_strategy_state_or_default(ref world, pool_id);
+            let mut pool = read_yield_pool_or_default(ref world, pool_id);
+            let mut risk = read_risk_state_or_default(ref world, pool_id);
             let mut total_payout: u128 = 0;
 
             let immediate = min_u128(queue_item.queued_principal, risk.liquid_buffer);
             if immediate > 0 {
-                let token = IERC20Dispatcher { contract_address: payment_token() };
+                let token = IERC20Dispatcher { contract_address: payment_token(pool_id) };
                 let ok = token.transfer(user, u256 { low: immediate, high: 0 });
                 assert!(ok, "Queued withdraw transfer failed");
                 risk.liquid_buffer -= immediate;
@@ -1301,11 +1444,19 @@ pub mod actions {
             }
 
             if queue_item.queued_principal > 0 && strategy.enabled && !strategy.paused && strategy.adapter != zero_address() {
-                let payout = queue_item.queued_principal;
                 let adapter = IStakingAdapterDispatcher { contract_address: strategy.adapter };
-                let requested = adapter.request_unstake(payout);
+                let to_unstake = risk.staked_principal;
+                let requested = if to_unstake > 0 { adapter.request_unstake(to_unstake) } else { false };
                 if requested {
-                    let token = IERC20Dispatcher { contract_address: payment_token() };
+                    risk.staked_principal = 0;
+                    risk.liquid_buffer += to_unstake;
+                }
+            }
+
+            if queue_item.queued_principal > 0 && risk.liquid_buffer > 0 {
+                let payout = min_u128(queue_item.queued_principal, risk.liquid_buffer);
+                if payout > 0 {
+                    let token = IERC20Dispatcher { contract_address: payment_token(pool_id) };
                     let ok = token.transfer(user, u256 { low: payout, high: 0 });
                     if ok {
                         assert!(pool.principal_pool >= payout, "Principal pool accounting mismatch");
@@ -1315,11 +1466,44 @@ pub mod actions {
                         } else {
                             queue_item.queued_principal = 0;
                         }
-                        if risk.staked_principal >= payout {
-                            risk.staked_principal -= payout;
+                        risk.liquid_buffer -= payout;
+                        total_payout += payout;
+                    }
+                }
+            }
+
+            if queue_item.queued_principal > 0 {
+                let token = IERC20Dispatcher { contract_address: payment_token(pool_id) };
+                let contract_balance = token.balance_of(get_contract_address());
+                let contract_balance_u128 = if contract_balance.high == 0 {
+                    contract_balance.low
+                } else {
+                    contract_balance.low
+                };
+                let observed_liquid = if contract_balance_u128 > pool.earnings_pool {
+                    contract_balance_u128 - pool.earnings_pool
+                } else {
+                    0
+                };
+                if observed_liquid > risk.liquid_buffer {
+                    risk.liquid_buffer = observed_liquid;
+                }
+            }
+
+            if queue_item.queued_principal > 0 && risk.liquid_buffer > 0 {
+                let payout = min_u128(queue_item.queued_principal, risk.liquid_buffer);
+                if payout > 0 {
+                    let token = IERC20Dispatcher { contract_address: payment_token(pool_id) };
+                    let ok = token.transfer(user, u256 { low: payout, high: 0 });
+                    if ok {
+                        assert!(pool.principal_pool >= payout, "Principal pool accounting mismatch");
+                        pool.principal_pool -= payout;
+                        if queue_item.queued_principal >= payout {
+                            queue_item.queued_principal -= payout;
                         } else {
-                            risk.staked_principal = 0;
+                            queue_item.queued_principal = 0;
                         }
+                        risk.liquid_buffer -= payout;
                         total_payout += payout;
                     }
                 }
@@ -1346,8 +1530,89 @@ pub mod actions {
             if current.admin != zero_address() {
                 assert!(caller == current.admin, "Only current admin");
             }
-            let next = YieldAdminState { pool_id: YIELD_POOL_ID, admin };
+            let next = YieldAdminState { pool_id: YIELD_POOL_STRK_ID, admin };
             world.write_model(@next);
+        }
+
+        fn yield_configure_strategy_for_pool(
+            ref self: ContractState,
+            pool_id: u8,
+            strategy_kind: u8,
+            adapter: ContractAddress,
+            staking_target: ContractAddress,
+            rewards_target: ContractAddress,
+            enabled: bool,
+            paused: bool
+        ) {
+            assert_supported_pool(pool_id);
+            let mut world = self.world_default();
+            let caller = starknet::get_caller_address();
+            assert_yield_admin(ref world, caller);
+            let strategy = YieldStrategyState {
+                pool_id,
+                strategy_kind,
+                adapter,
+                staking_target,
+                rewards_target,
+                enabled,
+                paused,
+            };
+            world.write_model(@strategy);
+        }
+
+        fn yield_set_risk_params_for_pool(
+            ref self: ContractState,
+            pool_id: u8,
+            target_buffer_bps: u32,
+            max_exposure_bps: u32,
+            rebalance_threshold: u128,
+            protocol_fee_bps: u32
+        ) {
+            assert_supported_pool(pool_id);
+            assert!(target_buffer_bps <= 10_000, "target_buffer_bps out of range");
+            assert!(max_exposure_bps <= 10_000, "max_exposure_bps out of range");
+            assert!(protocol_fee_bps <= 10_000, "protocol_fee_bps out of range");
+            let mut world = self.world_default();
+            let caller = starknet::get_caller_address();
+            assert_yield_admin(ref world, caller);
+            let mut risk = read_risk_state_or_default(ref world, pool_id);
+            risk.target_buffer_bps = target_buffer_bps;
+            risk.max_exposure_bps = max_exposure_bps;
+            risk.rebalance_threshold = rebalance_threshold;
+            risk.protocol_fee_bps = protocol_fee_bps;
+            world.write_model(@risk);
+        }
+
+        fn yield_rebalance_pool(ref self: ContractState, pool_id: u8) {
+            let mut world = self.world_default();
+            rebalance_pool_impl(ref world, pool_id);
+        }
+
+        fn yield_harvest_pool(ref self: ContractState, pool_id: u8) -> u128 {
+            let mut world = self.world_default();
+            harvest_pool_impl(ref world, pool_id)
+        }
+
+        fn yield_get_user_state(
+            self: @ContractState,
+            user: ContractAddress
+        ) -> (u128, u128, u128, bool, u8, u128, u128, u32) {
+            let mut world = self.world_default();
+            let position = read_yield_position_or_default(ref world, user);
+            let queue_item = read_exit_queue_or_default(ref world, user);
+            let pool_id = pool_id_from_mode(position.use_btc_mode);
+            let pool = read_yield_pool_or_default(ref world, pool_id);
+            let risk = read_risk_state_or_default(ref world, pool_id);
+            (
+                position.principal,
+                position.pending_rewards,
+                queue_item.queued_principal,
+                position.use_btc_mode,
+                pool_id,
+                pool.earnings_pool,
+                risk.liquid_buffer,
+                pool.apr_bps
+            )
         }
     }
 

@@ -13,6 +13,37 @@ export class PostManager {
     this.imageCache = new Map()
     this.dojoManager = dojoManager // Optional Dojo integration
     this.useDojo = !!dojoManager
+    this.cacheKey = 'starkwall_posts_cache_v1'
+  }
+
+  savePostsToCache() {
+    try {
+      const serializable = (this.posts || []).map((post) => {
+        const { imageElement, ...rest } = post || {}
+        return rest
+      })
+      localStorage.setItem(this.cacheKey, JSON.stringify(serializable))
+    } catch (e) {
+      console.warn('Posts cache save failed:', e?.message || e)
+    }
+  }
+
+  loadPostsFromCache() {
+    try {
+      const raw = localStorage.getItem(this.cacheKey)
+      if (!raw) return false
+      const cached = JSON.parse(raw)
+      if (!Array.isArray(cached) || cached.length === 0) return false
+      this.posts = cached
+      this.layout.loadExistingPosts(this.posts)
+      this.canvas.setPosts(this.posts)
+      // Warm images asynchronously; UI remains interactive.
+      this.loadImages().then(() => this.canvas.setPosts(this.posts)).catch(() => {})
+      return true
+    } catch (e) {
+      console.warn('Posts cache load failed:', e?.message || e)
+      return false
+    }
   }
 
   async loadPosts() {
@@ -21,8 +52,13 @@ export class PostManager {
     if (this.useDojo) {
       // Load posts from Dojo
       console.log('Loading posts from Dojo...');
-      data = await this.dojoManager.queryAllPosts();
-      console.log('Loaded posts from Dojo:', data);
+      try {
+        data = await this.dojoManager.queryAllPosts();
+        console.log('Loaded posts from Dojo:', data);
+      } catch (error) {
+        console.warn('Post query failed, keeping previous posts:', error?.message || error);
+        data = this.posts;
+      }
     } else {
       // Use mock data
       data = [
@@ -85,6 +121,12 @@ export class PostManager {
       ];
     }
 
+    // Prevent temporary Torii/RPC outages from wiping the canvas.
+    if (this.useDojo && this.posts.length > 0 && (!Array.isArray(data) || data.length === 0)) {
+      console.warn('Received empty post set; preserving previously loaded posts.');
+      data = this.posts;
+    }
+
     this.posts = data
 
     // Load existing positions into layout
@@ -94,6 +136,7 @@ export class PostManager {
     await this.loadImages()
 
     this.canvas.setPosts(this.posts)
+    this.savePostsToCache()
   }
 
   async loadImages() {

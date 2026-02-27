@@ -5,7 +5,7 @@
  */
 
 import manifest from './manifest.js'
-import { CHAIN_ID_HEX, RPC_URL, PAYMENT_TOKEN_ADDRESS } from './config.js'
+import { CHAIN_ID_HEX, RPC_URL, PAYMENT_TOKEN_ADDRESS, SEPOLIA_WBTC_TOKEN } from './config.js'
 
 const actionsContract = manifest.contracts.find((contract) => contract.tag === 'di-actions')
 const actionsSystems = new Set(actionsContract?.systems || [])
@@ -164,6 +164,26 @@ const controllerOpts = {
       },
     },
   },
+}
+
+const wbtcAddress = String(SEPOLIA_WBTC_TOKEN || '').trim()
+if (wbtcAddress && wbtcAddress !== PAYMENT_TOKEN_ADDRESS) {
+  controllerOpts.policies.contracts[wbtcAddress] = {
+    name: 'WBTC Strategy Token',
+    description: 'WBTC token used for BTC yield strategy',
+    methods: [
+      {
+        name: 'WBTC Approve',
+        entrypoint: 'approve',
+        description: 'Approve WBTC spending for BTC strategy deposits',
+      },
+      {
+        name: 'WBTC Transfer',
+        entrypoint: 'transfer',
+        description: 'Transfer WBTC for BTC strategy operations',
+      },
+    ],
+  }
 }
 
 export default controllerOpts

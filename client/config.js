@@ -35,6 +35,8 @@ export const DOMAIN_CHAIN_ID = IS_SEPOLIA ? 'SN_SEPOLIA' : 'KATANA'
 // Payment token config.
 export const SEPOLIA_STRK_TOKEN =
   '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d'
+export const SEPOLIA_WBTC_TOKEN =
+  '0x00452bd5c0512a61df7c7be8cfea5e4f893cb40e126bdc40aee6054db955129e'
 export const KATANA_ETH_TOKEN = '0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7'
 
 export const STRK_TOKEN_ADDRESS = String(import.meta.env?.VITE_STRK_TOKEN || '')
@@ -46,6 +48,7 @@ export const PAYMENT_TOKEN_ADDRESS = STRK_TOKEN_ADDRESS || (IS_SEPOLIA ? SEPOLIA
 
 // Optional local-only faucet.
 export const FAUCET_URL = String(import.meta.env?.VITE_FAUCET_URL || 'http://127.0.0.1:3001')
+export const WBTC_FAUCET_URL = String(import.meta.env?.VITE_WBTC_FAUCET_URL || import.meta.env?.VITE_TBTC1_FAUCET_URL || '')
 
 // Yield strategy adapter config (optional runtime metadata used by UI/ops scripts).
 export const YIELD_STRATEGY_KIND = Number(import.meta.env?.VITE_YIELD_STRATEGY_KIND || 0)
@@ -54,3 +57,6 @@ export const YIELD_STAKING_TARGET = String(import.meta.env?.VITE_YIELD_STAKING_T
 export const YIELD_REWARDS_TARGET = String(import.meta.env?.VITE_YIELD_REWARDS_TARGET || '')
 export const YIELD_OPERATIONAL_TARGET = String(import.meta.env?.VITE_YIELD_OPERATIONAL_TARGET || '')
 export const YIELD_MODE = String(import.meta.env?.VITE_YIELD_MODE || 'user_direct').toLowerCase()
+export const YIELD_DUAL_POOL_ENABLED = String(
+  import.meta.env?.VITE_YIELD_DUAL_POOL_ENABLED || (IS_SEPOLIA ? 'true' : ''),
+).toLowerCase() === 'true'
