@@ -803,6 +803,11 @@ function setupUIHandlers() {
   const addPostBtn = document.getElementById('addPost')
   const addPaidPostBtn = document.getElementById('addPaidPost')
   const addAuctionPostBtn = document.getElementById('addAuctionPost')
+  const mobileCreateWrap = document.getElementById('mobileCreateWrap')
+  const mobileCreateBtn = document.getElementById('mobileCreateBtn')
+  const mobileCreateFreeBtn = document.getElementById('mobileCreateFreeBtn')
+  const mobileCreatePaidBtn = document.getElementById('mobileCreatePaidBtn')
+  const mobileCreateAuctionBtn = document.getElementById('mobileCreateAuctionBtn')
   const sendStrkBtn = document.getElementById('sendStrkBtn')
   const cancelPostBtn = document.getElementById('cancelPost')
 
@@ -1022,6 +1027,38 @@ function setupUIHandlers() {
 
   if (sendStrkBtn) {
     sendStrkBtn.addEventListener('click', openSendStrkModal)
+  }
+
+  if (mobileCreateBtn && mobileCreateWrap) {
+    mobileCreateBtn.onclick = (e) => {
+      e.stopPropagation()
+      mobileCreateWrap.classList.toggle('open')
+    }
+  }
+  if (mobileCreateFreeBtn && mobileCreateWrap) {
+    mobileCreateFreeBtn.onclick = () => {
+      mobileCreateWrap.classList.remove('open')
+      addPostBtn?.click()
+    }
+  }
+  if (mobileCreatePaidBtn && mobileCreateWrap) {
+    mobileCreatePaidBtn.onclick = () => {
+      mobileCreateWrap.classList.remove('open')
+      addPaidPostBtn?.click()
+    }
+  }
+  if (mobileCreateAuctionBtn && mobileCreateWrap) {
+    mobileCreateAuctionBtn.onclick = () => {
+      mobileCreateWrap.classList.remove('open')
+      addAuctionPostBtn?.click()
+    }
+  }
+  if (mobileCreateWrap) {
+    document.addEventListener('click', (e) => {
+      if (!mobileCreateWrap.contains(e.target)) {
+        mobileCreateWrap.classList.remove('open')
+      }
+    })
   }
 
   if (cancelSendStrkBtn) {
