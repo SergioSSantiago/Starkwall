@@ -318,12 +318,32 @@ async function unfollowUserLocally(targetAddress) {
 }
 
 let socialRevalidationTimer = null
+
+function updateMobileSocialButtons(followingCount = 0, followersCount = 0) {
+  const mobileFollowingBtn = document.getElementById('mobileFollowingBtn')
+  if (mobileFollowingBtn) mobileFollowingBtn.textContent = `Following ${Number(followingCount) || 0}`
+
+  const mobileFollowersBtn = document.getElementById('mobileFollowersBtn')
+  if (mobileFollowersBtn) mobileFollowersBtn.textContent = `Followers ${Number(followersCount) || 0}`
+}
+
+function syncMobileSocialButtonsFromState() {
+  const me = normalizeSocialAddress(currentAccount?.address)
+  if (!me) {
+    updateMobileSocialButtons(0, 0)
+    return
+  }
+  const { following, followers } = getSocialFollowersFollowing(me)
+  updateMobileSocialButtons(following.length, followers.length)
+}
+
 function scheduleSocialRevalidation(delayMs = 800) {
   if (socialRevalidationTimer) clearTimeout(socialRevalidationTimer)
   socialRevalidationTimer = setTimeout(async () => {
     socialRevalidationTimer = null
     await refreshSocialData().catch(() => {})
     await updateWalletInfo().catch(() => {})
+    syncMobileSocialButtonsFromState()
 
     const followingModal = document.getElementById('followingModal')
     if (followingModal?.classList.contains('active')) {
@@ -1240,6 +1260,24 @@ function setupUIHandlers() {
 
   // Social modal handlers
   setupSocialModalHandlers()
+
+  const mobileMyFeedBtn = document.getElementById('mobileMyFeedBtn')
+  const mobileFollowingBtn = document.getElementById('mobileFollowingBtn')
+  const mobileFollowersBtn = document.getElementById('mobileFollowersBtn')
+
+  if (mobileMyFeedBtn) {
+    mobileMyFeedBtn.onclick = () => {
+      const me = normalizeSocialAddress(currentAccount?.address)
+      if (!me) return
+      renderOwnerFeed(me, String(currentUsername || '').trim())
+    }
+  }
+  if (mobileFollowingBtn) {
+    mobileFollowingBtn.onclick = async () => { await openFollowingModal() }
+  }
+  if (mobileFollowersBtn) {
+    mobileFollowersBtn.onclick = async () => { await openFollowersModal() }
+  }
 
   // Post details modal handlers
   setupPostDetailsHandlers()
@@ -2442,10 +2480,12 @@ function setupSocialModalHandlers() {
   const closeFollowersBtn = document.getElementById('closeFollowersBtn')
   const closeFollowingBtn = document.getElementById('closeFollowingBtn')
   const closeOwnerFeedBtn = document.getElementById('closeOwnerFeedBtn')
+  const ownerFeedToCanvasBtn = document.getElementById('ownerFeedToCanvasBtn')
 
   closeFollowersBtn?.addEventListener('click', () => closeSocialModalById('followersModal'))
   closeFollowingBtn?.addEventListener('click', () => closeSocialModalById('followingModal'))
   closeOwnerFeedBtn?.addEventListener('click', () => closeOwnerFeedView())
+  ownerFeedToCanvasBtn?.addEventListener('click', () => closeOwnerFeedView())
 
   followersModal?.addEventListener('click', (e) => {
     if (e.target === followersModal) closeSocialModalById('followersModal')
@@ -2507,10 +2547,13 @@ async function updateWalletInfo() {
     if (followersBtn) {
       followersBtn.onclick = async () => { await openFollowersModal() }
     }
+
+    updateMobileSocialButtons(following.length, followers.length)
   } catch (error) {
     console.error('Error updating wallet info:', error)
     const shortAddr = currentAccount ? (String(currentAccount.address).slice(0, 6) + '...' + String(currentAccount.address).slice(-4)) : ''
     walletInfo.innerHTML = `<span style="color: #4CAF50;">● ${currentUsername || shortAddr}</span>`
+    syncMobileSocialButtonsFromState()
   }
 }
 

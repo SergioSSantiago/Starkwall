@@ -188,7 +188,7 @@ pub mod actions {
     ) -> FollowStats {
         let stats: FollowStats = world.read_model(user);
         if stats.user == zero_address() {
-            return FollowStats { user, followers_count: 0, following_count: 0 };
+            return FollowStats { user, followers_count: 0, following_count: 0, schema_version: 1 };
         }
         stats
     }
@@ -573,7 +573,11 @@ pub mod actions {
             if existing_profile.user != zero {
                 let old_hash = existing_profile.username_norm_hash;
                 if old_hash != username_norm_hash {
-                    let old_index = UsernameIndex { username_norm_hash: old_hash, user: zero };
+                    let old_index = UsernameIndex {
+                        username_norm_hash: old_hash,
+                        user: zero,
+                        schema_version: 1,
+                    };
                     world.write_model(@old_index);
                 }
             }
@@ -584,10 +588,15 @@ pub mod actions {
                 "Username already taken"
             );
 
-            let profile = UserProfile { user: caller, username, username_norm_hash };
+            let profile = UserProfile {
+                user: caller,
+                username,
+                username_norm_hash,
+                schema_version: 1,
+            };
             world.write_model(@profile);
 
-            let index = UsernameIndex { username_norm_hash, user: caller };
+            let index = UsernameIndex { username_norm_hash, user: caller, schema_version: 1 };
             world.write_model(@index);
         }
 
@@ -606,6 +615,7 @@ pub mod actions {
                 follower,
                 following,
                 created_at: get_block_timestamp(),
+                schema_version: 1,
             };
             world.write_model(@relation);
 
@@ -629,7 +639,7 @@ pub mod actions {
             let existing: FollowRelation = world.read_model((follower, following));
             assert!(existing.created_at > 0, "Follow relation does not exist");
 
-            let relation = FollowRelation { follower, following, created_at: 0 };
+            let relation = FollowRelation { follower, following, created_at: 0, schema_version: 1 };
             world.write_model(@relation);
 
             let mut follower_stats = read_follow_stats_or_default(ref world, follower);

@@ -240,6 +240,10 @@
   padding: 8px 10px;
 }
 
+.mobile-only-control {
+  display: none;
+}
+
 .owner-feed-list {
   flex: 1;
   overflow-y: auto;
@@ -772,6 +776,22 @@
     width: 100%;
     padding: 8px 12px;
     text-align: right;
+  }
+
+  .mobile-only-control {
+    display: inline-block;
+  }
+
+  #controls .mobile-only-control {
+    flex: 1 1 calc(33.33% - 8px);
+    min-height: 42px;
+    padding: 10px 8px;
+    font-size: 12px;
+  }
+
+  .owner-feed-header #ownerFeedToCanvasBtn {
+    min-height: 0;
+    padding: 8px 10px;
   }
 }
 

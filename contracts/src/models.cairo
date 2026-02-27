@@ -63,6 +63,7 @@ pub struct UserProfile {
     pub user: ContractAddress,
     pub username: ByteArray,
     pub username_norm_hash: felt252,
+    pub schema_version: u8,
 }
 
 #[derive(Copy, Drop, Serde)]
@@ -71,6 +72,7 @@ pub struct UsernameIndex {
     #[key]
     pub username_norm_hash: felt252,
     pub user: ContractAddress,
+    pub schema_version: u8,
 }
 
 #[derive(Copy, Drop, Serde)]
@@ -81,6 +83,7 @@ pub struct FollowRelation {
     #[key]
     pub following: ContractAddress,
     pub created_at: u64,
+    pub schema_version: u8,
 }
 
 #[derive(Copy, Drop, Serde)]
@@ -90,5 +93,6 @@ pub struct FollowStats {
     pub user: ContractAddress,
     pub followers_count: u64,
     pub following_count: u64,
+    pub schema_version: u8,
 }
 
