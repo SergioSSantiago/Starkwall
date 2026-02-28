@@ -23,10 +23,42 @@ pub trait IActions<T> {
         end_time: u64
     ) -> u64;
 
+    fn create_auction_post_3x3_sealed(
+        ref self: T,
+        center_image_url: ByteArray,
+        center_caption: ByteArray,
+        creator_username: ByteArray,
+        center_x_position: i32,
+        center_y_position: i32,
+        commit_end_time: u64,
+        reveal_end_time: u64,
+        verifier: starknet::ContractAddress
+    ) -> u64;
+
     fn place_bid(
         ref self: T,
         slot_post_id: u64,
         bid_amount: u128
+    );
+
+    fn commit_bid(
+        ref self: T,
+        slot_post_id: u64,
+        commitment: felt252,
+        escrow_amount: u128
+    );
+
+    fn reveal_bid(
+        ref self: T,
+        slot_post_id: u64,
+        bid_amount: u128,
+        salt: felt252,
+        proof_blob_hash: felt252
+    );
+
+    fn claim_commit_refund(
+        ref self: T,
+        slot_post_id: u64
     );
 
     fn finalize_auction_slot(
@@ -175,18 +207,33 @@ pub trait IStakingAdapter<T> {
     fn pending_unstake(self: @T) -> u128;
 }
 
+#[starknet::interface]
+pub trait ISealedBidVerifier<T> {
+    fn verify_sealed_bid(
+        self: @T,
+        slot_post_id: u64,
+        group_id: u64,
+        bidder: starknet::ContractAddress,
+        bid_amount: u128,
+        salt: felt252,
+        commitment: felt252,
+        proof_blob_hash: felt252
+    ) -> bool;
+}
+
 #[dojo::contract]
 pub mod actions {
     use super::{
         IActions, IERC20Dispatcher, IERC20DispatcherTrait, IStakingAdapterDispatcher,
-        IStakingAdapterDispatcherTrait
+        IStakingAdapterDispatcherTrait, ISealedBidVerifierDispatcher,
+        ISealedBidVerifierDispatcherTrait
     };
     use core::traits::TryInto;
     use starknet::{ContractAddress, get_block_timestamp, get_contract_address};
     use crate::models::{
-        AuctionGroup, AuctionSlot, FollowRelation, FollowStats, Post, PostCounter, UserProfile,
-        UsernameIndex, YieldAdminState, YieldExitQueue, YieldPoolState, YieldPosition, YieldRiskState,
-        YieldStrategyState
+        AuctionCommit, AuctionGroup, AuctionSealedConfig, AuctionSlot, FollowRelation, FollowStats, Post,
+        PostCounter, UserProfile, UsernameIndex, YieldAdminState, YieldExitQueue, YieldPoolState,
+        YieldPosition, YieldRiskState, YieldStrategyState
     };
     use dojo::model::ModelStorage;
 
@@ -299,6 +346,32 @@ pub mod actions {
 
     fn zero_address() -> ContractAddress {
         0.try_into().unwrap()
+    }
+
+    fn read_sealed_config_or_default(
+        ref world: dojo::world::WorldStorage, group_id: u64, fallback_end_time: u64
+    ) -> AuctionSealedConfig {
+        let config: AuctionSealedConfig = world.read_model(group_id);
+        if config.group_id == group_id {
+            return config;
+        }
+        AuctionSealedConfig {
+            group_id,
+            sealed_mode: false,
+            commit_end_time: fallback_end_time,
+            reveal_end_time: fallback_end_time,
+            verifier: zero_address(),
+        }
+    }
+
+    fn compute_bid_commitment(
+        slot_post_id: u64,
+        group_id: u64,
+        bidder: ContractAddress,
+        bid_amount: u128,
+        salt: felt252
+    ) -> felt252 {
+        salt + slot_post_id.into() + group_id.into() + bidder.into() + bid_amount.into()
     }
 
     fn read_follow_stats_or_default(
@@ -706,6 +779,15 @@ pub mod actions {
                 active: true,
             };
             world.write_model(@group);
+            world.write_model(
+                @AuctionSealedConfig {
+                    group_id: center_post_id,
+                    sealed_mode: false,
+                    commit_end_time: end_time,
+                    reveal_end_time: end_time,
+                    verifier: zero_address(),
+                }
+            );
 
             // 3) Create the 8 auction slot tiles around center
             let mut slot_idx: u8 = 1;
@@ -758,6 +840,126 @@ pub mod actions {
             center_post_id
         }
 
+        fn create_auction_post_3x3_sealed(
+            ref self: ContractState,
+            center_image_url: ByteArray,
+            center_caption: ByteArray,
+            creator_username: ByteArray,
+            center_x_position: i32,
+            center_y_position: i32,
+            commit_end_time: u64,
+            reveal_end_time: u64,
+            verifier: ContractAddress
+        ) -> u64 {
+            let mut world = self.world_default();
+            let caller = starknet::get_caller_address();
+            let now = get_block_timestamp();
+
+            assert!(verifier != zero_address(), "Verifier required");
+            assert!(commit_end_time > now, "Commit end must be in the future");
+            assert!(reveal_end_time > commit_end_time, "Reveal end must be after commit end");
+
+            let auction_fee_low: u128 = AUCTION_POST_CREATION_PRICE_STRK * STRK_DECIMALS_FACTOR;
+            let token = IERC20Dispatcher { contract_address: payment_token(YIELD_POOL_STRK_ID) };
+            let fee_paid = token.transfer_from(
+                caller,
+                get_contract_address(),
+                u256 { low: auction_fee_low, high: 0 },
+            );
+            assert!(fee_paid, "Auction creation payment failed");
+
+            let auction_top_left_x = center_x_position - TILE_W;
+            let auction_top_left_y = center_y_position - TILE_H;
+            assert!(auction_top_left_x >= 0, "Auction 3x3 would exceed left boundary");
+            assert!(auction_top_left_y >= 0, "Auction 3x3 would exceed top boundary");
+            assert_region_free(ref world, auction_top_left_x, auction_top_left_y, 3);
+
+            let center_post_id = next_post_id(ref world);
+            write_post(
+                ref world,
+                center_post_id,
+                center_image_url.clone(),
+                center_caption.clone(),
+                center_x_position,
+                center_y_position,
+                1,
+                false,
+                caller,
+                caller,
+                creator_username.clone(),
+                POST_KIND_AUCTION_CENTER,
+                center_post_id,
+                0,
+            );
+
+            world.write_model(
+                @AuctionGroup {
+                    group_id: center_post_id,
+                    center_post_id,
+                    creator: caller,
+                    end_time: reveal_end_time,
+                    active: true,
+                }
+            );
+
+            world.write_model(
+                @AuctionSealedConfig {
+                    group_id: center_post_id,
+                    sealed_mode: true,
+                    commit_end_time,
+                    reveal_end_time,
+                    verifier,
+                }
+            );
+
+            let mut slot_idx: u8 = 1;
+            let offsets = array![
+                (center_x_position - TILE_W, center_y_position - TILE_H),
+                (center_x_position, center_y_position - TILE_H),
+                (center_x_position + TILE_W, center_y_position - TILE_H),
+                (center_x_position - TILE_W, center_y_position),
+                (center_x_position + TILE_W, center_y_position),
+                (center_x_position - TILE_W, center_y_position + TILE_H),
+                (center_x_position, center_y_position + TILE_H),
+                (center_x_position + TILE_W, center_y_position + TILE_H),
+            ];
+
+            for (slot_x, slot_y) in offsets {
+                let slot_post_id = next_post_id(ref world);
+                write_post(
+                    ref world,
+                    slot_post_id,
+                    creator_username.clone(),
+                    creator_username.clone(),
+                    slot_x,
+                    slot_y,
+                    1,
+                    false,
+                    caller,
+                    get_contract_address(),
+                    creator_username.clone(),
+                    POST_KIND_AUCTION_SLOT,
+                    center_post_id,
+                    slot_idx,
+                );
+
+                world.write_model(
+                    @AuctionSlot {
+                        slot_post_id,
+                        group_id: center_post_id,
+                        highest_bid: 0,
+                        highest_bidder: caller,
+                        has_bid: false,
+                        finalized: false,
+                        content_initialized: false,
+                    }
+                );
+                slot_idx += 1;
+            }
+
+            center_post_id
+        }
+
         fn place_bid(
             ref self: ContractState,
             slot_post_id: u64,
@@ -773,7 +975,9 @@ pub mod actions {
             assert!(!slot.finalized, "Auction slot already finalized");
 
             let group: AuctionGroup = world.read_model(slot.group_id);
+            let sealed_cfg = read_sealed_config_or_default(ref world, slot.group_id, group.end_time);
             assert!(group.active, "Auction group inactive");
+            assert!(!sealed_cfg.sealed_mode, "Use commit/reveal for sealed auction");
             assert!(now < group.end_time, "Auction already ended");
             assert!(bid_amount > slot.highest_bid, "Bid must be higher than current highest");
 
@@ -814,6 +1018,147 @@ pub mod actions {
             world.write_model(@updated_slot);
         }
 
+        fn commit_bid(
+            ref self: ContractState,
+            slot_post_id: u64,
+            commitment: felt252,
+            escrow_amount: u128
+        ) {
+            let mut world = self.world_default();
+            let bidder = starknet::get_caller_address();
+            let now = get_block_timestamp();
+            assert!(escrow_amount > 0, "Escrow must be > 0");
+            assert!(commitment != 0, "Commitment required");
+
+            let slot: AuctionSlot = world.read_model(slot_post_id);
+            assert!(!slot.finalized, "Auction slot already finalized");
+            let group: AuctionGroup = world.read_model(slot.group_id);
+            assert!(group.active, "Auction group inactive");
+
+            let sealed_cfg = read_sealed_config_or_default(ref world, slot.group_id, group.end_time);
+            assert!(sealed_cfg.sealed_mode, "Not a sealed auction");
+            assert!(now < sealed_cfg.commit_end_time, "Commit phase closed");
+
+            let existing: AuctionCommit = world.read_model((slot_post_id, bidder));
+            assert!(existing.commitment == 0, "Commit already submitted");
+
+            let post: Post = world.read_model(slot_post_id);
+            assert!(post.post_kind == POST_KIND_AUCTION_SLOT, "Not an auction slot");
+            assert!(post.current_owner != bidder, "Owner cannot bid on this slot");
+
+            let token = IERC20Dispatcher { contract_address: payment_token(YIELD_POOL_STRK_ID) };
+            let escrow_low: u128 = escrow_amount * STRK_DECIMALS_FACTOR;
+            let paid = token.transfer_from(
+                bidder,
+                get_contract_address(),
+                u256 { low: escrow_low, high: 0 },
+            );
+            assert!(paid, "Commit escrow payment failed");
+
+            world.write_model(
+                @AuctionCommit {
+                    slot_post_id,
+                    bidder,
+                    commitment,
+                    escrow_amount,
+                    committed_at: now,
+                    revealed: false,
+                    revealed_bid: 0,
+                    refunded: false,
+                }
+            );
+        }
+
+        fn reveal_bid(
+            ref self: ContractState,
+            slot_post_id: u64,
+            bid_amount: u128,
+            salt: felt252,
+            proof_blob_hash: felt252
+        ) {
+            let mut world = self.world_default();
+            let bidder = starknet::get_caller_address();
+            let now = get_block_timestamp();
+            assert!(bid_amount > 0, "Bid must be > 0");
+
+            let mut slot: AuctionSlot = world.read_model(slot_post_id);
+            assert!(!slot.finalized, "Auction slot already finalized");
+            let group: AuctionGroup = world.read_model(slot.group_id);
+            let sealed_cfg = read_sealed_config_or_default(ref world, slot.group_id, group.end_time);
+            assert!(sealed_cfg.sealed_mode, "Not a sealed auction");
+            assert!(now >= sealed_cfg.commit_end_time, "Reveal phase not started");
+            assert!(now < sealed_cfg.reveal_end_time, "Reveal phase closed");
+
+            let mut commit: AuctionCommit = world.read_model((slot_post_id, bidder));
+            assert!(commit.commitment != 0, "No commit found");
+            assert!(!commit.revealed, "Bid already revealed");
+            assert!(commit.escrow_amount >= bid_amount, "Escrow lower than revealed bid");
+
+            let verifier = ISealedBidVerifierDispatcher { contract_address: sealed_cfg.verifier };
+            let verified = verifier.verify_sealed_bid(
+                slot_post_id,
+                slot.group_id,
+                bidder,
+                bid_amount,
+                salt,
+                commit.commitment,
+                proof_blob_hash,
+            );
+            assert!(verified, "Invalid reveal proof");
+            assert!(
+                compute_bid_commitment(slot_post_id, slot.group_id, bidder, bid_amount, salt)
+                    == commit.commitment,
+                "Commitment mismatch"
+            );
+
+            commit.revealed = true;
+            commit.revealed_bid = bid_amount;
+            world.write_model(@commit);
+
+            if !slot.has_bid || bid_amount > slot.highest_bid {
+                slot.highest_bid = bid_amount;
+                slot.highest_bidder = bidder;
+                slot.has_bid = true;
+                world.write_model(@slot);
+            }
+        }
+
+        fn claim_commit_refund(
+            ref self: ContractState,
+            slot_post_id: u64
+        ) {
+            let mut world = self.world_default();
+            let bidder = starknet::get_caller_address();
+            let now = get_block_timestamp();
+
+            let slot: AuctionSlot = world.read_model(slot_post_id);
+            let group: AuctionGroup = world.read_model(slot.group_id);
+            let sealed_cfg = read_sealed_config_or_default(ref world, slot.group_id, group.end_time);
+            assert!(sealed_cfg.sealed_mode, "Not a sealed auction");
+            assert!(now >= sealed_cfg.reveal_end_time, "Refund available after reveal");
+
+            let mut commit: AuctionCommit = world.read_model((slot_post_id, bidder));
+            assert!(commit.commitment != 0, "No commit found");
+            assert!(commit.revealed, "Reveal required before refund");
+            assert!(!commit.refunded, "Already refunded");
+            assert!(commit.escrow_amount > 0, "Nothing to refund");
+
+            if slot.finalized && slot.has_bid && slot.highest_bidder == bidder {
+                assert!(commit.revealed_bid != slot.highest_bid, "Winner cannot refund");
+            }
+
+            commit.refunded = true;
+            world.write_model(@commit);
+
+            let token = IERC20Dispatcher { contract_address: payment_token(YIELD_POOL_STRK_ID) };
+            let refund_low: u128 = commit.escrow_amount * STRK_DECIMALS_FACTOR;
+            let refunded = token.transfer(
+                bidder,
+                u256 { low: refund_low, high: 0 },
+            );
+            assert!(refunded, "Refund transfer failed");
+        }
+
         fn finalize_auction_slot(
             ref self: ContractState,
             slot_post_id: u64
@@ -825,8 +1170,13 @@ pub mod actions {
             assert!(!slot.finalized, "Auction slot already finalized");
 
             let group: AuctionGroup = world.read_model(slot.group_id);
+            let sealed_cfg = read_sealed_config_or_default(ref world, slot.group_id, group.end_time);
             assert!(group.active, "Auction group inactive");
-            assert!(now >= group.end_time, "Auction has not ended yet");
+            if sealed_cfg.sealed_mode {
+                assert!(now >= sealed_cfg.reveal_end_time, "Reveal phase not ended");
+            } else {
+                assert!(now >= group.end_time, "Auction has not ended yet");
+            }
 
             let mut post: Post = world.read_model(slot_post_id);
             assert!(post.post_kind == POST_KIND_AUCTION_SLOT, "Not an auction slot");
@@ -844,6 +1194,16 @@ pub mod actions {
                 post.current_owner = slot.highest_bidder;
                 post.sale_price = 0;
                 world.write_model(@post);
+
+                if sealed_cfg.sealed_mode {
+                    let mut winner_commit: AuctionCommit = world.read_model(
+                        (slot_post_id, slot.highest_bidder)
+                    );
+                    if winner_commit.commitment != 0 {
+                        winner_commit.refunded = true;
+                        world.write_model(@winner_commit);
+                    }
+                }
 
                 let finalized_slot = AuctionSlot {
                     slot_post_id: slot.slot_post_id,

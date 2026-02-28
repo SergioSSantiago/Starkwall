@@ -76,6 +76,38 @@ if (actionsSystems.has('unfollow')) {
   })
 }
 
+if (actionsSystems.has('create_auction_post_3x3_sealed')) {
+  actionMethods.push({
+    name: 'Create Sealed Auction 3x3',
+    entrypoint: 'create_auction_post_3x3_sealed',
+    description: 'Create a 3x3 auction post with sealed bids',
+  })
+}
+
+if (actionsSystems.has('commit_bid')) {
+  actionMethods.push({
+    name: 'Commit Bid',
+    entrypoint: 'commit_bid',
+    description: 'Commit a sealed bid with escrow',
+  })
+}
+
+if (actionsSystems.has('reveal_bid')) {
+  actionMethods.push({
+    name: 'Reveal Bid',
+    entrypoint: 'reveal_bid',
+    description: 'Reveal a sealed bid with proof',
+  })
+}
+
+if (actionsSystems.has('claim_commit_refund')) {
+  actionMethods.push({
+    name: 'Claim Commit Refund',
+    entrypoint: 'claim_commit_refund',
+    description: 'Claim escrow refund after sealed auction settlement',
+  })
+}
+
 if (actionsSystems.has('yield_deposit')) {
   actionMethods.push({
     name: 'Yield Deposit',

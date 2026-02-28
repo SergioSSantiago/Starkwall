@@ -49,6 +49,7 @@ export const PAYMENT_TOKEN_ADDRESS = STRK_TOKEN_ADDRESS || (IS_SEPOLIA ? SEPOLIA
 // Optional local-only faucet.
 export const FAUCET_URL = String(import.meta.env?.VITE_FAUCET_URL || 'http://127.0.0.1:3001')
 export const WBTC_FAUCET_URL = String(import.meta.env?.VITE_WBTC_FAUCET_URL || import.meta.env?.VITE_TBTC1_FAUCET_URL || '')
+export const SEALED_BID_VERIFIER_ADDRESS = String(import.meta.env?.VITE_SEALED_BID_VERIFIER_ADDRESS || '')
 
 // Yield strategy adapter config (optional runtime metadata used by UI/ops scripts).
 export const YIELD_STRATEGY_KIND = Number(import.meta.env?.VITE_YIELD_STRATEGY_KIND || 0)

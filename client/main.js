@@ -7,7 +7,8 @@ import { init as initDojo, KeysClause, ToriiQueryBuilder } from '@dojoengine/sdk
 import controllerOpts from './controller.js'
 import manifest from './manifest.js'
 import {
-  DOMAIN_CHAIN_ID, TORII_URL, IS_SEPOLIA, FAUCET_URL, WBTC_FAUCET_URL, YIELD_DUAL_POOL_ENABLED, SEPOLIA_WBTC_TOKEN,
+  DOMAIN_CHAIN_ID, TORII_URL, IS_SEPOLIA, FAUCET_URL, WBTC_FAUCET_URL, YIELD_DUAL_POOL_ENABLED,
+  SEPOLIA_WBTC_TOKEN, SEALED_BID_VERIFIER_ADDRESS,
 } from './config.js'
 
 // Evitar que un rechazo de promesa no capturado provoque recarga o cierre de la app
@@ -70,6 +71,11 @@ const actionsContractMeta = manifest.contracts.find((contract) => contract.tag =
 const actionsSystems = new Set(actionsContractMeta?.systems || [])
 const hasOnchainSocialInManifest = actionsSystems.has('follow') && actionsSystems.has('unfollow')
 const hasYieldInManifest = actionsSystems.has('yield_deposit') && actionsSystems.has('yield_withdraw') && actionsSystems.has('yield_claim')
+const hasSealedBidInManifest =
+  actionsSystems.has('create_auction_post_3x3_sealed') &&
+  actionsSystems.has('commit_bid') &&
+  actionsSystems.has('reveal_bid') &&
+  actionsSystems.has('claim_commit_refund')
 let socialOnchainAvailable = hasOnchainSocialInManifest
 let socialOnchainWarned = false
 let cachedYieldState = null
@@ -718,9 +724,13 @@ async function autoFinalizeEndedAuctionSlots(source = 'scan') {
     if (Number(post.post_kind) !== 2) return false
     const slot = post.auction_slot || null
     const group = post.auction_group || null
+    const sealedCfg = post.auction_sealed_config || null
     if (!slot || !group || slot.finalized) return false
     const now = Math.floor(Date.now() / 1000)
-    return now >= Number(group.end_time || 0)
+    const endTs = sealedCfg?.sealed_mode
+      ? Number(sealedCfg.reveal_end_time || group.end_time || 0)
+      : Number(group.end_time || 0)
+    return now >= endTs
   })
 
   for (const post of endedSlots) {
@@ -736,6 +746,34 @@ const CONTRACT_MAX_BYTES_PER_FIELD = CONTRACT_MAX_CHUNKS_PER_FIELD * 31
 const CONTRACT_SAFE_MAX_CHUNKS_PER_FIELD = 260
 const CONTRACT_SAFE_MAX_BYTES_PER_FIELD = CONTRACT_SAFE_MAX_CHUNKS_PER_FIELD * 31
 const AUCTION_POST_CREATION_FEE_STRK = 10
+const SEALED_BID_SALT_MAP_KEY = 'starkwall_sealed_bid_salts_v1'
+
+function randomSaltFelt() {
+  const a = BigInt(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER))
+  const b = BigInt(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER))
+  return `0x${((a << 53n) + b).toString(16)}`
+}
+
+function readSaltMap() {
+  try {
+    const raw = localStorage.getItem(SEALED_BID_SALT_MAP_KEY)
+    const parsed = raw ? JSON.parse(raw) : {}
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function saveSaltForSlot(slotPostId, salt) {
+  const map = readSaltMap()
+  map[String(slotPostId)] = String(salt || '')
+  try { localStorage.setItem(SEALED_BID_SALT_MAP_KEY, JSON.stringify(map)) } catch {}
+}
+
+function getSaltForSlot(slotPostId) {
+  const map = readSaltMap()
+  return String(map[String(slotPostId)] || '')
+}
 
 function byteArrayChunkCount(str) {
   const bytes = new TextEncoder().encode(String(str || '')).length
@@ -917,6 +955,9 @@ function setupUIHandlers() {
   const isPaidInput = document.getElementById('isPaid')
   const isAuctionInput = document.getElementById('isAuction')
   const auctionEndAtInput = document.getElementById('auctionEndAt')
+  const auctionCommitEndAtInput = document.getElementById('auctionCommitEndAt')
+  const auctionRevealEndAtInput = document.getElementById('auctionRevealEndAt')
+  const sealedAuctionOptions = document.getElementById('sealedAuctionOptions')
   const auctionEndPreview = document.getElementById('auctionEndPreview')
   const photoPreview = document.getElementById('photoPreview')
   const photoPlaceholder = document.getElementById('photoPlaceholder')
@@ -929,6 +970,16 @@ function setupUIHandlers() {
   const auctionPostOptions = document.getElementById('auctionPostOptions')
   const paidPostPriceEl = document.getElementById('paidPostPrice')
   const postSizeRadios = document.querySelectorAll('input[name="postSizeRadio"]')
+  const auctionModeRadios = document.querySelectorAll('input[name="auctionModeRadio"]')
+  if (!hasSealedBidInManifest) {
+    auctionModeRadios.forEach((r) => {
+      if (r.value === 'sealed') {
+        if (r.parentElement) r.parentElement.style.display = 'none'
+        r.checked = false
+      }
+      if (r.value === 'public') r.checked = true
+    })
+  }
 
   const addPostBtn = document.getElementById('addPost')
   const addPaidPostBtn = document.getElementById('addPaidPost')
@@ -982,6 +1033,33 @@ function setupUIHandlers() {
     auctionEndPreview.textContent = `Ends (local): ${localLabel} | Ends (UTC): ${utcLabel} | Remaining: ${remaining}`
   }
 
+  function getAuctionMode() {
+    if (!hasSealedBidInManifest) return 'public'
+    const selected = [...auctionModeRadios].find((r) => r.checked)
+    return selected?.value === 'sealed' ? 'sealed' : 'public'
+  }
+
+  function updateSealedAuctionVisibility() {
+    const sealed = getAuctionMode() === 'sealed'
+    if (sealedAuctionOptions) sealedAuctionOptions.style.display = sealed ? 'block' : 'none'
+    if (!sealed) return
+    const now = Date.now()
+    if (auctionCommitEndAtInput && !auctionCommitEndAtInput.value) {
+      const d = new Date(now + 6 * 60 * 60 * 1000)
+      d.setMinutes(0, 0, 0)
+      auctionCommitEndAtInput.value = new Date(
+        d.getTime() - d.getTimezoneOffset() * 60000,
+      ).toISOString().slice(0, 16)
+    }
+    if (auctionRevealEndAtInput && !auctionRevealEndAtInput.value) {
+      const d = new Date(now + 24 * 60 * 60 * 1000)
+      d.setMinutes(0, 0, 0)
+      auctionRevealEndAtInput.value = new Date(
+        d.getTime() - d.getTimezoneOffset() * 60000,
+      ).toISOString().slice(0, 16)
+    }
+  }
+
   function setCreateMode(mode) {
     const isPaid = mode === 'paid'
     const isAuction = mode === 'auction'
@@ -1008,9 +1086,11 @@ function setupUIHandlers() {
         auctionEndAtInput.value = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
       }
       updateAuctionEndPreview()
+      updateSealedAuctionVisibility()
     } else if (!isPaid) {
       submitPostBtn.textContent = 'Create Post'
       if (auctionEndPreview) auctionEndPreview.textContent = 'Displayed in your local timezone and UTC.'
+      if (sealedAuctionOptions) sealedAuctionOptions.style.display = 'none'
     }
   }
 
@@ -1130,6 +1210,17 @@ function setupUIHandlers() {
   if (auctionEndAtInput) {
     auctionEndAtInput.addEventListener('input', updateAuctionEndPreview)
     auctionEndAtInput.addEventListener('change', updateAuctionEndPreview)
+  }
+  auctionModeRadios.forEach((radio) => {
+    radio.addEventListener('change', updateSealedAuctionVisibility)
+  })
+  if (auctionCommitEndAtInput) {
+    auctionCommitEndAtInput.addEventListener('input', updateSealedAuctionVisibility)
+    auctionCommitEndAtInput.addEventListener('change', updateSealedAuctionVisibility)
+  }
+  if (auctionRevealEndAtInput) {
+    auctionRevealEndAtInput.addEventListener('input', updateSealedAuctionVisibility)
+    auctionRevealEndAtInput.addEventListener('change', updateSealedAuctionVisibility)
   }
   removePhotoBtn.addEventListener('click', clearPhoto)
   // En desktop ya no usamos el input con capture; Cámara abre la webcam
@@ -1257,6 +1348,8 @@ function setupUIHandlers() {
     clearPhoto()
     paidPostOptions.style.display = 'none'
     if (auctionPostOptions) auctionPostOptions.style.display = 'none'
+    if (sealedAuctionOptions) sealedAuctionOptions.style.display = 'none'
+    auctionModeRadios.forEach((r) => { r.checked = r.value === 'public' })
     if (isAuctionInput) isAuctionInput.value = 'false'
     submitPostBtn.textContent = 'Create Post'
   })
@@ -1268,6 +1361,8 @@ function setupUIHandlers() {
       clearPhoto()
       paidPostOptions.style.display = 'none'
       if (auctionPostOptions) auctionPostOptions.style.display = 'none'
+      if (sealedAuctionOptions) sealedAuctionOptions.style.display = 'none'
+      auctionModeRadios.forEach((r) => { r.checked = r.value === 'public' })
       if (isAuctionInput) isAuctionInput.value = 'false'
       submitPostBtn.textContent = 'Create Post'
     }
@@ -1330,7 +1425,9 @@ function setupUIHandlers() {
     }
 
     let auctionEndUnix = 0
+    let sealedAuctionConfig = null
     if (isAuction) {
+      const auctionMode = getAuctionMode()
       const endRaw = String(auctionEndAtInput?.value || '')
       if (!endRaw) {
         alert('Please choose auction end date/time.')
@@ -1346,6 +1443,39 @@ function setupUIHandlers() {
         alert('Auction end time must be at least 1 minute in the future.')
         return
       }
+
+      if (auctionMode === 'sealed') {
+        if (!SEALED_BID_VERIFIER_ADDRESS) {
+          alert('Missing sealed bid verifier address. Set VITE_SEALED_BID_VERIFIER_ADDRESS.')
+          return
+        }
+        const commitRaw = String(auctionCommitEndAtInput?.value || '')
+        const revealRaw = String(auctionRevealEndAtInput?.value || '')
+        const commitMs = Date.parse(commitRaw)
+        const revealMs = Date.parse(revealRaw)
+        if (!Number.isFinite(commitMs) || !Number.isFinite(revealMs)) {
+          alert('Please set valid commit and reveal date/time.')
+          return
+        }
+        const commitEndUnix = Math.floor(commitMs / 1000)
+        const revealEndUnix = Math.floor(revealMs / 1000)
+        const nowUnix = Math.floor(Date.now() / 1000)
+        if (commitEndUnix <= nowUnix + 60) {
+          alert('Commit end must be at least 1 minute in the future.')
+          return
+        }
+        if (revealEndUnix <= commitEndUnix + 60) {
+          alert('Reveal end must be after commit end.')
+          return
+        }
+        sealedAuctionConfig = {
+          sealed: true,
+          commitEndTimeUnix: commitEndUnix,
+          revealEndTimeUnix: revealEndUnix,
+          verifier: SEALED_BID_VERIFIER_ADDRESS,
+        }
+        auctionEndUnix = revealEndUnix
+      }
     }
 
     submitPostBtn.disabled = true
@@ -1359,11 +1489,13 @@ function setupUIHandlers() {
           clearPhoto()
           paidPostOptions.style.display = 'none'
           if (auctionPostOptions) auctionPostOptions.style.display = 'none'
+          if (sealedAuctionOptions) sealedAuctionOptions.style.display = 'none'
+          auctionModeRadios.forEach((r) => { r.checked = r.value === 'public' })
           if (isAuctionInput) isAuctionInput.value = 'false'
           submitPostBtn.disabled = false
           submitPostBtn.textContent = 'Create Post'
           updateWalletInfo().catch(() => {})
-        })
+        }, sealedAuctionConfig)
       } else {
         await postManager.createPost(imageUrl, caption, username, size, isPaid, () => {
           document.getElementById('modal').classList.remove('active')
@@ -1445,11 +1577,15 @@ function setupPostDetailsHandlers() {
   const removeSaleBtn = document.getElementById('removeSaleBtn')
   const buyPostBtn = document.getElementById('buyPostBtn')
   const placeBidBtn = document.getElementById('placeBidBtn')
+  const commitBidBtn = document.getElementById('commitBidBtn')
+  const revealBidBtn = document.getElementById('revealBidBtn')
+  const claimCommitRefundBtn = document.getElementById('claimCommitRefundBtn')
   const finalizeAuctionBtn = document.getElementById('finalizeAuctionBtn')
   const initializeSlotContentBtn = document.getElementById('initializeSlotContentBtn')
   const salePriceInput = document.getElementById('salePriceInput')
   const salePriceRow = document.getElementById('salePriceRow')
   const auctionBidInput = document.getElementById('auctionBidInput')
+  const sealedBidInput = document.getElementById('sealedBidInput')
   const wonSlotImagePicker = document.getElementById('wonSlotImagePicker')
   const wonSlotCameraPicker = document.getElementById('wonSlotCameraPicker')
   const wonSlotModal = document.getElementById('wonSlotModal')
@@ -1820,6 +1956,77 @@ function setupPostDetailsHandlers() {
     }
   })
 
+  if (commitBidBtn) commitBidBtn.addEventListener('click', async () => {
+    if (!currentPost || !dojoManager) return
+    const bid = parseInt(sealedBidInput?.value || '0')
+    if (!Number.isFinite(bid) || bid <= 0) {
+      alert('Enter a valid sealed bid amount.')
+      return
+    }
+    const salt = randomSaltFelt()
+    try {
+      postDetailsModal.classList.remove('active')
+      await dojoManager.commitAuctionBid(currentPost.id, bid, salt)
+      saveSaltForSlot(currentPost.id, salt)
+      await new Promise((resolve) => setTimeout(resolve, 5000))
+      await postManager.loadPosts()
+      await postManager.loadImages()
+      canvas.setPosts(postManager.posts)
+      await updateWalletInfo()
+      showToast('Sealed bid committed')
+    } catch (error) {
+      console.error('Error committing sealed bid:', error)
+      alert('Failed to commit bid: ' + (error.message || 'Unknown error'))
+      postDetailsModal.classList.remove('active')
+    }
+  })
+
+  if (revealBidBtn) revealBidBtn.addEventListener('click', async () => {
+    if (!currentPost || !dojoManager) return
+    const bid = parseInt(sealedBidInput?.value || '0')
+    if (!Number.isFinite(bid) || bid <= 0) {
+      alert('Enter your bid amount to reveal.')
+      return
+    }
+    const salt = getSaltForSlot(currentPost.id)
+    if (!salt) {
+      alert('No local salt found for this slot commit.')
+      return
+    }
+    try {
+      postDetailsModal.classList.remove('active')
+      await dojoManager.revealAuctionBidWithProof(currentPost.id, bid, salt, '0x1')
+      await new Promise((resolve) => setTimeout(resolve, 5000))
+      await postManager.loadPosts()
+      await postManager.loadImages()
+      canvas.setPosts(postManager.posts)
+      await updateWalletInfo()
+      showToast('Sealed bid revealed')
+    } catch (error) {
+      console.error('Error revealing sealed bid:', error)
+      alert('Failed to reveal bid: ' + (error.message || 'Unknown error'))
+      postDetailsModal.classList.remove('active')
+    }
+  })
+
+  if (claimCommitRefundBtn) claimCommitRefundBtn.addEventListener('click', async () => {
+    if (!currentPost || !dojoManager) return
+    try {
+      postDetailsModal.classList.remove('active')
+      await dojoManager.claimAuctionCommitRefund(currentPost.id)
+      await new Promise((resolve) => setTimeout(resolve, 5000))
+      await postManager.loadPosts()
+      await postManager.loadImages()
+      canvas.setPosts(postManager.posts)
+      await updateWalletInfo()
+      showToast('Commit refund claimed')
+    } catch (error) {
+      console.error('Error claiming commit refund:', error)
+      alert('Failed to claim refund: ' + (error.message || 'Unknown error'))
+      postDetailsModal.classList.remove('active')
+    }
+  })
+
   if (initializeSlotContentBtn) initializeSlotContentBtn.addEventListener('click', () => {
     const fallbackPostId = Number(postDetailsModal?.dataset?.postId || 0)
     const fallbackPost = Number.isFinite(fallbackPostId) && fallbackPostId > 0
@@ -1857,12 +2064,17 @@ function showPostDetails(post, source = 'canvas') {
   const removeSaleBtn = document.getElementById('removeSaleBtn')
   const buyPostBtn = document.getElementById('buyPostBtn')
   const placeBidBtn = document.getElementById('placeBidBtn')
+  const commitBidBtn = document.getElementById('commitBidBtn')
+  const revealBidBtn = document.getElementById('revealBidBtn')
+  const claimCommitRefundBtn = document.getElementById('claimCommitRefundBtn')
   const finalizeAuctionBtn = document.getElementById('finalizeAuctionBtn')
   const initializeSlotContentBtn = document.getElementById('initializeSlotContentBtn')
   const salePriceInput = document.getElementById('salePriceInput')
   const salePriceRow = document.getElementById('salePriceRow')
   const auctionBidRow = document.getElementById('auctionBidRow')
   const auctionBidInput = document.getElementById('auctionBidInput')
+  const sealedBidRow = document.getElementById('sealedBidRow')
+  const sealedBidInput = document.getElementById('sealedBidInput')
 
   // Set current post
   window.postDetailsHandlers.setCurrentPost(post)
@@ -1964,10 +2176,14 @@ function showPostDetails(post, source = 'canvas') {
   buyPostBtn.style.display = 'none'
   buyPostBtn.textContent = '🛒 Buy Post'
   if (placeBidBtn) placeBidBtn.style.display = 'none'
+  if (commitBidBtn) commitBidBtn.style.display = 'none'
+  if (revealBidBtn) revealBidBtn.style.display = 'none'
+  if (claimCommitRefundBtn) claimCommitRefundBtn.style.display = 'none'
   if (finalizeAuctionBtn) finalizeAuctionBtn.style.display = 'none'
   if (initializeSlotContentBtn) initializeSlotContentBtn.style.display = 'none'
   if (salePriceRow) salePriceRow.style.display = 'none'
   if (auctionBidRow) auctionBidRow.style.display = 'none'
+  if (sealedBidRow) sealedBidRow.style.display = 'none'
   if (postAuctionInfo) {
     postAuctionInfo.style.display = 'none'
     postAuctionInfo.textContent = ''
@@ -1988,14 +2204,20 @@ function showPostDetails(post, source = 'canvas') {
     }
   } else if (isAuctionSlot && slot && group) {
     const now = Math.floor(Date.now() / 1000)
-    const ended = now >= Number(group.end_time || 0)
+    const sealedCfg = post.auction_sealed_config || null
+    const isSealed = Boolean(sealedCfg?.sealed_mode)
+    const commitEndTs = Number(sealedCfg?.commit_end_time || group.end_time || 0)
+    const revealEndTs = Number(sealedCfg?.reveal_end_time || group.end_time || 0)
+    const endTs = isSealed ? revealEndTs : Number(group.end_time || 0)
+    const ended = now >= endTs
+    const myAddr = normalizeSocialAddress(currentAccount?.address || '')
+    const myCommit = (post.auction_commits || []).find((c) => normalizeSocialAddress(c.bidder) === myAddr) || null
 
     if (postAuctionInfo) {
       const highest = Number(slot.highest_bid || 0)
       const bidder = slot.has_bid
         ? String(slot.highest_bidder || '').slice(0, 8) + '...' + String(slot.highest_bidder || '').slice(-6)
         : 'No bids yet'
-      const endTs = Number(group.end_time || 0)
       const endDate = new Date(endTs * 1000)
       const endLocal = endDate.toLocaleString()
       const endUtc = endDate.toISOString().replace('T', ' ').slice(0, 16) + ' UTC'
@@ -2006,22 +2228,53 @@ function showPostDetails(post, source = 'canvas') {
       const remainingLabel = remainDays > 0
         ? `${remainDays}d ${remainHours}h ${remainMinutes}m`
         : `${remainHours}h ${remainMinutes}m`
-      postAuctionInfo.innerHTML = '<strong>Auction Slot</strong><br/>Highest bid: ' + highest + ' STRK<br/>Highest bidder: ' + bidder + '<br/>Ends (local): ' + endLocal + '<br/>Ends (UTC): ' + endUtc + '<br/>Remaining: ' + remainingLabel + '<br/>Finalized: ' + (slot.finalized ? 'Yes' : 'No') + '<br/>Content published: ' + (slot.content_initialized ? 'Yes' : 'No') + (slot.finalized && slot.has_bid ? '<br/>Proceeds: paid to creator' : '')
+      let phaseLine = 'Mode: Public'
+      if (isSealed) {
+        if (now < commitEndTs) phaseLine = 'Mode: Sealed · Phase: Commit'
+        else if (now < revealEndTs) phaseLine = 'Mode: Sealed · Phase: Reveal'
+        else phaseLine = 'Mode: Sealed · Phase: Finalize'
+      }
+      const myCommitLine = isSealed && myCommit
+        ? `<br/>My commit: escrow ${Number(myCommit.escrow_amount || 0)} STRK · revealed: ${myCommit.revealed ? 'Yes' : 'No'} · refunded: ${myCommit.refunded ? 'Yes' : 'No'}`
+        : ''
+      postAuctionInfo.innerHTML = '<strong>Auction Slot</strong><br/>' + phaseLine + '<br/>Highest bid: ' + highest + ' STRK<br/>Highest bidder: ' + bidder + '<br/>Ends (local): ' + endLocal + '<br/>Ends (UTC): ' + endUtc + '<br/>Remaining: ' + remainingLabel + '<br/>Finalized: ' + (slot.finalized ? 'Yes' : 'No') + '<br/>Content published: ' + (slot.content_initialized ? 'Yes' : 'No') + myCommitLine + (slot.finalized && slot.has_bid ? '<br/>Proceeds: paid to creator' : '')
       postAuctionInfo.style.display = 'block'
       postAuctionInfo.style.color = '#9ecbff'
     }
 
     if (!slot.finalized) {
-      postSaleInfo.textContent = ended ? 'Auction ended. Finalize to settle winner.' : 'Auction in progress'
-      postSaleInfo.style.color = '#9ecbff'
-      if (ended) {
-        postSaleInfo.textContent = 'Auction ended. Finalizing automatically...'
+      if (!isSealed) {
+        postSaleInfo.textContent = ended ? 'Auction ended. Finalize to settle winner.' : 'Auction in progress'
         postSaleInfo.style.color = '#9ecbff'
-        void tryAutoFinalizeAuctionSlot(post, 'post-details')
+        if (ended) {
+          postSaleInfo.textContent = 'Auction ended. Finalizing automatically...'
+          postSaleInfo.style.color = '#9ecbff'
+          void tryAutoFinalizeAuctionSlot(post, 'post-details')
+        } else {
+          if (auctionBidRow) auctionBidRow.style.display = 'block'
+          if (auctionBidInput) auctionBidInput.value = String(Math.max(1, Number(slot.highest_bid || 0) + 1))
+          if (placeBidBtn) placeBidBtn.style.display = 'inline-block'
+        }
       } else {
-        if (auctionBidRow) auctionBidRow.style.display = 'block'
-        if (auctionBidInput) auctionBidInput.value = String(Math.max(1, Number(slot.highest_bid || 0) + 1))
-        if (placeBidBtn) placeBidBtn.style.display = 'inline-block'
+        const inCommit = now < commitEndTs
+        const inReveal = now >= commitEndTs && now < revealEndTs
+        if (inCommit) {
+          postSaleInfo.textContent = 'Sealed auction: commit phase'
+          postSaleInfo.style.color = '#9ecbff'
+          if (sealedBidRow) sealedBidRow.style.display = 'block'
+          if (sealedBidInput && !sealedBidInput.value) sealedBidInput.value = '1'
+          if (commitBidBtn) commitBidBtn.style.display = myCommit ? 'none' : 'inline-block'
+        } else if (inReveal) {
+          postSaleInfo.textContent = 'Sealed auction: reveal phase'
+          postSaleInfo.style.color = '#9ecbff'
+          if (sealedBidRow) sealedBidRow.style.display = 'block'
+          if (sealedBidInput && myCommit?.revealed_bid) sealedBidInput.value = String(myCommit.revealed_bid)
+          if (revealBidBtn) revealBidBtn.style.display = myCommit && !myCommit.revealed ? 'inline-block' : 'none'
+        } else {
+          postSaleInfo.textContent = 'Sealed auction ended. Finalizing automatically...'
+          postSaleInfo.style.color = '#9ecbff'
+          void tryAutoFinalizeAuctionSlot(post, 'post-details')
+        }
       }
     } else {
       const isCreatorOwner = isOwner && normalizeAddress(group.creator) === userAddress
@@ -2059,6 +2312,13 @@ function showPostDetails(post, source = 'canvas') {
           sellPostBtn.style.display = 'inline-block'
           if (salePriceRow) salePriceRow.style.display = 'block'
           if (salePriceInput && !salePriceInput.value) salePriceInput.value = '10'
+        }
+      }
+
+      if (isSealed && myCommit && !myCommit.refunded) {
+        const isWinner = slot.has_bid && normalizeSocialAddress(slot.highest_bidder) === myAddr
+        if (!isWinner) {
+          if (claimCommitRefundBtn) claimCommitRefundBtn.style.display = 'inline-block'
         }
       }
     }

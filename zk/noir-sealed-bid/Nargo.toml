@@ -1,0 +1,14 @@
+[package]
+name = "noir_sealed_bid"
+type = "bin"
+authors = ["Starkwall"]
+compiler_version = ">=0.34.0"
+
+[dependencies]
+[package]
+name = "sealed_bid_commitment"
+type = "bin"
+authors = ["starkwall"]
+compiler_version = ">=0.31.0"
+
+[dependencies]

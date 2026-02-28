@@ -64,6 +64,23 @@ function poolIdFromMode(useBtcMode) {
   return useBtcMode ? 1 : 0
 }
 
+function normalizeHexAddress(address) {
+  const raw = String(address || '').trim().toLowerCase()
+  if (!raw) return '0x0'
+  const hex = raw.startsWith('0x') ? raw.slice(2) : raw
+  const normalized = hex.replace(/^0+/, '')
+  return `0x${normalized || '0'}`
+}
+
+function simpleCommitment(slotPostId, groupId, bidder, bidAmount, salt) {
+  const slot = BigInt(slotPostId || 0)
+  const group = BigInt(groupId || 0)
+  const bid = BigInt(bidAmount || 0)
+  const saltVal = BigInt(salt || 0)
+  const addr = BigInt(normalizeHexAddress(bidder))
+  return `0x${(saltVal + slot + group + addr + bid).toString(16)}`
+}
+
 export class DojoManager {
   constructor(account, manifest, toriiClient) {
     this.account = account;
@@ -804,6 +821,57 @@ export class DojoManager {
     return tx;
   }
 
+  async createAuctionPost3x3Sealed(
+    imageUrl,
+    caption,
+    creatorUsername,
+    centerX,
+    centerY,
+    commitEndTimeUnix,
+    revealEndTimeUnix,
+    verifierAddress,
+  ) {
+    const imageUrlBytes = stringToByteArray(imageUrl || '')
+    const captionBytes = stringToByteArray(caption || '')
+    const usernameBytes = stringToByteArray(creatorUsername || '')
+    const verifier = String(verifierAddress || '').trim()
+    if (!verifier || !verifier.startsWith('0x')) throw new Error('Invalid verifier address')
+
+    const calldata = [
+      ...imageUrlBytes,
+      ...captionBytes,
+      ...usernameBytes,
+      centerX,
+      centerY,
+      Number(commitEndTimeUnix),
+      Number(revealEndTimeUnix),
+      verifier,
+    ]
+
+    const amountWei = BigInt(AUCTION_POST_CREATION_FEE_STRK) * ONE_STRK
+    const { low, high } = feltToU256(amountWei)
+    const tx = await this.account.execute([
+      {
+        contractAddress: PAYMENT_TOKEN_ADDRESS,
+        entrypoint: 'approve',
+        calldata: [this.actionsContract.address, low, high],
+      },
+      {
+        contractAddress: this.actionsContract.address,
+        entrypoint: 'create_auction_post_3x3_sealed',
+        calldata,
+      },
+    ])
+
+    const receipt = await this.account.waitForTransaction(tx.transaction_hash)
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Create sealed auction transaction reverted'
+      throw new Error(reason)
+    }
+
+    return tx
+  }
+
   async placeAuctionBid(slotPostId, bidAmountStrk) {
     const tokenAddr = PAYMENT_TOKEN_ADDRESS;
     if (!tokenAddr) throw new Error('No token configured.');
@@ -836,6 +904,73 @@ export class DojoManager {
     }
 
     return tx;
+  }
+
+  async commitAuctionBid(slotPostId, bidAmountStrk, saltFelt) {
+    const amount = Number(bidAmountStrk)
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error('Invalid bid amount')
+    const slotId = Number(slotPostId)
+    if (!Number.isFinite(slotId) || slotId <= 0) throw new Error('Invalid slot')
+    const posts = await this.queryAllPosts().catch(() => [])
+    const slotPost = posts.find((p) => Number(p.id) === slotId)
+    const groupId = Number(slotPost?.auction_group_id || slotPost?.auction_slot?.group_id || 0)
+    if (!groupId) throw new Error('Cannot resolve auction group for slot')
+    const commitment = simpleCommitment(slotId, groupId, this.account.address, Math.floor(amount), saltFelt)
+
+    const amountWei = BigInt(Math.floor(amount)) * ONE_STRK
+    const { low, high } = feltToU256(amountWei)
+    const tx = await this.account.execute([
+      {
+        contractAddress: PAYMENT_TOKEN_ADDRESS,
+        entrypoint: 'approve',
+        calldata: [this.actionsContract.address, low, high],
+      },
+      {
+        contractAddress: this.actionsContract.address,
+        entrypoint: 'commit_bid',
+        calldata: [slotId, commitment, Math.floor(amount)],
+      },
+    ])
+    const receipt = await this.account.waitForTransaction(tx.transaction_hash)
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Commit bid transaction reverted'
+      throw new Error(reason)
+    }
+    return { tx, commitment }
+  }
+
+  async revealAuctionBidWithProof(slotPostId, bidAmountStrk, saltFelt, proofBlobHash = '0x1') {
+    const amount = Number(bidAmountStrk)
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error('Invalid bid amount')
+    const slotId = Number(slotPostId)
+    if (!Number.isFinite(slotId) || slotId <= 0) throw new Error('Invalid slot')
+    const tx = await this.account.execute({
+      contractAddress: this.actionsContract.address,
+      entrypoint: 'reveal_bid',
+      calldata: [slotId, Math.floor(amount), String(saltFelt), String(proofBlobHash || '0x1')],
+    })
+    const receipt = await this.account.waitForTransaction(tx.transaction_hash)
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Reveal bid transaction reverted'
+      throw new Error(reason)
+    }
+    return tx
+  }
+
+  async claimAuctionCommitRefund(slotPostId) {
+    const slotId = Number(slotPostId)
+    if (!Number.isFinite(slotId) || slotId <= 0) throw new Error('Invalid slot')
+    const tx = await this.account.execute({
+      contractAddress: this.actionsContract.address,
+      entrypoint: 'claim_commit_refund',
+      calldata: [slotId],
+    })
+    const receipt = await this.account.waitForTransaction(tx.transaction_hash)
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Claim refund transaction reverted'
+      throw new Error(reason)
+    }
+    return tx
   }
 
   async finalizeAuctionSlot(slotPostId) {
@@ -903,8 +1038,12 @@ export class DojoManager {
         .withClause(KeysClause(['di-AuctionSlot'], [], 'VariableLen').build());
       const groupQuery = new ToriiQueryBuilder()
         .withClause(KeysClause(['di-AuctionGroup'], [], 'VariableLen').build());
+      const sealedCfgQuery = new ToriiQueryBuilder()
+        .withClause(KeysClause(['di-AuctionSealedConfig'], [], 'VariableLen').build());
+      const commitQuery = new ToriiQueryBuilder()
+        .withClause(KeysClause(['di-AuctionCommit'], [], 'VariableLen').build());
 
-      const [slotEntities, groupEntities] = await Promise.all([
+      const [slotEntities, groupEntities, sealedCfgEntities, commitEntities] = await Promise.all([
         getWithTimeout(slotQuery, 'AuctionSlot query').catch((e) => {
           console.warn('⚠️ AuctionSlot query failed:', e?.message || e);
           return { items: [] };
@@ -913,12 +1052,16 @@ export class DojoManager {
           console.warn('⚠️ AuctionGroup query failed:', e?.message || e);
           return { items: [] };
         }),
+        getWithTimeout(sealedCfgQuery, 'AuctionSealedConfig query').catch(() => ({ items: [] })),
+        getWithTimeout(commitQuery, 'AuctionCommit query').catch(() => ({ items: [] })),
       ]);
 
       const slotItems = slotEntities?.items || [];
       const groupItems = groupEntities?.items || [];
+      const sealedCfgItems = sealedCfgEntities?.items || [];
+      const commitItems = commitEntities?.items || [];
 
-      const mergedItems = [...entities.items, ...slotItems, ...groupItems];
+      const mergedItems = [...entities.items, ...slotItems, ...groupItems, ...sealedCfgItems, ...commitItems];
       const posts = this.parseSDKEntities(mergedItems);
       console.log(`✅ Parsed ${posts.length} posts`);
       
@@ -938,6 +1081,8 @@ export class DojoManager {
     const posts = [];
     const slotByPostId = new Map();
     const groupById = new Map();
+    const sealedConfigByGroupId = new Map();
+    const commitsBySlotPostId = new Map();
 
     // First pass: collect AuctionSlot and AuctionGroup models from entity envelopes.
     items.forEach((entity) => {
@@ -970,6 +1115,38 @@ export class DojoManager {
           });
         }
       }
+
+      const sealedCfg = entity.models?.di?.AuctionSealedConfig;
+      if (sealedCfg) {
+        const groupId = Number(sealedCfg.group_id ?? 0)
+        if (groupId > 0) {
+          sealedConfigByGroupId.set(groupId, {
+            group_id: groupId,
+            sealed_mode: Boolean(sealedCfg.sealed_mode),
+            commit_end_time: Number(sealedCfg.commit_end_time ?? 0),
+            reveal_end_time: Number(sealedCfg.reveal_end_time ?? 0),
+            verifier: sealedCfg.verifier || null,
+          })
+        }
+      }
+
+      const commit = entity.models?.di?.AuctionCommit;
+      if (commit) {
+        const slotPostId = Number(commit.slot_post_id ?? commit.slotPostId ?? 0);
+        if (slotPostId > 0) {
+          if (!commitsBySlotPostId.has(slotPostId)) commitsBySlotPostId.set(slotPostId, []);
+          commitsBySlotPostId.get(slotPostId).push({
+            slot_post_id: slotPostId,
+            bidder: normalizeHexAddress(commit.bidder),
+            commitment: String(commit.commitment || '0x0'),
+            escrow_amount: Number(commit.escrow_amount ?? 0),
+            committed_at: Number(commit.committed_at ?? 0),
+            revealed: Boolean(commit.revealed),
+            revealed_bid: Number(commit.revealed_bid ?? 0),
+            refunded: Boolean(commit.refunded),
+          });
+        }
+      }
     });
 
     // Second pass: parse Post models and attach auction metadata.
@@ -995,6 +1172,8 @@ export class DojoManager {
 
       const slot = slotByPostId.get(postId) || null;
       const group = auctionGroupId > 0 ? (groupById.get(auctionGroupId) || null) : null;
+      const sealedConfig = auctionGroupId > 0 ? (sealedConfigByGroupId.get(auctionGroupId) || null) : null;
+      const slotCommits = commitsBySlotPostId.get(postId) || [];
 
       posts.push({
         id: postId,
@@ -1014,6 +1193,8 @@ export class DojoManager {
         auction_slot_index: auctionSlotIndex,
         auction_slot: slot,
         auction_group: group,
+        auction_sealed_config: sealedConfig,
+        auction_commits: slotCommits,
       });
     });
 

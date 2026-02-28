@@ -415,7 +415,7 @@ export class PostManager {
   }
 
 
-  async createAuctionPost(imageUrl, caption, creatorUsername, endTimeUnix, onSuccess = null) {
+  async createAuctionPost(imageUrl, caption, creatorUsername, endTimeUnix, onSuccess = null, auctionConfig = null) {
     // Always re-sync before selecting the 3x3 block to prevent stale overlaps.
     await this.loadPosts()
 
@@ -441,14 +441,25 @@ export class PostManager {
     }
 
     try {
-      const tx = await this.dojoManager.createAuctionPost3x3(
-        imageUrl,
-        caption,
-        creatorUsername,
-        centerPosition.x,
-        centerPosition.y,
-        endTimeUnix,
-      )
+      const tx = auctionConfig?.sealed
+        ? await this.dojoManager.createAuctionPost3x3Sealed(
+            imageUrl,
+            caption,
+            creatorUsername,
+            centerPosition.x,
+            centerPosition.y,
+            Number(auctionConfig?.commitEndTimeUnix || 0),
+            Number(auctionConfig?.revealEndTimeUnix || 0),
+            String(auctionConfig?.verifier || ''),
+          )
+        : await this.dojoManager.createAuctionPost3x3(
+            imageUrl,
+            caption,
+            creatorUsername,
+            centerPosition.x,
+            centerPosition.y,
+            endTimeUnix,
+          )
 
       if (typeof onSuccess === 'function') {
         setTimeout(() => {

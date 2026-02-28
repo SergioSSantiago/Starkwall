@@ -56,6 +56,32 @@ pub struct AuctionSlot {
     pub content_initialized: bool, // winner can set image/caption exactly once
 }
 
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct AuctionCommit {
+    #[key]
+    pub slot_post_id: u64,
+    #[key]
+    pub bidder: ContractAddress,
+    pub commitment: felt252,
+    pub escrow_amount: u128,
+    pub committed_at: u64,
+    pub revealed: bool,
+    pub revealed_bid: u128,
+    pub refunded: bool,
+}
+
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct AuctionSealedConfig {
+    #[key]
+    pub group_id: u64,
+    pub sealed_mode: bool,
+    pub commit_end_time: u64,
+    pub reveal_end_time: u64,
+    pub verifier: ContractAddress,
+}
+
 #[derive(Drop, Serde)]
 #[dojo::model]
 pub struct UserProfile {

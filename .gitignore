@@ -13,3 +13,6 @@ contracts/dojo_sepolia.toml
 
 # Local debug artifacts
 .DS_Store
+.vercel
+client/.env.local
+client/coverage

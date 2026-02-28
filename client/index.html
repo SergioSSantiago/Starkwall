@@ -84,9 +84,21 @@
             <p id="paidPostPrice" class="paid-price">1 STRK</p>
           </div>
           <div id="auctionPostOptions" class="paid-post-options" style="display: none;">
+            <label>Auction mode</label>
+            <div class="size-options">
+              <label class="size-option"><input type="radio" name="auctionModeRadio" value="public" checked /> Public</label>
+              <label class="size-option"><input type="radio" name="auctionModeRadio" value="sealed" /> Sealed</label>
+            </div>
             <label for="auctionEndAt">Auction end date/time</label>
             <input type="datetime-local" id="auctionEndAt" />
             <p id="auctionEndPreview" class="photo-hint">Displayed in your local timezone and UTC.</p>
+            <div id="sealedAuctionOptions" style="display: none;">
+              <label for="auctionCommitEndAt">Commit end date/time</label>
+              <input type="datetime-local" id="auctionCommitEndAt" />
+              <label for="auctionRevealEndAt">Reveal end date/time</label>
+              <input type="datetime-local" id="auctionRevealEndAt" />
+              <p class="photo-hint">Sealed mode keeps bids private until reveal phase.</p>
+            </div>
             <p class="photo-hint">Creates a 3x3 auction layout: your center post plus 8 surrounding bid slots.</p>
           </div>
           <label>
@@ -207,6 +219,10 @@
             <label for="auctionBidInput" class="sale-price-label">Your bid (STRK)</label>
             <input type="number" id="auctionBidInput" class="sale-price-input" min="1" step="1" value="1" />
           </div>
+          <div id="sealedBidRow" class="sale-price-row" style="display: none;">
+            <label for="sealedBidInput" class="sale-price-label">Sealed bid amount (STRK)</label>
+            <input type="number" id="sealedBidInput" class="sale-price-input" min="1" step="1" value="1" />
+          </div>
           <div id="salePriceRow" class="sale-price-row" style="display: none;">
             <label for="salePriceInput" class="sale-price-label">Sale price (STRK)</label>
             <input type="number" id="salePriceInput" class="sale-price-input" min="1" step="1" value="10" />
@@ -219,6 +235,9 @@
           <button type="button" id="removeSaleBtn" style="display: none;">❌ Remove from Sale</button>
           <button type="button" id="buyPostBtn" style="display: none;">🛒 Buy Post</button>
           <button type="button" id="placeBidBtn" style="display: none;">🏷️ Place Bid</button>
+          <button type="button" id="commitBidBtn" style="display: none;">🔐 Commit Bid</button>
+          <button type="button" id="revealBidBtn" style="display: none;">🧾 Reveal Bid</button>
+          <button type="button" id="claimCommitRefundBtn" style="display: none;">💸 Claim Refund</button>
           <button type="button" id="initializeSlotContentBtn" style="display: none;">🖼️ Publish Won Slot</button>
           <button type="button" id="closePostDetails">Close</button>
         </div>
