@@ -5,10 +5,4 @@ authors = ["Starkwall"]
 compiler_version = ">=0.34.0"
 
 [dependencies]
-[package]
-name = "sealed_bid_commitment"
-type = "bin"
-authors = ["starkwall"]
-compiler_version = ">=0.31.0"
-
-[dependencies]
+poseidon = { tag = "v0.1.1", git = "https://github.com/noir-lang/poseidon" }
