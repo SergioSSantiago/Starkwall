@@ -73,6 +73,10 @@ const hasYieldInManifest = actionsSystems.has('yield_deposit') && actionsSystems
 let socialOnchainAvailable = hasOnchainSocialInManifest
 let socialOnchainWarned = false
 let cachedYieldState = null
+let postUpdatesSubscription = null
+let postUpdatesRetryTimer = null
+let postUpdatesRetryCount = 0
+let postUpdatesBeforeUnloadBound = false
 
 const SOCIAL_FALLBACK_KEY = 'starkwall_social_fallback_v1'
 
@@ -2082,6 +2086,35 @@ function showPostDetails(post, source = 'canvas') {
 }
 
 async function subscribeToPostUpdates(toriiClient) {
+  const scheduleResubscribe = () => {
+    if (postUpdatesRetryTimer) return
+    const delayMs = Math.min(30000, 1000 * (2 ** Math.max(0, postUpdatesRetryCount)))
+    postUpdatesRetryCount += 1
+    postUpdatesRetryTimer = setTimeout(() => {
+      postUpdatesRetryTimer = null
+      void subscribeToPostUpdates(toriiClient)
+    }, delayMs)
+  }
+
+  const clearSubscription = () => {
+    if (!postUpdatesSubscription) return
+    try { postUpdatesSubscription.cancel() } catch {}
+    postUpdatesSubscription = null
+  }
+
+  const shouldAutoReconnect = (err) => {
+    const msg = String(err?.message || err || '').toLowerCase()
+    return (
+      msg.includes('input stream') ||
+      msg.includes('networkerror') ||
+      msg.includes('stream error') ||
+      msg.includes('transport') ||
+      msg.includes('unavailable')
+    )
+  }
+
+  if (postUpdatesSubscription) return
+
   try {
     console.log('Setting up subscription for Post entities...');
     
@@ -2101,21 +2134,42 @@ async function subscribeToPostUpdates(toriiClient) {
           if (activeOwnerFeedAddress) renderOwnerFeed(activeOwnerFeedAddress, activeOwnerFeedUsername)
         }
         if (error) {
-          console.error('Subscription error:', error)
+          if (shouldAutoReconnect(error)) {
+            console.warn('Post updates stream interrupted. Reconnecting...')
+            clearSubscription()
+            scheduleResubscribe()
+          } else {
+            console.error('Subscription error:', error)
+          }
         }
       },
     })
+
+    postUpdatesSubscription = subscription
+    postUpdatesRetryCount = 0
+    if (postUpdatesRetryTimer) {
+      clearTimeout(postUpdatesRetryTimer)
+      postUpdatesRetryTimer = null
+    }
     
-    window.addEventListener('beforeunload', () => {
-      if (subscription) {
-        subscription.cancel()
-      }
-    })
+    if (!postUpdatesBeforeUnloadBound) {
+      postUpdatesBeforeUnloadBound = true
+      window.addEventListener('beforeunload', () => {
+        if (postUpdatesRetryTimer) {
+          clearTimeout(postUpdatesRetryTimer)
+          postUpdatesRetryTimer = null
+        }
+        clearSubscription()
+      })
+    }
     
     console.log('✓ Subscribed to Post entity updates')
   } catch (error) {
-    console.warn('Failed to subscribe to updates:', error)
-    // Non-fatal error, app can still work without subscriptions
+    console.warn('Failed to subscribe to updates:', error?.message || error)
+    if (shouldAutoReconnect(error)) {
+      scheduleResubscribe()
+    }
+    // Non-fatal error, app can still work without subscriptions.
   }
 }
 

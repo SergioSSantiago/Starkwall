@@ -8,7 +8,7 @@
  * - VITE_STRK_TOKEN=0x... (optional; defaults to Sepolia STRK)
  */
 
-export const NETWORK = String(import.meta.env?.VITE_NETWORK || 'dev').toLowerCase()
+export const NETWORK = String(import.meta.env?.VITE_NETWORK || 'sepolia').toLowerCase()
 export const IS_SEPOLIA = NETWORK === 'sepolia'
 
 // RPC endpoint (JSON-RPC).
@@ -23,7 +23,7 @@ export const RPC_URL = String(
 )
 
 export const TORII_URL = String(
-  import.meta.env?.VITE_TORII_URL || (IS_SEPOLIA ? '' : 'http://127.0.0.1:8080'),
+  import.meta.env?.VITE_TORII_URL || (IS_SEPOLIA ? 'https://starkwall-torii.fly.dev' : 'http://127.0.0.1:8080'),
 )
 
 // Cartridge expects hex chain ids.

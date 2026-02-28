@@ -1,4 +1,5 @@
 import { SpiralLayout } from './spiralLayout.js'
+import { IS_SEPOLIA, NETWORK, TORII_URL } from './config.js'
 
 /**
  * Free post: size always 1, position random among adjacent slots.
@@ -13,10 +14,16 @@ export class PostManager {
     this.imageCache = new Map()
     this.dojoManager = dojoManager // Optional Dojo integration
     this.useDojo = !!dojoManager
-    this.cacheKey = 'starkwall_posts_cache_v1'
+    const toriiScope = String(TORII_URL || '').toLowerCase()
+      .replace(/^https?:\/\//, '')
+      .replace(/[^a-z0-9._-]/g, '_')
+    this.cacheKey = `starkwall_posts_cache_v2_${String(NETWORK || 'unknown').toLowerCase()}_${toriiScope || 'default'}`
+    this.postsCacheEnabled = !IS_SEPOLIA
+    this.clearLegacyCachesIfNeeded()
   }
 
   savePostsToCache() {
+    if (!this.postsCacheEnabled) return
     try {
       const serializable = (this.posts || []).map((post) => {
         const { imageElement, ...rest } = post || {}
@@ -29,6 +36,7 @@ export class PostManager {
   }
 
   loadPostsFromCache() {
+    if (!this.postsCacheEnabled) return false
     try {
       const raw = localStorage.getItem(this.cacheKey)
       if (!raw) return false
@@ -43,6 +51,22 @@ export class PostManager {
     } catch (e) {
       console.warn('Posts cache load failed:', e?.message || e)
       return false
+    }
+  }
+
+  clearLegacyCachesIfNeeded() {
+    if (typeof localStorage === 'undefined') return
+    try {
+      // In Sepolia we prefer source-of-truth data from Torii and avoid stale local walls.
+      if (IS_SEPOLIA) {
+        for (const key of Object.keys(localStorage)) {
+          if (key === 'starkwall_posts_cache_v1' || key.startsWith('starkwall_posts_cache_v2_')) {
+            localStorage.removeItem(key)
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Posts cache cleanup failed:', e?.message || e)
     }
   }
 

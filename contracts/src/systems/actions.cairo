@@ -1625,7 +1625,10 @@ pub mod actions {
 
     #[cfg(test)]
     mod tests {
-        use super::{min_u128, ratio_amount};
+        use super::{
+            YIELD_POOL_BTC_ID, YIELD_POOL_STRK_ID, assert_supported_pool, min_u128, paid_post_price,
+            pool_id_from_mode, ratio_amount
+        };
 
         #[test]
         fn test_ratio_amount_handles_zero_values() {
@@ -1646,6 +1649,34 @@ pub mod actions {
             assert(min_u128(3, 9) == 3, 'min first');
             assert(min_u128(9, 3) == 3, 'min second');
             assert(min_u128(7, 7) == 7, 'min equal');
+        }
+
+        #[test]
+        fn test_paid_post_price_growth() {
+            assert(paid_post_price(0) == 0, 'size 0 no price');
+            assert(paid_post_price(1) == 0, 'size 1 free');
+            assert(paid_post_price(2) == 1, 'size 2 base');
+            assert(paid_post_price(3) == 4, 'size 3');
+            assert(paid_post_price(4) == 16, 'size 4');
+            assert(paid_post_price(5) == 64, 'size 5');
+        }
+
+        #[test]
+        fn test_pool_id_from_mode_mapping() {
+            assert(pool_id_from_mode(false) == YIELD_POOL_STRK_ID, 'strk pool id');
+            assert(pool_id_from_mode(true) == YIELD_POOL_BTC_ID, 'btc pool id');
+        }
+
+        #[test]
+        fn test_assert_supported_pool_accepts_known_ids() {
+            assert_supported_pool(YIELD_POOL_STRK_ID);
+            assert_supported_pool(YIELD_POOL_BTC_ID);
+        }
+
+        #[test]
+        #[should_panic]
+        fn test_assert_supported_pool_rejects_invalid_id() {
+            assert_supported_pool(9);
         }
     }
 }
