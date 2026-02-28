@@ -1,13 +1,14 @@
 # Noir Sealed Bid Circuit
 
-This circuit validates the sealed bid commitment relation used by Starkwall:
+This circuit validates the sealed bid commitment relation used by Starkwall with
+Poseidon over BN254:
 
-`commitment = slot_post_id + group_id + bidder + bid_amount + salt`
+`commitment = Poseidon(slot_post_id, group_id, bidder, bid_amount, salt)`
 
 Current status:
-- Noir circuit implemented for commitment verification.
-- Cairo verifier contract is a placeholder-compatible verifier interface.
-- Garaga proof generation/export is expected to be wired in the next deployment step.
+- Noir circuit implemented with cryptographic commitment hashing.
+- Cairo sealed-bid flow enforces commitment binding and reveal nullifier tracking.
+- Verifier contract interface is ready to point to a Garaga-generated verifier.
 
 ## Local usage
 

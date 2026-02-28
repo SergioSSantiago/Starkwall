@@ -68,6 +68,7 @@ pub struct AuctionCommit {
     pub committed_at: u64,
     pub revealed: bool,
     pub revealed_bid: u128,
+    pub reveal_nullifier: felt252,
     pub refunded: bool,
 }
 
@@ -80,6 +81,14 @@ pub struct AuctionSealedConfig {
     pub commit_end_time: u64,
     pub reveal_end_time: u64,
     pub verifier: ContractAddress,
+}
+
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct AuctionRevealNullifier {
+    #[key]
+    pub nullifier: felt252,
+    pub used: bool,
 }
 
 #[derive(Drop, Serde)]

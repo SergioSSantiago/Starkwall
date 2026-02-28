@@ -14,6 +14,8 @@ pub trait ISealedBidVerifier<T> {
 
 #[starknet::contract]
 pub mod sealed_bid_verifier {
+    use core::array::ArrayTrait;
+    use core::poseidon::poseidon_hash_span;
     use super::ISealedBidVerifier;
 
     #[storage]
@@ -26,7 +28,13 @@ pub mod sealed_bid_verifier {
         bid_amount: u128,
         salt: felt252
     ) -> felt252 {
-        salt + slot_post_id.into() + group_id.into() + bidder.into() + bid_amount.into()
+        let mut inputs = array![];
+        inputs.append(slot_post_id.into());
+        inputs.append(group_id.into());
+        inputs.append(bidder.into());
+        inputs.append(bid_amount.into());
+        inputs.append(salt);
+        poseidon_hash_span(inputs.span())
     }
 
     #[abi(embed_v0)]

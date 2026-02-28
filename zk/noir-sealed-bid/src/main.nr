@@ -1,3 +1,5 @@
+use dep::std::hash::poseidon;
+
 fn main(
     slot_post_id: Field,
     group_id: Field,
@@ -6,7 +8,13 @@ fn main(
     salt: Field,
     expected_commitment: pub Field,
 ) {
-    let computed = slot_post_id + group_id + bidder + bid_amount + salt;
+    let computed = poseidon::bn254::hash_5([
+        slot_post_id,
+        group_id,
+        bidder,
+        bid_amount,
+        salt,
+    ]);
     assert(computed == expected_commitment);
     assert(bid_amount != 0);
 }

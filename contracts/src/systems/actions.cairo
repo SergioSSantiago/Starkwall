@@ -228,12 +228,14 @@ pub mod actions {
         IStakingAdapterDispatcherTrait, ISealedBidVerifierDispatcher,
         ISealedBidVerifierDispatcherTrait
     };
+    use core::array::ArrayTrait;
+    use core::poseidon::poseidon_hash_span;
     use core::traits::TryInto;
     use starknet::{ContractAddress, get_block_timestamp, get_contract_address};
     use crate::models::{
-        AuctionCommit, AuctionGroup, AuctionSealedConfig, AuctionSlot, FollowRelation, FollowStats, Post,
-        PostCounter, UserProfile, UsernameIndex, YieldAdminState, YieldExitQueue, YieldPoolState,
-        YieldPosition, YieldRiskState, YieldStrategyState
+        AuctionCommit, AuctionGroup, AuctionRevealNullifier, AuctionSealedConfig, AuctionSlot,
+        FollowRelation, FollowStats, Post, PostCounter, UserProfile, UsernameIndex, YieldAdminState,
+        YieldExitQueue, YieldPoolState, YieldPosition, YieldRiskState, YieldStrategyState
     };
     use dojo::model::ModelStorage;
 
@@ -371,7 +373,24 @@ pub mod actions {
         bid_amount: u128,
         salt: felt252
     ) -> felt252 {
-        salt + slot_post_id.into() + group_id.into() + bidder.into() + bid_amount.into()
+        let mut inputs = array![];
+        inputs.append(slot_post_id.into());
+        inputs.append(group_id.into());
+        inputs.append(bidder.into());
+        inputs.append(bid_amount.into());
+        inputs.append(salt);
+        poseidon_hash_span(inputs.span())
+    }
+
+    fn compute_bid_nullifier(
+        slot_post_id: u64, group_id: u64, bidder: ContractAddress, salt: felt252
+    ) -> felt252 {
+        let mut inputs = array![];
+        inputs.append(slot_post_id.into());
+        inputs.append(group_id.into());
+        inputs.append(bidder.into());
+        inputs.append(salt);
+        poseidon_hash_span(inputs.span())
     }
 
     fn read_follow_stats_or_default(
@@ -1064,6 +1083,7 @@ pub mod actions {
                     committed_at: now,
                     revealed: false,
                     revealed_bid: 0,
+                    reveal_nullifier: 0,
                     refunded: false,
                 }
             );
@@ -1111,8 +1131,14 @@ pub mod actions {
                 "Commitment mismatch"
             );
 
+            let nullifier = compute_bid_nullifier(slot_post_id, slot.group_id, bidder, salt);
+            let used_nullifier: AuctionRevealNullifier = world.read_model(nullifier);
+            assert!(!used_nullifier.used, "Nullifier already used");
+            world.write_model(@AuctionRevealNullifier { nullifier, used: true });
+
             commit.revealed = true;
             commit.revealed_bid = bid_amount;
+            commit.reveal_nullifier = nullifier;
             world.write_model(@commit);
 
             if !slot.has_bid || bid_amount > slot.highest_bid {
@@ -1142,6 +1168,11 @@ pub mod actions {
             assert!(commit.revealed, "Reveal required before refund");
             assert!(!commit.refunded, "Already refunded");
             assert!(commit.escrow_amount > 0, "Nothing to refund");
+            assert!(commit.revealed_bid <= commit.escrow_amount, "Invalid revealed bid");
+            assert!(
+                !(slot.has_bid && slot.highest_bidder == bidder),
+                "Highest bidder cannot refund"
+            );
 
             if slot.finalized && slot.has_bid && slot.highest_bidder == bidder {
                 assert!(commit.revealed_bid != slot.highest_bid, "Winner cannot refund");

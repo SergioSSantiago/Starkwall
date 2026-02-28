@@ -1,7 +1,7 @@
 import { stringToByteArray } from './utils.js';
 import { ToriiQueryBuilder, KeysClause } from "@dojoengine/sdk";
 import { PAYMENT_TOKEN_ADDRESS, RPC_URL, SEPOLIA_WBTC_TOKEN } from './config.js';
-import { RpcProvider } from 'starknet';
+import { RpcProvider, hash } from 'starknet';
 
 const ONE_STRK = 10n ** 18n;
 const DEFAULT_TOKEN_DECIMALS = 18;
@@ -73,12 +73,13 @@ function normalizeHexAddress(address) {
 }
 
 function simpleCommitment(slotPostId, groupId, bidder, bidAmount, salt) {
-  const slot = BigInt(slotPostId || 0)
-  const group = BigInt(groupId || 0)
-  const bid = BigInt(bidAmount || 0)
-  const saltVal = BigInt(salt || 0)
-  const addr = BigInt(normalizeHexAddress(bidder))
-  return `0x${(saltVal + slot + group + addr + bid).toString(16)}`
+  const slot = BigInt(slotPostId || 0).toString()
+  const group = BigInt(groupId || 0).toString()
+  const bid = BigInt(bidAmount || 0).toString()
+  const saltVal = BigInt(salt || 0).toString()
+  const addr = BigInt(normalizeHexAddress(bidder)).toString()
+  const commitment = hash.computePoseidonHashOnElements([slot, group, addr, bid, saltVal])
+  return normalizeHexAddress(commitment)
 }
 
 export class DojoManager {
