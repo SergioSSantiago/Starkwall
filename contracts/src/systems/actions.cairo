@@ -1083,7 +1083,6 @@ pub mod actions {
                     committed_at: now,
                     revealed: false,
                     revealed_bid: 0,
-                    reveal_nullifier: 0,
                     refunded: false,
                 }
             );
@@ -1138,7 +1137,6 @@ pub mod actions {
 
             commit.revealed = true;
             commit.revealed_bid = bid_amount;
-            commit.reveal_nullifier = nullifier;
             world.write_model(@commit);
 
             if !slot.has_bid || bid_amount > slot.highest_bid {

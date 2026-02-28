@@ -68,7 +68,6 @@ pub struct AuctionCommit {
     pub committed_at: u64,
     pub revealed: bool,
     pub revealed_bid: u128,
-    pub reveal_nullifier: felt252,
     pub refunded: bool,
 }
 

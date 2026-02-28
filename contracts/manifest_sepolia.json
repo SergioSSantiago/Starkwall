@@ -34,14 +34,18 @@
   "contracts": [
     {
       "address": "0x3a2f14cef6b75451fef00e023174a0986f3e19a58dd23ce5e39d184ade2b40d",
-      "class_hash": "0x5c96e08795ad3b9312e16fe68302d0e223688ddc6464273556120e06fbeb5f8",
+      "class_hash": "0x3094981e1ca927f3093da20f4175eed22acfea4c1ca9b9d7f3d4aa20065684d",
       "init_calldata": [],
       "tag": "di-actions",
       "selector": "0x4c09d12108e978b8c073f8d7186ed1aa144777a0aad9d1334532b5813038897",
       "systems": [
         "create_post",
         "create_auction_post_3x3",
+        "create_auction_post_3x3_sealed",
         "place_bid",
+        "commit_bid",
+        "reveal_bid",
+        "claim_commit_refund",
         "finalize_auction_slot",
         "set_won_slot_content",
         "set_profile",
@@ -73,6 +77,53 @@
     {
       "members": [
         {
+          "name": "slot_post_id",
+          "type": "core::integer::u64",
+          "key": true
+        },
+        {
+          "name": "bidder",
+          "type": "core::starknet::contract_address::ContractAddress",
+          "key": true
+        },
+        {
+          "name": "commitment",
+          "type": "core::felt252",
+          "key": false
+        },
+        {
+          "name": "escrow_amount",
+          "type": "core::integer::u128",
+          "key": false
+        },
+        {
+          "name": "committed_at",
+          "type": "core::integer::u64",
+          "key": false
+        },
+        {
+          "name": "revealed",
+          "type": "core::bool",
+          "key": false
+        },
+        {
+          "name": "revealed_bid",
+          "type": "core::integer::u128",
+          "key": false
+        },
+        {
+          "name": "refunded",
+          "type": "core::bool",
+          "key": false
+        }
+      ],
+      "class_hash": "0x6e9be33730525709d05d745225d3073297a6e9ce1d87e8fb049588cc53870aa",
+      "tag": "di-AuctionCommit",
+      "selector": "0x2af5c2caf12803dbe9c5837df1db7333e2127601bc70081e07d2825b5c40ca9"
+    },
+    {
+      "members": [
+        {
           "name": "group_id",
           "type": "core::integer::u64",
           "key": true
@@ -101,6 +152,55 @@
       "class_hash": "0x13ecabdcb302fa6635e70a19a63a8973bec4c37cc08b4f917c698c037d9126f",
       "tag": "di-AuctionGroup",
       "selector": "0x30109b641351f67626e9aebc68b4cf5788e59019fa98607901650b915b936cd"
+    },
+    {
+      "members": [
+        {
+          "name": "nullifier",
+          "type": "core::felt252",
+          "key": true
+        },
+        {
+          "name": "used",
+          "type": "core::bool",
+          "key": false
+        }
+      ],
+      "class_hash": "0xe29b8a516bbfb398d60e6bfbffd75644c9268c22dbea147f568b38611b3745",
+      "tag": "di-AuctionRevealNullifier",
+      "selector": "0x2b314e8481370f2c047e0d698e555c6ec06c6e5ddbed4b168f1bc871901086b"
+    },
+    {
+      "members": [
+        {
+          "name": "group_id",
+          "type": "core::integer::u64",
+          "key": true
+        },
+        {
+          "name": "sealed_mode",
+          "type": "core::bool",
+          "key": false
+        },
+        {
+          "name": "commit_end_time",
+          "type": "core::integer::u64",
+          "key": false
+        },
+        {
+          "name": "reveal_end_time",
+          "type": "core::integer::u64",
+          "key": false
+        },
+        {
+          "name": "verifier",
+          "type": "core::starknet::contract_address::ContractAddress",
+          "key": false
+        }
+      ],
+      "class_hash": "0x3c985fa8eef669d4071a13e4037bb745b6ab8991af3a2c2f6094d81d7d95934",
+      "tag": "di-AuctionSealedConfig",
+      "selector": "0xcb6ccaf1cb35149d4d9b1679b491939cd279eff59d667c758adcb2f09ab6ac"
     },
     {
       "members": [
@@ -2333,6 +2433,74 @@
     },
     {
       "type": "struct",
+      "name": "dojo_intro::models::AuctionCommit",
+      "members": [
+        {
+          "name": "slot_post_id",
+          "type": "core::integer::u64"
+        },
+        {
+          "name": "bidder",
+          "type": "core::starknet::contract_address::ContractAddress"
+        },
+        {
+          "name": "commitment",
+          "type": "core::felt252"
+        },
+        {
+          "name": "escrow_amount",
+          "type": "core::integer::u128"
+        },
+        {
+          "name": "committed_at",
+          "type": "core::integer::u64"
+        },
+        {
+          "name": "revealed",
+          "type": "core::bool"
+        },
+        {
+          "name": "revealed_bid",
+          "type": "core::integer::u128"
+        },
+        {
+          "name": "refunded",
+          "type": "core::bool"
+        }
+      ]
+    },
+    {
+      "type": "struct",
+      "name": "dojo_intro::models::AuctionCommitValue",
+      "members": [
+        {
+          "name": "commitment",
+          "type": "core::felt252"
+        },
+        {
+          "name": "escrow_amount",
+          "type": "core::integer::u128"
+        },
+        {
+          "name": "committed_at",
+          "type": "core::integer::u64"
+        },
+        {
+          "name": "revealed",
+          "type": "core::bool"
+        },
+        {
+          "name": "revealed_bid",
+          "type": "core::integer::u128"
+        },
+        {
+          "name": "refunded",
+          "type": "core::bool"
+        }
+      ]
+    },
+    {
+      "type": "struct",
       "name": "dojo_intro::models::AuctionGroup",
       "members": [
         {
@@ -2376,6 +2544,78 @@
         {
           "name": "active",
           "type": "core::bool"
+        }
+      ]
+    },
+    {
+      "type": "struct",
+      "name": "dojo_intro::models::AuctionRevealNullifier",
+      "members": [
+        {
+          "name": "nullifier",
+          "type": "core::felt252"
+        },
+        {
+          "name": "used",
+          "type": "core::bool"
+        }
+      ]
+    },
+    {
+      "type": "struct",
+      "name": "dojo_intro::models::AuctionRevealNullifierValue",
+      "members": [
+        {
+          "name": "used",
+          "type": "core::bool"
+        }
+      ]
+    },
+    {
+      "type": "struct",
+      "name": "dojo_intro::models::AuctionSealedConfig",
+      "members": [
+        {
+          "name": "group_id",
+          "type": "core::integer::u64"
+        },
+        {
+          "name": "sealed_mode",
+          "type": "core::bool"
+        },
+        {
+          "name": "commit_end_time",
+          "type": "core::integer::u64"
+        },
+        {
+          "name": "reveal_end_time",
+          "type": "core::integer::u64"
+        },
+        {
+          "name": "verifier",
+          "type": "core::starknet::contract_address::ContractAddress"
+        }
+      ]
+    },
+    {
+      "type": "struct",
+      "name": "dojo_intro::models::AuctionSealedConfigValue",
+      "members": [
+        {
+          "name": "sealed_mode",
+          "type": "core::bool"
+        },
+        {
+          "name": "commit_end_time",
+          "type": "core::integer::u64"
+        },
+        {
+          "name": "reveal_end_time",
+          "type": "core::integer::u64"
+        },
+        {
+          "name": "verifier",
+          "type": "core::starknet::contract_address::ContractAddress"
         }
       ]
     },
@@ -3065,7 +3305,25 @@
     },
     {
       "type": "event",
+      "name": "dojo_intro::models::m_AuctionCommit::Event",
+      "kind": "enum",
+      "variants": []
+    },
+    {
+      "type": "event",
       "name": "dojo_intro::models::m_AuctionGroup::Event",
+      "kind": "enum",
+      "variants": []
+    },
+    {
+      "type": "event",
+      "name": "dojo_intro::models::m_AuctionRevealNullifier::Event",
+      "kind": "enum",
+      "variants": []
+    },
+    {
+      "type": "event",
+      "name": "dojo_intro::models::m_AuctionSealedConfig::Event",
       "kind": "enum",
       "variants": []
     },
@@ -3229,6 +3487,50 @@
         },
         {
           "type": "function",
+          "name": "create_auction_post_3x3_sealed",
+          "inputs": [
+            {
+              "name": "center_image_url",
+              "type": "core::byte_array::ByteArray"
+            },
+            {
+              "name": "center_caption",
+              "type": "core::byte_array::ByteArray"
+            },
+            {
+              "name": "creator_username",
+              "type": "core::byte_array::ByteArray"
+            },
+            {
+              "name": "center_x_position",
+              "type": "core::integer::i32"
+            },
+            {
+              "name": "center_y_position",
+              "type": "core::integer::i32"
+            },
+            {
+              "name": "commit_end_time",
+              "type": "core::integer::u64"
+            },
+            {
+              "name": "reveal_end_time",
+              "type": "core::integer::u64"
+            },
+            {
+              "name": "verifier",
+              "type": "core::starknet::contract_address::ContractAddress"
+            }
+          ],
+          "outputs": [
+            {
+              "type": "core::integer::u64"
+            }
+          ],
+          "state_mutability": "external"
+        },
+        {
+          "type": "function",
           "name": "place_bid",
           "inputs": [
             {
@@ -3238,6 +3540,62 @@
             {
               "name": "bid_amount",
               "type": "core::integer::u128"
+            }
+          ],
+          "outputs": [],
+          "state_mutability": "external"
+        },
+        {
+          "type": "function",
+          "name": "commit_bid",
+          "inputs": [
+            {
+              "name": "slot_post_id",
+              "type": "core::integer::u64"
+            },
+            {
+              "name": "commitment",
+              "type": "core::felt252"
+            },
+            {
+              "name": "escrow_amount",
+              "type": "core::integer::u128"
+            }
+          ],
+          "outputs": [],
+          "state_mutability": "external"
+        },
+        {
+          "type": "function",
+          "name": "reveal_bid",
+          "inputs": [
+            {
+              "name": "slot_post_id",
+              "type": "core::integer::u64"
+            },
+            {
+              "name": "bid_amount",
+              "type": "core::integer::u128"
+            },
+            {
+              "name": "salt",
+              "type": "core::felt252"
+            },
+            {
+              "name": "proof_blob_hash",
+              "type": "core::felt252"
+            }
+          ],
+          "outputs": [],
+          "state_mutability": "external"
+        },
+        {
+          "type": "function",
+          "name": "claim_commit_refund",
+          "inputs": [
+            {
+              "name": "slot_post_id",
+              "type": "core::integer::u64"
             }
           ],
           "outputs": [],
