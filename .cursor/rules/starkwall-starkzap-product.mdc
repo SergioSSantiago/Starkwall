@@ -1,0 +1,28 @@
+---
+description: Starkzap product-grade implementation guidance
+alwaysApply: true
+---
+
+# Starkzap Product Rules
+
+- Use Starkzap staking conventions as source of truth for UX and method naming:
+  - `wallet.stake(pool, amount)` for smart enter/add.
+  - `wallet.claimPoolRewards(pool)` for claims.
+  - `wallet.exitPoolIntent(pool, amount)` then `wallet.exitPool(pool)` for unstake completion.
+- Favor discovery over hardcoding:
+  - Resolve pools with `getStakerPools(...)` and token symbol matching.
+  - Only override `staking.contract` when explicitly needed.
+- Wallet UX expectations:
+  - Keep Cartridge-based flow smooth and non-blocking.
+  - Surface actionable errors (`Pool not found`, `No claimable rewards`, cooldown pending).
+- State visibility requirements in wallet UI:
+  - Show staked, rewards, total, unpooling, and exit time when available.
+  - Explain unstake as a two-step process in plain language.
+- For any staking action:
+  - show immediate feedback (button busy text),
+  - show pending confirmation toast,
+  - refresh wallet state after transaction confirmation.
+- Reference docs for accuracy:
+  - `https://docs.starkzap.com/llms-full.txt`
+  - `https://docs.starknet.io/build/starkzap/staking`
+  - `docs/STARKNET_DOCS_INDEX.md`

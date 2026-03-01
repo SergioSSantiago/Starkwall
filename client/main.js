@@ -2,13 +2,14 @@ import './style.css'
 import { InfiniteCanvas } from './canvas.js'
 import { PostManager } from './postManager.js'
 import { DojoManager } from './dojoManager.js'
+import { StarkzapManager } from './starkzapManager.js'
 import Controller from '@cartridge/controller'
 import { init as initDojo, KeysClause, ToriiQueryBuilder } from '@dojoengine/sdk'
 import controllerOpts from './controller.js'
 import manifest from './manifest.js'
 import {
-  DOMAIN_CHAIN_ID, TORII_URL, IS_SEPOLIA, FAUCET_URL, WBTC_FAUCET_URL, YIELD_DUAL_POOL_ENABLED,
-  SEPOLIA_WBTC_TOKEN, SEALED_BID_VERIFIER_ADDRESS,
+  DOMAIN_CHAIN_ID, TORII_URL, IS_SEPOLIA, FAUCET_URL, YIELD_DUAL_POOL_ENABLED,
+  BTC_TRACK_SYMBOL, SEPOLIA_BTC_STAKING_TOKEN, SEPOLIA_BTC_SWAP_TOKEN, SEALED_BID_VERIFIER_ADDRESS, PAYMENT_TOKEN_ADDRESS,
 } from './config.js'
 
 // Evitar que un rechazo de promesa no capturado provoque recarga o cierre de la app
@@ -25,6 +26,7 @@ const DOMAIN_SEPARATOR = {
 }
 
 let canvas, postManager, dojoManager, controller, currentUsername, currentAccount
+let starkzapManager = null
 /** Clave de balance de la wallet conectada; fijada al conectar para que todas las operaciones usen la misma. */
 
 const LAST_SESSION_KEY = 'starkwall_last_session'
@@ -71,7 +73,10 @@ const actionsContractMeta = manifest.contracts.find((contract) => contract.tag =
 const actionsSystems = new Set(actionsContractMeta?.systems || [])
 const hasOnchainSocialInManifest = actionsSystems.has('follow') && actionsSystems.has('unfollow')
 const hasYieldInManifest = actionsSystems.has('yield_deposit') && actionsSystems.has('yield_withdraw') && actionsSystems.has('yield_claim')
+// Product decision: keep sealed auction mode disabled in UI for now.
+const ENABLE_SEALED_BID_UI = false
 const hasSealedBidInManifest =
+  ENABLE_SEALED_BID_UI &&
   actionsSystems.has('create_auction_post_3x3_sealed') &&
   actionsSystems.has('commit_bid') &&
   actionsSystems.has('reveal_bid') &&
@@ -441,23 +446,21 @@ async function handleYieldPrimaryAction() {
     queued_exit_strk: 0,
   }
   const activeSymbol = String(state.pool_token_symbol || (state.use_btc_mode ? 'WBTC' : 'STRK'))
-  strategyStrkInput.checked = !Boolean(state.use_btc_mode)
-  strategyBtcInput.checked = Boolean(state.use_btc_mode)
+  strategyStrkInput.checked = true
+  strategyBtcInput.checked = false
   strategyBtcInput.disabled = !YIELD_DUAL_POOL_ENABLED
   modeBtn.style.display = 'none'
   const strkBalance = await getChainBalance(currentAccount.address).catch(() => 0)
   const tbtcBalance = YIELD_DUAL_POOL_ENABLED
-    ? await dojoManager.getTokenBalance(currentAccount.address, SEPOLIA_WBTC_TOKEN).catch(() => 0)
+    ? await dojoManager.getTokenBalance(currentAccount.address, SEPOLIA_BTC_STAKING_TOKEN).catch(() => 0)
     : 0
-  const needsTbtc = YIELD_DUAL_POOL_ENABLED && Number(tbtcBalance || 0) <= 0
+  const btcSymbol = BTC_TRACK_SYMBOL
 
-  titleEl.textContent = 'Stake Assets'
+  titleEl.textContent = 'Stake'
   summaryEl.innerHTML = YIELD_DUAL_POOL_ENABLED
-    ? `Available: ${Number(strkBalance || 0).toFixed(2)} STRK · ${Number(tbtcBalance || 0).toFixed(6)} WBTC`
-    : `Available balance: ${Number(strkBalance || 0).toFixed(2)} STRK`
-  if (needsTbtc) {
-    summaryEl.innerHTML += `<br><span class="yield-token-help">Need WBTC for BTC strategy.</span>${WBTC_FAUCET_URL ? ` <span class="yield-token-help-actions"><a href="${WBTC_FAUCET_URL}" target="_blank" rel="noreferrer">Get WBTC</a></span>` : ''}`
-  }
+    ? `Wallet balance: ${Number(strkBalance || 0).toFixed(2)} STRK · ${Number(tbtcBalance || 0).toFixed(6)} ${btcSymbol}`
+    : `Wallet balance: ${Number(strkBalance || 0).toFixed(2)} STRK`
+  summaryEl.innerHTML += '<br><span class="yield-token-help">Select token and amount, then confirm in your wallet.</span>'
   depositFields.style.display = 'block'
   manageFields.style.display = 'none'
   claimBtn.style.display = 'none'
@@ -466,17 +469,17 @@ async function handleYieldPrimaryAction() {
   primaryBtn.style.display = 'inline-block'
   primaryBtn.textContent = 'Stake'
   amountInput.value = ''
-  amountLabel.firstChild.textContent = strategyBtcInput.checked ? 'Amount to lock (WBTC) ' : 'Amount to lock (STRK) '
+  amountLabel.firstChild.textContent = strategyBtcInput.checked ? `Amount (${btcSymbol}) ` : 'Amount (STRK) '
   strategyStrkInput.onchange = () => {
-    amountLabel.firstChild.textContent = 'Amount to lock (STRK) '
+    amountLabel.firstChild.textContent = 'Amount (STRK) '
   }
   strategyBtcInput.onchange = () => {
-    amountLabel.firstChild.textContent = 'Amount to lock (WBTC) '
+    amountLabel.firstChild.textContent = `Amount (${btcSymbol}) `
   }
   primaryBtn.onclick = async () => {
     const amount = Number(amountInput.value || '0')
     const useBtcMode = YIELD_DUAL_POOL_ENABLED ? Boolean(strategyBtcInput.checked) : false
-    const symbol = useBtcMode ? 'WBTC' : 'STRK'
+    const symbol = useBtcMode ? btcSymbol : 'STRK'
     if (!Number.isFinite(amount) || amount <= 0) {
       alert('Enter a valid amount.')
       return
@@ -487,14 +490,92 @@ async function handleYieldPrimaryAction() {
       return
     }
     try {
-      primaryBtn.disabled = true
-      await dojoManager.yieldDeposit(amount, useBtcMode)
+      const result = await runWithBusyButton(primaryBtn, {
+        idleText: 'Stake',
+        busyText: 'Staking...',
+        pendingToast: 'Open wallet to confirm staking. Waiting for confirmation...',
+      }, async () => {
+        let providerPath = 'dojo'
+        let txHash = ''
+        console.info('[Stake] Start', {
+          user: currentAccount.address,
+          symbol,
+          amount,
+          useBtcMode,
+        })
+        if (starkzapManager) {
+          try {
+            const res = await starkzapManager.stake(symbol, amount)
+            txHash = String(res?.tx?.hash || '')
+            providerPath = 'starkzap'
+            console.info('[Stake] Starkzap success', {
+              user: currentAccount.address,
+              symbol,
+              amount,
+              txHash,
+            })
+          } catch (starkzapError) {
+            console.error('[Stake] Starkzap failed message:', starkzapError?.message || String(starkzapError))
+            console.error('[Stake] Starkzap failed; fallback to Dojo', {
+              user: currentAccount.address,
+              symbol,
+              amount,
+              error: errorInfo(starkzapError),
+            })
+            if (isControllerInitError(starkzapError)) {
+              showToast('Controller did not open correctly (popup/cookies). Using standard stake flow...')
+            } else {
+              showToast('Starkzap staking failed. Falling back to standard stake flow...')
+            }
+            const tx = await dojoManager.stake(amount, useBtcMode)
+            txHash = String(tx?.transaction_hash || '')
+            providerPath = 'dojo-fallback'
+            console.info('[Stake] Fallback Dojo success', {
+              user: currentAccount.address,
+              symbol,
+              amount,
+              txHash,
+            })
+          }
+        } else {
+          const tx = await dojoManager.stake(amount, useBtcMode)
+          txHash = String(tx?.transaction_hash || '')
+          console.info('[Stake] Dojo success', {
+            user: currentAccount.address,
+            symbol,
+            amount,
+            txHash,
+          })
+        }
+        addActivityEvent({
+          actionType: 'stake',
+          token: symbol,
+          amount,
+          providerPath,
+          txHash,
+          status: 'success',
+          details: { useBtcMode },
+        })
+        return { providerPath, txHash }
+      })
       closeYieldModal()
-      showToast(`Staked ${amount.toFixed(useBtcMode ? 6 : 2)} ${symbol}`)
+      const txLabel = shortTxHash(result?.txHash || '')
+      const providerLabel = result?.providerPath === 'starkzap' ? 'via Starkzap' : 'via standard flow'
+      showToast(`Staked ${amount.toFixed(useBtcMode ? 6 : 2)} ${symbol} ${providerLabel}${txLabel ? ` · ${txLabel}` : ''}`)
       await updateWalletInfo()
     } catch (error) {
-      primaryBtn.disabled = false
-      throw error
+      console.error('Stake action error:', error)
+      addActivityEvent({
+        actionType: 'stake',
+        token: symbol,
+        amount,
+        providerPath: 'unknown',
+        txHash: '',
+        status: 'failed',
+        errorMessage: String(error?.message || 'Unknown error'),
+        details: { useBtcMode },
+      })
+      alert('Stake failed: ' + (error?.message || 'Unknown error'))
     }
   }
 
@@ -553,6 +634,7 @@ async function enterApp(account) {
 
   canvas = new InfiniteCanvas(canvasElement)
   dojoManager = new DojoManager(currentAccount, manifest, toriiClient)
+  starkzapManager = new StarkzapManager()
   postManager = new PostManager(canvas, dojoManager)
 
   setupUIHandlers()
@@ -576,8 +658,12 @@ async function enterApp(account) {
   connectButton.textContent = '🎮 Connect Wallet'
 
   if (postManager.posts.length > 0) {
-    const firstPost = postManager.posts[0]
-    canvas.centerOn(firstPost.x_position, firstPost.y_position, 0.3)
+    const oldestPost = postManager.posts.reduce((oldest, p) => {
+      if (!oldest) return p
+      return Number(p.id) < Number(oldest.id) ? p : oldest
+    }, null)
+    const target = oldestPost || postManager.posts[0]
+    canvas.centerOn(target.x_position, target.y_position, 0.3)
   } else {
     canvas.centerOn(0, 0, 0.3)
   }
@@ -613,6 +699,7 @@ async function enterApp(account) {
 // strict tracking/cookie settings can block iframe storage and make Controller init
 // fail early. We lazy-init and provide a clearer message in connect flow.
 let controllerInitError = null
+let walletModalEventsBound = false
 
 function ensureController() {
   if (controller) return controller
@@ -635,6 +722,158 @@ function showToast(message) {
   setTimeout(() => {
     toast.classList.remove('show')
   }, 3000)
+}
+
+async function runWithBusyButton(button, opts, task) {
+  const {
+    idleText = button?.textContent || '',
+    busyText = 'Working...',
+    pendingToast = 'Please confirm in wallet and wait for on-chain confirmation...',
+    pendingAfterMs = 2500,
+  } = opts || {}
+  let pendingTimer = null
+  if (button) {
+    button.disabled = true
+    button.textContent = busyText
+  }
+  pendingTimer = setTimeout(() => showToast(pendingToast), Math.max(0, Number(pendingAfterMs) || 0))
+  try {
+    return await task()
+  } finally {
+    if (pendingTimer) clearTimeout(pendingTimer)
+    if (button && button.isConnected) {
+      button.disabled = false
+      button.textContent = idleText
+    }
+  }
+}
+
+function shortTxHash(hash) {
+  const h = String(hash || '').trim()
+  if (!h) return ''
+  return h.length > 14 ? `${h.slice(0, 8)}...${h.slice(-6)}` : h
+}
+
+function errorInfo(error) {
+  if (!error) return { message: 'Unknown error' }
+  return {
+    name: error?.name || 'Error',
+    message: error?.message || String(error),
+    code: error?.code || '',
+    cause: error?.cause ? String(error.cause?.message || error.cause) : '',
+    stack: error?.stack || '',
+  }
+}
+
+function isControllerInitError(error) {
+  const message = String(error?.message || error || '').toLowerCase()
+  return message.includes('cartridge controller failed to initialize')
+    || message.includes('failed to initialize')
+}
+
+let yieldActionInProgress = ''
+let yieldActionLastCompletedAt = 0
+let yieldActionLastName = ''
+const YIELD_ACTION_GHOST_CLICK_WINDOW_MS = 1400
+
+async function runExclusiveYieldAction(actionName, task) {
+  const now = Date.now()
+  if (
+    yieldActionLastName
+    && yieldActionLastName !== actionName
+    && (now - yieldActionLastCompletedAt) < YIELD_ACTION_GHOST_CLICK_WINDOW_MS
+  ) {
+    showToast('Please wait a second before triggering another action.')
+    console.info('[Yield] Action ignored: ghost click guard', {
+      requested: actionName,
+      lastAction: yieldActionLastName,
+      sinceLastMs: now - yieldActionLastCompletedAt,
+    })
+    return null
+  }
+  if (yieldActionInProgress) {
+    showToast('Another wallet action is still in progress.')
+    console.info('[Yield] Action ignored: another action is in progress', {
+      requested: actionName,
+      inProgress: yieldActionInProgress,
+    })
+    return null
+  }
+  yieldActionInProgress = actionName
+  const actionButtons = [
+    document.getElementById('wallet-yield-deposit-btn'),
+    document.getElementById('wallet-yield-withdraw-btn'),
+    document.getElementById('wallet-yield-claim-btn'),
+  ].filter(Boolean)
+  for (const btn of actionButtons) btn.disabled = true
+  try {
+    return await task()
+  } finally {
+    for (const btn of actionButtons) {
+      if (btn?.isConnected) btn.disabled = false
+    }
+    yieldActionInProgress = ''
+    yieldActionLastName = actionName
+    yieldActionLastCompletedAt = Date.now()
+  }
+}
+
+async function askYieldToken(actionLabel, preferred = 'STRK') {
+  const modal = document.getElementById('yieldTokenPickerModal')
+  const title = document.getElementById('yieldTokenPickerTitle')
+  const hint = document.getElementById('yieldTokenPickerHint')
+  const strkBtn = document.getElementById('yieldTokenPickerStrkBtn')
+  const wbtcBtn = document.getElementById('yieldTokenPickerWbtcBtn')
+  const cancelBtn = document.getElementById('yieldTokenPickerCancelBtn')
+  if (!modal || !title || !hint || !strkBtn || !wbtcBtn || !cancelBtn) {
+    return null
+  }
+
+  const normalizedPreferred = String(preferred || 'STRK').toUpperCase() === 'WBTC' ? 'WBTC' : 'STRK'
+  title.textContent = `${actionLabel} · Choose token`
+  hint.textContent = `Select the token you want to use for this action. Recommended: ${normalizedPreferred}.`
+
+  strkBtn.disabled = false
+  wbtcBtn.disabled = false
+
+  return new Promise((resolve) => {
+    const close = (value = null) => {
+      modal.classList.remove('active')
+      modal.onclick = null
+      strkBtn.onclick = null
+      wbtcBtn.onclick = null
+      cancelBtn.onclick = null
+      resolve(value)
+    }
+    strkBtn.onclick = () => close('STRK')
+    wbtcBtn.onclick = () => close('WBTC')
+    cancelBtn.onclick = () => close(null)
+    modal.onclick = (e) => {
+      if (e.target === modal) close(null)
+    }
+    modal.classList.add('active')
+  })
+}
+
+const ACTIVITY_LEDGER_LIMIT = 120
+let activityLedger = []
+
+function addActivityEvent(event) {
+  const txHash = String(event?.txHash || '').trim()
+  if (!txHash) return null
+  const record = {
+    actionType: String(event?.actionType || 'unknown'),
+    token: String(event?.token || '').toUpperCase(),
+    amount: Number(event?.amount || 0),
+    providerPath: String(event?.providerPath || 'unknown'),
+    txHash,
+    status: String(event?.status || 'submitted'),
+    timestamp: Number(event?.timestamp || Date.now()),
+    errorMessage: String(event?.errorMessage || ''),
+    details: event?.details && typeof event.details === 'object' ? event.details : {},
+  }
+  activityLedger = [record, ...activityLedger].slice(0, ACTIVITY_LEDGER_LIMIT)
+  return record
 }
 
 async function copyToClipboard(text) {
@@ -971,6 +1210,7 @@ function setupUIHandlers() {
   const paidPostPriceEl = document.getElementById('paidPostPrice')
   const postSizeRadios = document.querySelectorAll('input[name="postSizeRadio"]')
   const auctionModeRadios = document.querySelectorAll('input[name="auctionModeRadio"]')
+  const SEALED_REVEAL_WINDOW_SECONDS = 6 * 60 * 60 // 6 hours reveal window before auction end
   if (!hasSealedBidInManifest) {
     auctionModeRadios.forEach((r) => {
       if (r.value === 'sealed') {
@@ -989,7 +1229,6 @@ function setupUIHandlers() {
   const mobileCreateFreeBtn = document.getElementById('mobileCreateFreeBtn')
   const mobileCreatePaidBtn = document.getElementById('mobileCreatePaidBtn')
   const mobileCreateAuctionBtn = document.getElementById('mobileCreateAuctionBtn')
-  const sendStrkBtn = document.getElementById('sendStrkBtn')
   const cancelPostBtn = document.getElementById('cancelPost')
 
   const sendStrkModal = document.getElementById('sendStrkModal')
@@ -998,6 +1237,17 @@ function setupUIHandlers() {
   const sendStrkAmount = document.getElementById('sendStrkAmount')
   const cancelSendStrkBtn = document.getElementById('cancelSendStrkBtn')
   const confirmSendStrkBtn = document.getElementById('confirmSendStrkBtn')
+  const swapWbtcModal = document.getElementById('swapWbtcModal')
+  const swapWbtcForm = document.getElementById('swapWbtcForm')
+  const swapSellToken = document.getElementById('swapSellToken')
+  const swapBuyToken = document.getElementById('swapBuyToken')
+  const swapWbtcAmount = document.getElementById('swapWbtcAmount')
+  const swapWbtcEstimate = document.getElementById('swapWbtcEstimate')
+  const swapWbtcBalanceHint = document.getElementById('swapWbtcBalanceHint')
+  const cancelSwapWbtcBtn = document.getElementById('cancelSwapWbtcBtn')
+  const confirmSwapWbtcBtn = document.getElementById('confirmSwapWbtcBtn')
+  let swapQuoteRequestId = 0
+  let swapQuoteDebounceTimer = null
 
   function updatePaidPriceLabel() {
     const size = parseInt(postSizeInput.value) || 2
@@ -1033,6 +1283,22 @@ function setupUIHandlers() {
     auctionEndPreview.textContent = `Ends (local): ${localLabel} | Ends (UTC): ${utcLabel} | Remaining: ${remaining}`
   }
 
+  function toDatetimeLocalValue(unixSeconds) {
+    const d = new Date(Number(unixSeconds || 0) * 1000)
+    return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
+  }
+
+  function syncSealedTimelineFromAuctionEnd() {
+    if (getAuctionMode() !== 'sealed') return
+    const endRaw = String(auctionEndAtInput?.value || '')
+    const endMs = Date.parse(endRaw)
+    if (!Number.isFinite(endMs)) return
+    const revealEndUnix = Math.floor(endMs / 1000)
+    const commitEndUnix = revealEndUnix - SEALED_REVEAL_WINDOW_SECONDS
+    if (auctionCommitEndAtInput) auctionCommitEndAtInput.value = toDatetimeLocalValue(commitEndUnix)
+    if (auctionRevealEndAtInput) auctionRevealEndAtInput.value = toDatetimeLocalValue(revealEndUnix)
+  }
+
   function getAuctionMode() {
     if (!hasSealedBidInManifest) return 'public'
     const selected = [...auctionModeRadios].find((r) => r.checked)
@@ -1043,21 +1309,10 @@ function setupUIHandlers() {
     const sealed = getAuctionMode() === 'sealed'
     if (sealedAuctionOptions) sealedAuctionOptions.style.display = sealed ? 'block' : 'none'
     if (!sealed) return
-    const now = Date.now()
-    if (auctionCommitEndAtInput && !auctionCommitEndAtInput.value) {
-      const d = new Date(now + 6 * 60 * 60 * 1000)
-      d.setMinutes(0, 0, 0)
-      auctionCommitEndAtInput.value = new Date(
-        d.getTime() - d.getTimezoneOffset() * 60000,
-      ).toISOString().slice(0, 16)
-    }
-    if (auctionRevealEndAtInput && !auctionRevealEndAtInput.value) {
-      const d = new Date(now + 24 * 60 * 60 * 1000)
-      d.setMinutes(0, 0, 0)
-      auctionRevealEndAtInput.value = new Date(
-        d.getTime() - d.getTimezoneOffset() * 60000,
-      ).toISOString().slice(0, 16)
-    }
+    // Keep sealed timeline deterministic from auction end to avoid misconfiguration.
+    if (auctionCommitEndAtInput) auctionCommitEndAtInput.readOnly = true
+    if (auctionRevealEndAtInput) auctionRevealEndAtInput.readOnly = true
+    syncSealedTimelineFromAuctionEnd()
   }
 
   function setCreateMode(mode) {
@@ -1197,6 +1452,109 @@ function setupUIHandlers() {
     sendStrkModal?.classList.remove('active')
   }
 
+  function getSwapPairConfig() {
+    const sellSymbol = String(swapSellToken?.value || 'STRK').toUpperCase()
+    const buySymbol = String(swapBuyToken?.value || 'WBTC').toUpperCase()
+    const tokenBySymbol = {
+      STRK: PAYMENT_TOKEN_ADDRESS,
+      WBTC: SEPOLIA_BTC_SWAP_TOKEN,
+    }
+    return {
+      sellSymbol,
+      buySymbol,
+      sellTokenAddress: tokenBySymbol[sellSymbol] || PAYMENT_TOKEN_ADDRESS,
+      buyTokenAddress: tokenBySymbol[buySymbol] || SEPOLIA_BTC_SWAP_TOKEN,
+    }
+  }
+
+  function isSupportedSwapPair(sellSymbol, buySymbol) {
+    const s = String(sellSymbol || '').toUpperCase()
+    const b = String(buySymbol || '').toUpperCase()
+    return (s === 'STRK' && b === 'WBTC') || (s === 'WBTC' && b === 'STRK')
+  }
+
+  async function refreshSwapEstimate() {
+    if (!swapWbtcEstimate || !swapWbtcAmount || !dojoManager || !currentAccount) return false
+    if (!swapWbtcModal?.classList.contains('active')) return false
+    const cfg = getSwapPairConfig()
+    if (cfg.sellSymbol === cfg.buySymbol) {
+      swapWbtcEstimate.textContent = 'Select different tokens for swap.'
+      return false
+    }
+    if (!isSupportedSwapPair(cfg.sellSymbol, cfg.buySymbol)) {
+      swapWbtcEstimate.textContent = 'Supported pair: STRK ↔ WBTC (Sepolia).'
+      return false
+    }
+    const amount = Number(swapWbtcAmount.value || 0)
+    if (!Number.isFinite(amount) || amount <= 0) {
+      swapWbtcEstimate.textContent = `Estimated receive: - ${cfg.buySymbol}`
+      return false
+    }
+    const requestId = ++swapQuoteRequestId
+    swapWbtcEstimate.textContent = 'Estimating...'
+    try {
+      const quote = await dojoManager.getTokenSwapQuote(cfg.sellTokenAddress, cfg.buyTokenAddress, amount)
+      if (requestId !== swapQuoteRequestId) return false
+      const receive = Number(quote?.estimatedBuyAmount ?? 0)
+      const gas = Number(quote?.estimatedGasFeeStrk || 0)
+      const impactBps = Number(quote?.priceImpactBps || 0)
+      if (!Number.isFinite(receive) || receive <= 0) {
+        swapWbtcEstimate.textContent = `No swap route available right now for ${cfg.sellSymbol} -> ${cfg.buySymbol}.`
+        return false
+      }
+      swapWbtcEstimate.textContent =
+        `Estimated receive: ${receive.toFixed(6)} ${cfg.buySymbol} · Gas: ~${gas.toFixed(6)} STRK · Impact: ${(impactBps / 100).toFixed(2)}%`
+      return true
+    } catch (error) {
+      if (requestId !== swapQuoteRequestId) return false
+      swapWbtcEstimate.textContent = String(error?.message || 'Could not fetch quote right now.')
+      return false
+    }
+  }
+
+  function scheduleSwapEstimateRefresh() {
+    if (!swapWbtcModal?.classList.contains('active')) return
+    if (swapQuoteDebounceTimer) clearTimeout(swapQuoteDebounceTimer)
+    swapQuoteDebounceTimer = setTimeout(() => {
+      void refreshSwapEstimate()
+    }, 350)
+  }
+
+  async function openSwapWbtcModal() {
+    if (!swapWbtcModal || !swapWbtcForm || !dojoManager || !currentAccount) return
+    if (!IS_SEPOLIA) {
+      alert('Token swap is currently enabled on Sepolia only.')
+      return
+    }
+    swapWbtcForm.reset()
+    if (swapSellToken) swapSellToken.value = 'STRK'
+    if (swapBuyToken) swapBuyToken.value = 'WBTC'
+    swapQuoteRequestId += 1
+    const cfg = getSwapPairConfig()
+    if (swapWbtcEstimate) swapWbtcEstimate.textContent = `Estimated receive: - ${cfg.buySymbol}`
+    if (swapWbtcBalanceHint) {
+      swapWbtcBalanceHint.textContent = `Loading ${cfg.sellSymbol} balance...`
+      const balance = await dojoManager.getTokenBalance(currentAccount.address, cfg.sellTokenAddress).catch(() => 0)
+      swapWbtcBalanceHint.textContent = `Available: ${Number(balance || 0).toFixed(6)} ${cfg.sellSymbol}`
+    }
+    swapWbtcModal.classList.add('active')
+    setTimeout(() => swapWbtcAmount?.focus(), 0)
+  }
+
+  function closeSwapWbtcModal() {
+    if (swapQuoteDebounceTimer) clearTimeout(swapQuoteDebounceTimer)
+    swapWbtcModal?.classList.remove('active')
+  }
+
+  // Expose modal open actions for wallet-info dynamic buttons rendered outside this scope.
+  if (!walletModalEventsBound) {
+    window.addEventListener('starkwall:open-send-strk', openSendStrkModal)
+    window.addEventListener('starkwall:open-swap-strk-wbtc', () => {
+      void openSwapWbtcModal()
+    })
+    walletModalEventsBound = true
+  }
+
   document.getElementById('btnWebcam').addEventListener('click', openWebcam)
   btnGallery.addEventListener('click', () => imageFileInput.click())
   imageFileInput.addEventListener('change', (e) => {
@@ -1210,6 +1568,8 @@ function setupUIHandlers() {
   if (auctionEndAtInput) {
     auctionEndAtInput.addEventListener('input', updateAuctionEndPreview)
     auctionEndAtInput.addEventListener('change', updateAuctionEndPreview)
+    auctionEndAtInput.addEventListener('input', syncSealedTimelineFromAuctionEnd)
+    auctionEndAtInput.addEventListener('change', syncSealedTimelineFromAuctionEnd)
   }
   auctionModeRadios.forEach((radio) => {
     radio.addEventListener('change', updateSealedAuctionVisibility)
@@ -1244,10 +1604,6 @@ function setupUIHandlers() {
       clearPhoto()
       modal.classList.add('active')
     })
-  }
-
-  if (sendStrkBtn) {
-    sendStrkBtn.addEventListener('click', openSendStrkModal)
   }
 
   if (mobileCreateBtn && mobileCreateWrap) {
@@ -1291,6 +1647,42 @@ function setupUIHandlers() {
       if (e.target === sendStrkModal) closeSendStrkModal()
     })
   }
+  if (swapWbtcModal) {
+    swapWbtcModal.addEventListener('click', (e) => {
+      if (e.target === swapWbtcModal) closeSwapWbtcModal()
+    })
+  }
+  if (cancelSwapWbtcBtn) {
+    cancelSwapWbtcBtn.addEventListener('click', closeSwapWbtcModal)
+  }
+  if (swapWbtcAmount) {
+    swapWbtcAmount.addEventListener('input', scheduleSwapEstimateRefresh)
+    swapWbtcAmount.addEventListener('change', scheduleSwapEstimateRefresh)
+  }
+  const onSwapTokenSelectionChange = async () => {
+    if (swapSellToken && swapBuyToken && swapSellToken.value === swapBuyToken.value) {
+      swapBuyToken.value = swapSellToken.value === 'STRK' ? 'WBTC' : 'STRK'
+    }
+    const cfg = getSwapPairConfig()
+    if (!swapWbtcModal?.classList.contains('active')) return
+    if (swapWbtcBalanceHint && dojoManager && currentAccount) {
+      if (cfg.sellSymbol === cfg.buySymbol) {
+        swapWbtcBalanceHint.textContent = 'Select different tokens for swap.'
+      } else {
+        swapWbtcBalanceHint.textContent = `Loading ${cfg.sellSymbol} balance...`
+        const balance = await dojoManager.getTokenBalance(currentAccount.address, cfg.sellTokenAddress).catch(() => 0)
+        swapWbtcBalanceHint.textContent = `Available: ${Number(balance || 0).toFixed(6)} ${cfg.sellSymbol}`
+      }
+    }
+    if (swapWbtcEstimate) {
+      swapWbtcEstimate.textContent = cfg.sellSymbol === cfg.buySymbol
+        ? 'Select different tokens for swap.'
+        : `Estimated receive: - ${cfg.buySymbol}`
+    }
+    scheduleSwapEstimateRefresh()
+  }
+  if (swapSellToken) swapSellToken.addEventListener('change', () => { void onSwapTokenSelectionChange() })
+  if (swapBuyToken) swapBuyToken.addEventListener('change', () => { void onSwapTokenSelectionChange() })
 
   if (sendStrkForm) sendStrkForm.addEventListener('submit', async (e) => {
     e.preventDefault()
@@ -1332,6 +1724,96 @@ function setupUIHandlers() {
         confirmSendStrkBtn.disabled = false
         confirmSendStrkBtn.textContent = 'Send'
       }
+    }
+  })
+
+  if (swapWbtcForm) swapWbtcForm.addEventListener('submit', async (e) => {
+    e.preventDefault()
+    if (!dojoManager || !currentAccount || !swapWbtcAmount) return
+    const cfg = getSwapPairConfig()
+    if (cfg.sellSymbol === cfg.buySymbol) {
+      alert('Choose different tokens for swap.')
+      return
+    }
+    if (!isSupportedSwapPair(cfg.sellSymbol, cfg.buySymbol)) {
+      alert('Supported pair on this flow: STRK ↔ WBTC (Sepolia).')
+      return
+    }
+    const amount = Number(swapWbtcAmount.value || 0)
+    if (!Number.isFinite(amount) || amount <= 0) {
+      alert(`Invalid ${cfg.sellSymbol} amount.`)
+      return
+    }
+
+    const sourceBalance = await dojoManager.getTokenBalance(currentAccount.address, cfg.sellTokenAddress).catch(() => 0)
+    if (Number(sourceBalance || 0) < amount) {
+      alert(`Insufficient ${cfg.sellSymbol}. You have ${Number(sourceBalance || 0).toFixed(6)} ${cfg.sellSymbol}.`)
+      return
+    }
+
+    try {
+      await runWithBusyButton(confirmSwapWbtcBtn, {
+        idleText: 'Swap',
+        busyText: 'Swapping...',
+        pendingToast: `Confirm ${cfg.sellSymbol} -> ${cfg.buySymbol} swap in wallet...`,
+      }, async () => {
+        console.info('[Swap] Start', {
+          user: currentAccount.address,
+          sellToken: cfg.sellSymbol,
+          buyToken: cfg.buySymbol,
+          amount,
+        })
+        let estimatedBuyAmount = 0
+        try {
+          const quotePreview = await dojoManager.getTokenSwapQuote(cfg.sellTokenAddress, cfg.buyTokenAddress, amount)
+          estimatedBuyAmount = Number(quotePreview?.estimatedBuyAmount || 0)
+        } catch {
+          // continue; swapTokens will run its own quote call and fail with normalized message if needed.
+        }
+
+        const tx = await dojoManager.swapTokens(cfg.sellTokenAddress, cfg.buyTokenAddress, amount, 1)
+        const txHash = String(tx?.transaction_hash || '')
+        addActivityEvent({
+          actionType: 'swap',
+          token: cfg.buySymbol,
+          amount,
+          providerPath: 'avnu',
+          txHash,
+          status: 'success',
+          details: {
+            sellToken: cfg.sellSymbol,
+            buyToken: cfg.buySymbol,
+            estimatedBuyAmount,
+          },
+        })
+        console.info('[Swap] Success', {
+          user: currentAccount.address,
+          sellToken: cfg.sellSymbol,
+          buyToken: cfg.buySymbol,
+          amount,
+          txHash,
+        })
+        closeSwapWbtcModal()
+        await updateWalletInfo()
+        const txLabel = shortTxHash(txHash)
+        showToast(`Converted ${amount} ${cfg.sellSymbol} to ${cfg.buySymbol}${txLabel ? ` · ${txLabel}` : ''}`)
+      })
+    } catch (error) {
+      console.error('Token swap error:', error)
+      addActivityEvent({
+        actionType: 'swap',
+        token: cfg.buySymbol,
+        amount,
+        providerPath: 'avnu',
+        txHash: '',
+        status: 'failed',
+        errorMessage: String(error?.message || 'Unknown error'),
+        details: {
+          sellToken: cfg.sellSymbol,
+          buyToken: cfg.buySymbol,
+        },
+      })
+      alert(`Failed to convert ${cfg.sellSymbol} to ${cfg.buySymbol}: ` + (error?.message || 'Unknown error'))
     }
   })
 
@@ -1449,19 +1931,13 @@ function setupUIHandlers() {
           alert('Missing sealed bid verifier address. Set VITE_SEALED_BID_VERIFIER_ADDRESS.')
           return
         }
-        const commitRaw = String(auctionCommitEndAtInput?.value || '')
-        const revealRaw = String(auctionRevealEndAtInput?.value || '')
-        const commitMs = Date.parse(commitRaw)
-        const revealMs = Date.parse(revealRaw)
-        if (!Number.isFinite(commitMs) || !Number.isFinite(revealMs)) {
-          alert('Please set valid commit and reveal date/time.')
-          return
-        }
-        const commitEndUnix = Math.floor(commitMs / 1000)
-        const revealEndUnix = Math.floor(revealMs / 1000)
+        // Sealed timeline is derived from auction end:
+        // commit_end = auction_end - reveal_window, reveal_end = auction_end.
+        const revealEndUnix = auctionEndUnix
+        const commitEndUnix = revealEndUnix - SEALED_REVEAL_WINDOW_SECONDS
         const nowUnix = Math.floor(Date.now() / 1000)
         if (commitEndUnix <= nowUnix + 60) {
-          alert('Commit end must be at least 1 minute in the future.')
+          alert('Auction end is too soon for sealed mode. Choose a later end date/time.')
           return
         }
         if (revealEndUnix <= commitEndUnix + 60) {
@@ -2981,7 +3457,7 @@ async function updateWalletInfo() {
     const balance = await withTimeout(getChainBalance(currentAccount.address), 7000, 'wallet balance').catch(() => null)
     const tbtcBalance = (hasYieldInManifest && YIELD_DUAL_POOL_ENABLED)
       ? await withTimeout(
-        dojoManager.getTokenBalance(currentAccount.address, SEPOLIA_WBTC_TOKEN),
+        dojoManager.getTokenBalance(currentAccount.address, SEPOLIA_BTC_STAKING_TOKEN),
         7000,
         'tbtc balance',
       ).catch(() => 0)
@@ -3005,6 +3481,12 @@ async function updateWalletInfo() {
       yieldState = fetchedYieldState || cachedYieldState || null
     }
     if (yieldState) cachedYieldState = yieldState
+    const activeSymbol = String(yieldState?.pool_token_symbol || (yieldState?.use_btc_mode ? 'WBTC' : 'STRK') || 'STRK').toUpperCase() === 'WBTC'
+      ? 'WBTC'
+      : 'STRK'
+    const starkzapPosition = (starkzapManager && IS_SEPOLIA)
+      ? await withTimeout(starkzapManager.getPoolPosition(activeSymbol), 7000, 'starkzap position').catch(() => null)
+      : null
     const principalNum = yieldState ? Number(yieldState.principal_strk || 0) : 0
     const queuedNum = yieldState ? Number(yieldState.queued_exit_strk || 0) : 0
     const lockedTotalStr = (principalNum + queuedNum).toFixed(2)
@@ -3014,43 +3496,58 @@ async function updateWalletInfo() {
     const queuedExitStr = Number.isFinite(queuedExitNum) ? queuedExitNum.toFixed(2) : '0.00'
     const hasPrincipal = yieldState && Number(yieldState.principal_strk || 0) > 0
     const hasQueue = yieldState && Number(yieldState.queued_exit_strk || 0) > 0
-    const yieldDepositBtnLabel = '+'
-    const yieldWithdrawBtnLabel = '↩'
-    const yieldClaimBtnLabel = '✨'
+    const yieldDepositBtnLabel = '🔒 Stake'
+    const yieldWithdrawBtnLabel = '💰 Unstake'
+    const yieldClaimBtnLabel = '✨ Claim'
     const poolSymbol = yieldState ? String(yieldState.pool_token_symbol || (yieldState.use_btc_mode ? 'WBTC' : 'STRK')) : 'STRK'
+    const position = starkzapPosition?.position || null
+    const stakedLabel = position ? position.staked.toFormatted(true) : `${lockedTotalStr} ${poolSymbol}`
+    const rewardsLabel = position ? position.rewards.toFormatted(true) : `${earningsStr} ${poolSymbol}`
+    const totalLabel = position ? position.total.toFormatted(true) : `${lockedTotalStr} ${poolSymbol}`
+    const unpoolingLabel = position && !position.unpooling.isZero()
+      ? position.unpooling.toFormatted(true)
+      : null
+    const unpoolAtLabel = position?.unpoolTime ? new Date(position.unpoolTime).toLocaleString() : ''
+    const commissionLabel = Number.isFinite(Number(starkzapPosition?.commissionPercent))
+      ? Number(starkzapPosition?.commissionPercent).toFixed(2)
+      : '0.00'
     const yieldModeLabel = `${poolSymbol} real staking`
-    const tbtcFundingHint = hasYieldInManifest && YIELD_DUAL_POOL_ENABLED && Number(tbtcBalance || 0) <= 0
-    const tbtcFaucetAction = WBTC_FAUCET_URL
-      ? `<a href="${WBTC_FAUCET_URL}" target="_blank" rel="noreferrer">Get WBTC</a>`
-      : ''
+    const btcSymbol = BTC_TRACK_SYMBOL
+    const btcWalletBalance = Number(tbtcBalance || 0)
+    const isBtcPoolActive = String(poolSymbol || '').toUpperCase() === 'WBTC'
+    const btcStakedLabel = isBtcPoolActive ? stakedLabel : `0.000000 ${btcSymbol}`
+    const btcRewardsLabel = isBtcPoolActive ? rewardsLabel : `0.000000 ${btcSymbol}`
     walletInfo.innerHTML = `
       <div class="wallet-box">
         <div class="wallet-top-row">
           <div class="wallet-stats">
             <button id="following-count-btn" class="wallet-stat-btn" type="button">Following ${following.length}</button>
             <button id="followers-count-btn" class="wallet-stat-btn" type="button">Followers ${followers.length}</button>
-            <button id="wallet-my-feed-btn" class="wallet-stat-btn" type="button">My Feed</button>
-            <button id="wallet-logout-btn" class="wallet-stat-btn" type="button" aria-label="Logout">⎋</button>
           </div>
           <div class="wallet-main">
-            <span class="wallet-user">● ${currentUsername || shortAddr}</span>
+            <div class="wallet-user-row">
+              <button id="wallet-user-btn" class="wallet-user-btn" type="button" title="Open my feed">● ${currentUsername || shortAddr}</button>
+              <button id="wallet-logout-btn" class="wallet-logout-btn" type="button" aria-label="Logout" title="Logout">⏻</button>
+            </div>
             <span class="wallet-balance">💰 ${balanceStr} STRK</span>
-            ${hasYieldInManifest ? `<span class="wallet-yield-line">🔒 ${lockedTotalStr} ${poolSymbol} · ✨ ${earningsStr} ${poolSymbol} claimable${queuedExitNum > 0 ? ` · (Unstaking ${queuedExitStr} ${poolSymbol})` : ''} · ${yieldModeLabel}</span>` : ''}
+            ${hasYieldInManifest ? `<span class="wallet-balance">₿ ${btcWalletBalance.toFixed(6)} ${btcSymbol}</span>` : ''}
+            ${hasYieldInManifest ? `<span class="wallet-yield-line">🔒 Staked ${stakedLabel} · ✨ Rewards ${rewardsLabel}${unpoolingLabel ? ` · ⏳ Unpooling ${unpoolingLabel}` : ''}${unpoolAtLabel ? ` · Exit at ${unpoolAtLabel}` : ''}</span>` : ''}
+            ${hasYieldInManifest ? `<span class="wallet-yield-line">🔒 Staked ${btcStakedLabel} · ✨ Rewards ${btcRewardsLabel}</span>` : ''}
           </div>
         </div>
         ${hasYieldInManifest ? `<div class="wallet-yield-actions">
-          <button id="wallet-yield-deposit-btn" class="wallet-stat-btn" type="button" title="Stake STRK/WBTC">${yieldDepositBtnLabel}</button>
+          <button id="wallet-yield-deposit-btn" class="wallet-stat-btn" type="button" title="Smart stake STRK/WBTC">${yieldDepositBtnLabel}</button>
           <button id="wallet-yield-withdraw-btn" class="wallet-stat-btn" type="button" title="Return staked funds to balance">${yieldWithdrawBtnLabel}</button>
           <button id="wallet-yield-claim-btn" class="wallet-stat-btn" type="button" title="Claim rewards">${yieldClaimBtnLabel}</button>
         </div>` : ''}
+        <div class="wallet-transfer-actions">
+          <button id="wallet-send-strk-btn" class="wallet-stat-btn" type="button" title="Send STRK">⇄ Send STRK</button>
+          <button id="wallet-swap-btn" class="wallet-stat-btn" type="button" title="Swap STRK/WBTC">⇄ Swap STRK/WBTC</button>
+        </div>
         <div class="wallet-address-row" title="${addr}">
           <span class="wallet-address">${addr}</span>
           <button id="copy-address-btn" class="wallet-copy-btn" type="button" title="Copiar address">📋</button>
         </div>
-        ${tbtcFundingHint ? `<div class="wallet-token-help">
-          <span>BTC strategy needs WBTC.</span>
-          ${tbtcFaucetAction ? `<span class="wallet-token-help-actions">${tbtcFaucetAction}</span>` : ''}
-        </div>` : ''}
       </div>
     `
 
@@ -3084,13 +3581,9 @@ async function updateWalletInfo() {
       followersBtn.onclick = async () => { await openFollowersModal() }
     }
 
-    const myFeedBtn = document.getElementById('wallet-my-feed-btn')
-    if (myFeedBtn) {
-      if (window.matchMedia('(max-width: 640px)').matches) {
-        myFeedBtn.textContent = '🗂'
-        myFeedBtn.title = 'My Feed'
-      }
-      myFeedBtn.onclick = () => {
+    const walletUserBtn = document.getElementById('wallet-user-btn')
+    if (walletUserBtn) {
+      walletUserBtn.onclick = () => {
         const me = normalizeSocialAddress(currentAccount?.address)
         if (!me) return
         renderOwnerFeed(me, String(currentUsername || '').trim())
@@ -3101,12 +3594,29 @@ async function updateWalletInfo() {
     if (walletLogoutBtn) {
       walletLogoutBtn.onclick = () => logout()
     }
+    const walletSendStrkBtn = document.getElementById('wallet-send-strk-btn')
+    if (walletSendStrkBtn) {
+      walletSendStrkBtn.onclick = () => {
+        window.dispatchEvent(new Event('starkwall:open-send-strk'))
+      }
+    }
+    const walletSwapBtn = document.getElementById('wallet-swap-btn')
+    if (walletSwapBtn) {
+      walletSwapBtn.onclick = () => {
+        window.dispatchEvent(new Event('starkwall:open-swap-strk-wbtc'))
+      }
+    }
 
     const walletYieldDepositBtn = document.getElementById('wallet-yield-deposit-btn')
     if (walletYieldDepositBtn) {
       walletYieldDepositBtn.onclick = async () => {
         try {
-          await handleYieldPrimaryAction()
+          await runExclusiveYieldAction('stake', async () => runWithBusyButton(walletYieldDepositBtn, {
+            idleText: yieldDepositBtnLabel,
+            busyText: 'Opening...',
+            pendingToast: 'Preparing stake flow...',
+            pendingAfterMs: 1500,
+          }, async () => handleYieldPrimaryAction()))
         } catch (error) {
           console.error('Yield deposit modal error:', error)
           alert('Stake flow failed. Check balance and retry.')
@@ -3118,31 +3628,141 @@ async function updateWalletInfo() {
     if (walletYieldWithdrawBtn) {
       walletYieldWithdrawBtn.onclick = async () => {
         try {
-          const latest = await dojoManager.queryYieldState(currentAccount.address).catch(() => cachedYieldState || null)
-          const principal = Number(latest?.principal_strk || 0)
-          const queuedExit = Number(latest?.queued_exit_strk || 0)
-          if (principal > 0) {
-            await dojoManager.yieldWithdraw(principal)
-            showToast(`Withdraw requested: ${principal.toFixed(2)} STRK`)
-            await updateWalletInfo()
-            return
-          }
-          if (queuedExit > 0) {
-            const beforeBalance = await getChainBalance(currentAccount.address).catch(() => null)
-            await dojoManager.yieldProcessExitQueue(currentAccount.address)
-            const afterBalance = await getChainBalance(currentAccount.address).catch(() => null)
-            const delta = Number(afterBalance ?? 0) - Number(beforeBalance ?? 0)
-            if (delta > 0.0000001) {
-              showToast(`Returned to balance: +${delta.toFixed(4)} STRK`)
-            } else {
-              showToast('No hay STRK liberable todavía. Sigue en cooldown/cola.')
+          const preferred = String((cachedYieldState?.pool_token_symbol || 'STRK')).toUpperCase() === 'WBTC' ? 'WBTC' : 'STRK'
+          const selectedSymbol = await askYieldToken('Unstake', preferred)
+          if (!selectedSymbol) return
+          await runExclusiveYieldAction('unstake', async () => runWithBusyButton(walletYieldWithdrawBtn, {
+            idleText: yieldWithdrawBtnLabel,
+            busyText: 'Unstaking...',
+            pendingToast: 'Confirm unstake in wallet. Waiting for chain confirmation...',
+          }, async () => {
+            const activeSymbol = selectedSymbol
+            let providerPath = 'dojo'
+            let txHash = ''
+            console.info('[Unstake] Start', {
+              user: currentAccount.address,
+              symbol: activeSymbol,
+            })
+            if (starkzapManager && IS_SEPOLIA) {
+              try {
+                const latest = await dojoManager.queryYieldState(currentAccount.address).catch(() => cachedYieldState || null)
+                const principal = Number(latest?.principal_strk || 0)
+                const res = await starkzapManager.unstake(activeSymbol, principal > 0 ? principal : null)
+                txHash = String(res?.tx?.hash || '')
+                providerPath = 'starkzap'
+                console.info('[Unstake] Starkzap success', {
+                  user: currentAccount.address,
+                  symbol: activeSymbol,
+                  action: res.action,
+                  principal,
+                  txHash,
+                })
+                addActivityEvent({
+                  actionType: res.action === 'exit' ? 'unstake_exit' : 'unstake_intent',
+                  token: activeSymbol,
+                  amount: principal > 0 ? principal : Number(res?.position?.staked?.toFormatted?.() || 0),
+                  providerPath,
+                  txHash,
+                  status: 'success',
+                })
+                if (res.action === 'intent') {
+                  showToast(`Unstake requested for ${activeSymbol}. Complete after cooldown.${txHash ? ` ${shortTxHash(txHash)}` : ''}`)
+                } else {
+                  showToast(`${activeSymbol} returned to wallet balance.${txHash ? ` ${shortTxHash(txHash)}` : ''}`)
+                }
+                await updateWalletInfo()
+                return
+              } catch (starkzapError) {
+                console.error('[Unstake] Starkzap failed message:', starkzapError?.message || String(starkzapError))
+                console.error('[Unstake] Starkzap failed; fallback to Dojo', {
+                  user: currentAccount.address,
+                  symbol: activeSymbol,
+                  error: errorInfo(starkzapError),
+                })
+                if (isControllerInitError(starkzapError)) {
+                  showToast('Controller did not open correctly (popup/cookies). Using standard unstake flow...')
+                } else {
+                  showToast('Starkzap unstake failed. Falling back to standard unstake flow...')
+                }
+                providerPath = 'dojo-fallback'
+              }
             }
-            await updateWalletInfo()
-            return
-          }
-          showToast('No staked or unstaking funds to return.')
+
+            const desiredBtcMode = activeSymbol === 'WBTC'
+            const beforeSwitchState = await dojoManager.queryYieldState(currentAccount.address).catch(() => cachedYieldState || null)
+            const currentPoolSymbol = String(
+              beforeSwitchState?.pool_token_symbol || (beforeSwitchState?.use_btc_mode ? 'WBTC' : 'STRK') || 'STRK',
+            ).toUpperCase() === 'WBTC' ? 'WBTC' : 'STRK'
+            const hasActiveBeforeSwitch = Number(beforeSwitchState?.principal_strk || 0) > 0 || Number(beforeSwitchState?.queued_exit_strk || 0) > 0
+            if (currentPoolSymbol !== activeSymbol && hasActiveBeforeSwitch) {
+              throw new Error(`Active ${currentPoolSymbol} position detected. Withdraw before switching pool.`)
+            }
+            if (currentPoolSymbol !== activeSymbol) {
+              await dojoManager.yieldSetBtcMode(desiredBtcMode).catch(() => {})
+            }
+            const latest = await dojoManager.queryYieldState(currentAccount.address).catch(() => cachedYieldState || null)
+            const principal = Number(latest?.principal_strk || 0)
+            const queuedExit = Number(latest?.queued_exit_strk || 0)
+            if (principal > 0) {
+              const tx = await dojoManager.yieldWithdraw(principal)
+              txHash = String(tx?.transaction_hash || '')
+              console.info('[Unstake] Dojo withdraw success', {
+                user: currentAccount.address,
+                principal,
+                txHash,
+              })
+              addActivityEvent({
+                actionType: 'unstake_intent',
+                token: activeSymbol,
+                amount: principal,
+                providerPath,
+                txHash,
+                status: 'success',
+              })
+              showToast(`Unstake requested: ${principal.toFixed(2)} ${activeSymbol}${txHash ? ` · ${shortTxHash(txHash)}` : ''}`)
+              await updateWalletInfo()
+              return
+            }
+            if (queuedExit > 0) {
+              const beforeBalance = await getChainBalance(currentAccount.address).catch(() => null)
+              const tx = await dojoManager.yieldProcessExitQueue(currentAccount.address)
+              txHash = String(tx?.transaction_hash || '')
+              console.info('[Unstake] Dojo queue processing success', {
+                user: currentAccount.address,
+                queuedExit,
+                txHash,
+              })
+              const afterBalance = await getChainBalance(currentAccount.address).catch(() => null)
+              const delta = Number(afterBalance ?? 0) - Number(beforeBalance ?? 0)
+              addActivityEvent({
+                actionType: 'unstake_exit',
+                token: activeSymbol,
+                amount: Math.max(0, delta || 0),
+                providerPath,
+                txHash,
+                status: 'success',
+              })
+              if (delta > 0.0000001) {
+                showToast(`Returned to balance: +${delta.toFixed(4)} ${activeSymbol}${txHash ? ` · ${shortTxHash(txHash)}` : ''}`)
+              } else {
+                showToast(`Unstake queued/cooldown active. Try again in a bit.${txHash ? ` · ${shortTxHash(txHash)}` : ''}`)
+              }
+              await updateWalletInfo()
+              return
+            }
+            showToast('No staked or unstaking funds to return.')
+          }))
         } catch (error) {
           console.error('Yield withdraw error:', error)
+          addActivityEvent({
+            actionType: 'unstake',
+            token: String((cachedYieldState?.pool_token_symbol || 'STRK')).toUpperCase() === 'WBTC' ? 'WBTC' : 'STRK',
+            amount: 0,
+            providerPath: 'unknown',
+            txHash: '',
+            status: 'failed',
+            errorMessage: String(error?.message || 'Unknown error'),
+          })
           alert('Return-to-balance action failed. Try again in a moment.')
         }
       }
@@ -3152,11 +3772,134 @@ async function updateWalletInfo() {
     if (walletYieldClaimBtn) {
       walletYieldClaimBtn.onclick = async () => {
         try {
-          await dojoManager.yieldClaim()
-          showToast('Rewards claimed to wallet balance')
-          await updateWalletInfo()
+          const preferred = String((cachedYieldState?.pool_token_symbol || 'STRK')).toUpperCase() === 'WBTC' ? 'WBTC' : 'STRK'
+          const selectedSymbol = await askYieldToken('Claim rewards', preferred)
+          if (!selectedSymbol) return
+          await runExclusiveYieldAction('claim', async () => runWithBusyButton(walletYieldClaimBtn, {
+            idleText: yieldClaimBtnLabel,
+            busyText: 'Claiming...',
+            pendingToast: 'Confirm claim in wallet. Waiting for chain confirmation...',
+          }, async () => {
+            const activeSymbol = selectedSymbol
+            const desiredBtcMode = activeSymbol === 'WBTC'
+            const beforeSwitchState = await dojoManager.queryYieldState(currentAccount.address).catch(() => cachedYieldState || null)
+            const currentPoolSymbol = String(
+              beforeSwitchState?.pool_token_symbol || (beforeSwitchState?.use_btc_mode ? 'WBTC' : 'STRK') || 'STRK',
+            ).toUpperCase() === 'WBTC' ? 'WBTC' : 'STRK'
+            const hasActiveBeforeSwitch = Number(beforeSwitchState?.principal_strk || 0) > 0 || Number(beforeSwitchState?.queued_exit_strk || 0) > 0
+            if (currentPoolSymbol !== activeSymbol && hasActiveBeforeSwitch) {
+              throw new Error(`Active ${currentPoolSymbol} position detected. Withdraw before switching pool.`)
+            }
+            if (currentPoolSymbol !== activeSymbol) {
+              await dojoManager.yieldSetBtcMode(desiredBtcMode).catch(() => {})
+            }
+            const beforeState = await dojoManager.queryYieldState(currentAccount.address).catch(() => cachedYieldState || null)
+            const beforePending = Number(beforeState?.pending_strk || 0)
+            console.info('[Claim] Start', {
+              user: currentAccount.address,
+              symbol: activeSymbol,
+              beforePending,
+              beforePrincipal: Number(beforeState?.principal_strk || 0),
+            })
+            if (!Number.isFinite(beforePending) || beforePending <= 0) {
+              console.info('[Claim] Skipped: no claimable rewards', {
+                user: currentAccount.address,
+                symbol: activeSymbol,
+                beforePending,
+              })
+              addActivityEvent({
+                actionType: 'claim',
+                token: activeSymbol,
+                amount: 0,
+                providerPath: 'none',
+                txHash: '',
+                status: 'skipped',
+                errorMessage: 'No claimable rewards yet.',
+              })
+              showToast(`No claimable ${activeSymbol} rewards yet. No transaction sent.`)
+              return
+            }
+            const beforeBalance = await getChainBalance(currentAccount.address).catch(() => null)
+            let txHash = ''
+            let providerPath = 'dojo'
+            if (starkzapManager && IS_SEPOLIA) {
+              try {
+                const res = await starkzapManager.claimRewards(activeSymbol)
+                txHash = String(res?.tx?.hash || '')
+                providerPath = 'starkzap'
+              } catch (starkzapError) {
+                console.error('[Claim] Starkzap failed message:', starkzapError?.message || String(starkzapError))
+                console.warn('Starkzap claim failed, falling back to Dojo claim:', starkzapError)
+                if (isControllerInitError(starkzapError)) {
+                  showToast('Controller did not open correctly (popup/cookies). Using standard claim flow...')
+                } else {
+                  showToast('Starkzap claim failed. Falling back to standard claim flow...')
+                }
+                const tx = await dojoManager.claimPoolRewards()
+                txHash = String(tx?.transaction_hash || '')
+                providerPath = 'dojo-fallback'
+              }
+            } else {
+              const tx = await dojoManager.claimPoolRewards()
+              txHash = String(tx?.transaction_hash || '')
+            }
+            console.info('[Claim] Transaction submitted', {
+              user: currentAccount.address,
+              symbol: activeSymbol,
+              txHash,
+            })
+            const afterState = await dojoManager.queryYieldState(currentAccount.address).catch(() => cachedYieldState || null)
+            const afterPending = Number(afterState?.pending_strk || 0)
+            const claimedByState = Math.max(0, beforePending - Math.max(0, afterPending))
+            const afterBalance = await getChainBalance(currentAccount.address).catch(() => null)
+            const deltaBalance = Number(afterBalance ?? 0) - Number(beforeBalance ?? 0)
+            const txLabel = shortTxHash(txHash)
+            console.info('[Claim] Result', {
+              user: currentAccount.address,
+              symbol: activeSymbol,
+              txHash,
+              beforePending,
+              afterPending,
+              claimedByState,
+              beforeBalance: Number(beforeBalance ?? 0),
+              afterBalance: Number(afterBalance ?? 0),
+              deltaBalance,
+            })
+            if (claimedByState > 0.0000001 || deltaBalance > 0.0000001) {
+              const amount = Math.max(claimedByState, deltaBalance)
+              addActivityEvent({
+                actionType: 'claim',
+                token: activeSymbol,
+                amount,
+                providerPath,
+                txHash,
+                status: 'success',
+              })
+              showToast(`Claim confirmed +${amount.toFixed(6)} ${activeSymbol}${txLabel ? ` · ${txLabel}` : ''}`)
+            } else {
+              addActivityEvent({
+                actionType: 'claim',
+                token: activeSymbol,
+                amount: 0,
+                providerPath,
+                txHash,
+                status: 'success',
+              })
+              showToast(`Claim tx confirmed${txLabel ? ` · ${txLabel}` : ''}, but no balance/reward delta yet.`)
+            }
+            await updateWalletInfo()
+          }))
         } catch (error) {
           console.error('Yield claim error:', error)
+          addActivityEvent({
+            actionType: 'claim',
+            token: String((cachedYieldState?.pool_token_symbol || 'STRK')).toUpperCase() === 'WBTC' ? 'WBTC' : 'STRK',
+            amount: 0,
+            providerPath: 'unknown',
+            txHash: '',
+            status: 'failed',
+            errorMessage: String(error?.message || 'Unknown error'),
+          })
           alert('Claim rewards failed. Try again in a moment.')
         }
       }

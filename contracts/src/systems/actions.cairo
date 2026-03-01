@@ -346,6 +346,62 @@ pub mod actions {
         };
     }
 
+    fn ranges_overlap(a_start: i32, a_end: i32, b_start: i32, b_end: i32) -> bool {
+        a_start < b_end && a_end > b_start
+    }
+
+    fn is_adjacent_rect_to_post(new_x: i32, new_y: i32, new_size: u8, existing: Post) -> bool {
+        let new_size_i32: i32 = new_size.try_into().unwrap();
+        let new_right = new_x + (new_size_i32 * TILE_W);
+        let new_bottom = new_y + (new_size_i32 * TILE_H);
+
+        let existing_size_i32: i32 = existing.size.try_into().unwrap();
+        let existing_right = existing.x_position + (existing_size_i32 * TILE_W);
+        let existing_bottom = existing.y_position + (existing_size_i32 * TILE_H);
+
+        let touches_left = new_right == existing.x_position
+            && ranges_overlap(new_y, new_bottom, existing.y_position, existing_bottom);
+        let touches_right = new_x == existing_right
+            && ranges_overlap(new_y, new_bottom, existing.y_position, existing_bottom);
+        let touches_top = new_bottom == existing.y_position
+            && ranges_overlap(new_x, new_right, existing.x_position, existing_right);
+        let touches_bottom = new_y == existing_bottom
+            && ranges_overlap(new_x, new_right, existing.x_position, existing_right);
+
+        touches_left || touches_right || touches_top || touches_bottom
+    }
+
+    fn assert_adjacent_to_existing(
+        ref world: dojo::world::WorldStorage,
+        new_x: i32,
+        new_y: i32,
+        new_size: u8,
+    ) {
+        let counter: PostCounter = world.read_model(0_u8);
+        // Bootstrap: allow first post in an empty world.
+        if counter.count == 0 {
+            return;
+        }
+
+        let mut existing_id: u64 = 1;
+        let mut found_adjacent = false;
+        loop {
+            if existing_id > counter.count {
+                break;
+            }
+
+            let existing: Post = world.read_model(existing_id);
+            if is_adjacent_rect_to_post(new_x, new_y, new_size, existing) {
+                found_adjacent = true;
+                break;
+            }
+
+            existing_id += 1;
+        };
+
+        assert!(found_adjacent, "New post must be adjacent to an existing post");
+    }
+
     fn zero_address() -> ContractAddress {
         0.try_into().unwrap()
     }
@@ -703,6 +759,7 @@ pub mod actions {
             assert!(x_position >= 0, "x_position must be non-negative");
             assert!(y_position >= 0, "y_position must be non-negative");
             assert_region_free(ref world, x_position, y_position, size);
+            assert_adjacent_to_existing(ref world, x_position, y_position, size);
 
             if is_paid {
                 let price_strk = paid_post_price(size);
@@ -769,6 +826,7 @@ pub mod actions {
             assert!(auction_top_left_x >= 0, "Auction 3x3 would exceed left boundary");
             assert!(auction_top_left_y >= 0, "Auction 3x3 would exceed top boundary");
             assert_region_free(ref world, auction_top_left_x, auction_top_left_y, 3);
+            assert_adjacent_to_existing(ref world, auction_top_left_x, auction_top_left_y, 3);
 
             // 1) Create center tile (owner=creator)
             let center_post_id = next_post_id(ref world);
@@ -892,6 +950,7 @@ pub mod actions {
             assert!(auction_top_left_x >= 0, "Auction 3x3 would exceed left boundary");
             assert!(auction_top_left_y >= 0, "Auction 3x3 would exceed top boundary");
             assert_region_free(ref world, auction_top_left_x, auction_top_left_y, 3);
+            assert_adjacent_to_existing(ref world, auction_top_left_x, auction_top_left_y, 3);
 
             let center_post_id = next_post_id(ref world);
             write_post(

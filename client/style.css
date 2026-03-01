@@ -68,6 +68,14 @@
   justify-content: flex-end;
 }
 
+#wallet-info .wallet-transfer-actions {
+  margin-top: 4px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 #wallet-info .wallet-token-help {
   margin-top: 6px;
   display: flex;
@@ -93,6 +101,39 @@
   text-decoration: underline;
 }
 
+#wallet-info .wallet-evidence-box {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid #2f455a;
+  border-radius: 8px;
+  background: rgba(14, 30, 45, 0.55);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+}
+
+#wallet-info .wallet-evidence-title {
+  color: #9ecbff;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+#wallet-info .wallet-evidence-row {
+  color: #c9d6e2;
+  font-size: 10px;
+  text-align: right;
+}
+
+#wallet-info .wallet-evidence-row a {
+  color: #9ecbff;
+  text-decoration: none;
+}
+
+#wallet-info .wallet-evidence-row a:hover {
+  text-decoration: underline;
+}
+
 #wallet-info .wallet-top-row {
     width: 100%;
     display: flex;
@@ -107,6 +148,26 @@
     align-items: flex-end;
     gap: 4px;
   }
+
+#wallet-info .wallet-user-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#wallet-info .wallet-user-btn {
+  min-height: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #4CAF50;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+#wallet-info .wallet-user-btn:hover {
+  text-decoration: underline;
+}
 
 #wallet-info .wallet-stats {
     display: flex;
@@ -124,12 +185,18 @@
     color: #c9d6e2;
   }
 
-#controls #wallet-logout-btn {
+#wallet-info .wallet-logout-btn {
   min-height: 0;
-  width: 34px;
-  padding: 4px 0;
-  font-size: 14px;
-  text-align: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid #8a1f24;
+  background: rgba(140, 24, 32, 0.2);
+  color: #ff7078;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
 }
 
   #wallet-info .wallet-address-row {
@@ -908,6 +975,17 @@
     line-height: 1;
   }
 
+  #swapWbtcToStrkBtn {
+    font-size: 0;
+    min-height: 38px;
+  }
+
+  #swapWbtcToStrkBtn::before {
+    content: "⇄";
+    font-size: 16px;
+    line-height: 1;
+  }
+
   #wallet-info .wallet-box {
     align-items: stretch;
     gap: 4px;
@@ -924,6 +1002,10 @@
   }
 
   #wallet-info .wallet-user {
+    font-size: 11px;
+  }
+
+  #wallet-info .wallet-user-btn {
     font-size: 11px;
   }
 
@@ -1032,4 +1114,12 @@
 
 .yield-token-help-actions a {
   color: #9ecbff;
+}
+
+.yield-token-picker .modal-buttons {
+  justify-content: center;
+}
+
+.yield-token-picker .modal-buttons button {
+  min-width: 132px;
 }

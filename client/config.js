@@ -37,6 +37,15 @@ export const SEPOLIA_STRK_TOKEN =
   '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d'
 export const SEPOLIA_WBTC_TOKEN =
   '0x00452bd5c0512a61df7c7be8cfea5e4f893cb40e126bdc40aee6054db955129e'
+export const SEPOLIA_ETH_TOKEN = '0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7'
+// Token used by AVNU spot swaps on Sepolia (STRK/ETH <-> BTC-represented routes).
+export const SEPOLIA_SWAP_WBTC_TOKEN = String(
+  import.meta.env?.VITE_SWAP_WBTC_TOKEN || '0x020d208b9e57a7f92bfa9f61135446e0961afc340378be97dbd317453c0950ae',
+)
+// Canonical Bitcoin-track metadata for the app/hackathon demo.
+export const BTC_TRACK_SYMBOL = 'WBTC'
+export const SEPOLIA_BTC_SWAP_TOKEN = SEPOLIA_SWAP_WBTC_TOKEN
+export const SEPOLIA_BTC_STAKING_TOKEN = SEPOLIA_WBTC_TOKEN
 export const KATANA_ETH_TOKEN = '0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7'
 
 export const STRK_TOKEN_ADDRESS = String(import.meta.env?.VITE_STRK_TOKEN || '')

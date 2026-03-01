@@ -38,7 +38,6 @@
           <button id="mobileCreateAuctionBtn" type="button">Auction</button>
         </div>
       </div>
-      <button id="sendStrkBtn" type="button">Send STRK</button>
       <div id="wallet-info"></div>
       <button id="faucet-btn" type="button" title="Obtener 1000 STRK para desarrollo">💧 Obtener STRK</button>
     </div>
@@ -137,6 +136,38 @@
       </div>
     </div>
 
+    <div id="swapWbtcModal" class="modal">
+      <div class="modal-content">
+        <h2>Swap STRK ↔ WBTC</h2>
+        <form id="swapWbtcForm">
+          <label>
+            From
+            <select id="swapSellToken">
+              <option value="STRK">STRK</option>
+              <option value="WBTC">WBTC</option>
+            </select>
+          </label>
+          <label>
+            To
+            <select id="swapBuyToken">
+              <option value="WBTC">WBTC</option>
+              <option value="STRK">STRK</option>
+            </select>
+          </label>
+          <p id="swapWbtcBalanceHint" class="webcam-hint"></p>
+          <label>
+            Amount
+            <input type="number" id="swapWbtcAmount" min="0.00000001" step="0.00000001" required />
+          </label>
+          <p id="swapWbtcEstimate" class="webcam-hint">Estimated receive: -</p>
+          <div class="modal-buttons">
+            <button type="submit" id="confirmSwapWbtcBtn">Swap</button>
+            <button type="button" id="cancelSwapWbtcBtn">Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
     <div id="yieldModal" class="modal">
       <div class="modal-content">
         <h2 id="yieldModalTitle">Yield</h2>
@@ -144,18 +175,18 @@
 
         <div id="yieldDepositFields">
           <div class="yield-strategy-group">
-            <p class="yield-strategy-title">Select strategy</p>
+            <p class="yield-strategy-title">Choose token</p>
             <label class="yield-check">
               <input type="radio" id="yieldStrategyStrkInput" name="yieldStrategy" value="strk" checked />
-              Native staking STRK
+              Stake STRK
             </label>
             <label class="yield-check">
               <input type="radio" id="yieldStrategyBtcInput" name="yieldStrategy" value="btc" />
-              BTC strategy (WBTC)
+              Stake WBTC
             </label>
           </div>
           <label id="yieldAmountLabel">
-            Amount to lock (STRK)
+            Amount (STRK)
             <input type="number" id="yieldAmountInput" min="0.000001" step="0.000001" />
           </label>
         </div>
@@ -174,6 +205,20 @@
           <button type="button" id="yieldModeBtn" style="display: none;">Update Mode</button>
           <button type="button" id="yieldQueueBtn" style="display: none;">Process Unlock</button>
           <button type="button" id="yieldCancelBtn">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="yieldTokenPickerModal" class="modal">
+      <div class="modal-content yield-token-picker">
+        <h2 id="yieldTokenPickerTitle">Choose token</h2>
+        <p id="yieldTokenPickerHint" class="webcam-hint">Select token for this action.</p>
+        <div class="modal-buttons">
+          <button type="button" id="yieldTokenPickerStrkBtn">💰 STRK</button>
+          <button type="button" id="yieldTokenPickerWbtcBtn">₿ WBTC</button>
+        </div>
+        <div class="modal-buttons">
+          <button type="button" id="yieldTokenPickerCancelBtn">Cancel</button>
         </div>
       </div>
     </div>

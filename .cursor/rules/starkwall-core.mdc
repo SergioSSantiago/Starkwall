@@ -1,0 +1,21 @@
+---
+description: Core engineering rules for Starkwall
+alwaysApply: true
+---
+
+# Starkwall Core Rules
+
+- Stack defaults: `client/` (Vite JS), `contracts/` (Cairo/Dojo), Sepolia-first behavior.
+- Prefer minimal-risk edits; preserve existing behavior unless task explicitly requests change.
+- Never auto-run destructive operations. Avoid resets/reverts unless user asks.
+- For frontend changes, keep UX responsive: disable busy buttons, show progress text/toasts, and always restore UI state in `finally`.
+- Keep staking/swap messaging explicit and honest (liquidity/cooldown errors must be clear to users).
+- Respect current product constraints:
+  - Sealed-bid UI stays disabled unless explicitly requested.
+  - STRK/WBTC staking paths must remain operational.
+- Use existing managers before adding new abstractions:
+  - `DojoManager` for world contract ops.
+  - `StarkzapManager` for Starkzap staking flows.
+- For Sepolia token behavior, do not assume liquidity; guard low-quality routes and surface fallback guidance.
+- After substantive edits, run `npm run build` in `client/` and fix obvious regressions.
+- Do not run test suites unless explicitly requested by the user.

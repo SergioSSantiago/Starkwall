@@ -231,12 +231,25 @@ export class PostManager {
     let position
 
     if (this.posts.length === 0) {
+      if (this.useDojo && this.dojoManager?.getPostCounter) {
+        const onchainCount = await this.dojoManager.getPostCounter().catch(() => 0)
+        if (Number(onchainCount) > 0) {
+          throw new Error('Indexer sync delay detected. Posts exist onchain; wait a few seconds and retry.')
+        }
+      }
       // First post - place at origin
       console.log('Creating first post at origin (0, 0)')
       position = { x: 0, y: 0 }
     } else {
       // Find adjacent position (for size > 1 we need a slot that fits the whole block; TODO when implementing paid)
-      position = this.getAdjacentPosition(size)
+      const oldestPost = this.posts.reduce((oldest, p) => {
+        if (!oldest) return p
+        return Number(p.id) < Number(oldest.id) ? p : oldest
+      }, null)
+      const anchor = oldestPost
+        ? { x: Number(oldestPost.x_position || 0), y: Number(oldestPost.y_position || 0) }
+        : { x: 0, y: 0 }
+      position = this.getAdjacentPosition(size, anchor)
 
       if (!position) {
         console.error('No available adjacent positions')
@@ -361,6 +374,138 @@ export class PostManager {
           return null;
         }
 
+        // Fresh world reset edge-case:
+        // Torii can briefly return 0 posts, UI picks origin, and chain reverts because post #1
+        // already exists at (0,0). Retry once on a deterministic adjacent tile.
+        const triedOrigin = Number(position?.x) === 0 && Number(position?.y) === 0
+        const shouldRetryAdjacent =
+          !isPaid &&
+          Number(size) === 1 &&
+          triedOrigin &&
+          msg.toLowerCase().includes('transaction execution error')
+
+        if (shouldRetryAdjacent) {
+          try {
+            await new Promise((resolve) => setTimeout(resolve, 2000))
+            await this.loadPosts()
+
+            const originExists = this.posts.some(
+              (p) => Number(p.x_position) === 0 && Number(p.y_position) === 0
+            )
+
+            if (originExists) {
+              const fallbackPositions = [
+                { x: this.canvas.postWidth, y: 0 },
+                { x: 0, y: this.canvas.postHeight },
+                { x: this.canvas.postWidth, y: this.canvas.postHeight },
+              ]
+
+              for (const fallback of fallbackPositions) {
+                if (this.isBlockOccupied(fallback.x, fallback.y, 1)) continue
+                try {
+                  console.warn('Retrying create_post on adjacent fallback:', fallback)
+                  await this.dojoManager.createPost(
+                    imageUrl,
+                    caption,
+                    creatorUsername,
+                    fallback.x,
+                    fallback.y,
+                    1,
+                    false
+                  )
+                  await new Promise((resolve) => setTimeout(resolve, 4000))
+                  await this.loadPosts()
+                  await this.loadImages()
+                  this.canvas.setPosts(this.posts)
+                  const created = this.posts.find(
+                    (p) => Number(p.x_position) === fallback.x && Number(p.y_position) === fallback.y
+                  )
+                  if (created) return created
+                  break
+                } catch (retryErr) {
+                  console.warn('Fallback create_post failed:', retryErr?.message || retryErr)
+                }
+              }
+            }
+          } catch (syncErr) {
+            console.warn('Post retry sync failed:', syncErr?.message || syncErr)
+          }
+        }
+
+        // General overlap retry: Torii/indexing lag or concurrent creations can pick
+        // a coordinate that became occupied between selection and execution.
+        const isOverlapError = msg.toLowerCase().includes('post overlaps an occupied area')
+        if (isOverlapError) {
+          const attempted = new Set([`${Number(position?.x) || 0},${Number(position?.y) || 0}`])
+          for (let attempt = 0; attempt < 6; attempt++) {
+            try {
+              await new Promise((resolve) => setTimeout(resolve, 1200))
+              await this.loadPosts()
+
+              const oldestPost = this.posts.reduce((oldest, p) => {
+                if (!oldest) return p
+                return Number(p.id) < Number(oldest.id) ? p : oldest
+              }, null)
+              const anchor = oldestPost
+                ? { x: Number(oldestPost.x_position || 0), y: Number(oldestPost.y_position || 0) }
+                : { x: 0, y: 0 }
+
+              let nextPos = null
+              for (let pick = 0; pick < 10; pick++) {
+                const candidate = this.getAdjacentPosition(size, anchor)
+                if (!candidate) break
+                const key = `${Number(candidate.x) || 0},${Number(candidate.y) || 0}`
+                if (attempted.has(key)) continue
+                attempted.add(key)
+                nextPos = candidate
+                break
+              }
+              if (!nextPos) break
+
+              console.warn('Retrying create_post after overlap at:', nextPos)
+              await this.dojoManager.createPost(
+                imageUrl,
+                caption,
+                creatorUsername,
+                nextPos.x,
+                nextPos.y,
+                size,
+                isPaid
+              )
+
+              if (typeof onSuccess === 'function') {
+                setTimeout(() => {
+                  try { onSuccess() } catch (e) { console.error('onSuccess callback error:', e) }
+                }, 0)
+              }
+
+              await new Promise((resolve) => setTimeout(resolve, 4500))
+              await this.loadPosts()
+              await this.loadImages()
+              this.canvas.setPosts(this.posts)
+
+              const created =
+                this.posts.find((p) =>
+                  Number(p.x_position) === Number(nextPos.x) &&
+                  Number(p.y_position) === Number(nextPos.y) &&
+                  Number(p.size) === Number(size)
+                ) ||
+                this.posts.find((p) =>
+                  Number(p.x_position) === Number(nextPos.x) &&
+                  Number(p.y_position) === Number(nextPos.y)
+                ) ||
+                null
+
+              if (created) return created
+            } catch (retryErr) {
+              const retryMsg = String(retryErr?.message || retryErr || '').toLowerCase()
+              if (!retryMsg.includes('post overlaps an occupied area')) {
+                throw retryErr
+              }
+            }
+          }
+        }
+
         alert('Failed to create post: ' + (error.message || 'Unknown error'));
         throw error;
       }
@@ -424,7 +569,14 @@ export class PostManager {
     if (this.posts.length === 0) {
       blockTopLeft = { x: 0, y: 0 }
     } else {
-      blockTopLeft = this.getAdjacentPosition(3)
+      const oldestPost = this.posts.reduce((oldest, p) => {
+        if (!oldest) return p
+        return Number(p.id) < Number(oldest.id) ? p : oldest
+      }, null)
+      const anchor = oldestPost
+        ? { x: Number(oldestPost.x_position || 0), y: Number(oldestPost.y_position || 0) }
+        : { x: 0, y: 0 }
+      blockTopLeft = this.getAdjacentPosition(3, anchor)
       if (!blockTopLeft) {
         throw new Error('No available adjacent space for a 3x3 auction post.')
       }
@@ -492,7 +644,7 @@ export class PostManager {
     }
   }
 
-  getAdjacentPosition(size = 1) {
+  getAdjacentPosition(size = 1, anchor = { x: 0, y: 0 }) {
     const postWidth = this.canvas.postWidth
     const postHeight = this.canvas.postHeight
     const blockW = postWidth * size
@@ -529,8 +681,17 @@ export class PostManager {
       return null
     }
 
-    const randomIndex = Math.floor(Math.random() * availablePositions.length)
-    const selectedPosition = availablePositions[randomIndex]
+    // Prefer nearby candidates to keep new content in the main historical cluster.
+    const ax = Number(anchor?.x || 0)
+    const ay = Number(anchor?.y || 0)
+    const ranked = [...availablePositions].sort((a, b) => {
+      const da = Math.abs(a.x - ax) + Math.abs(a.y - ay)
+      const db = Math.abs(b.x - ax) + Math.abs(b.y - ay)
+      return da - db
+    })
+    const candidatePool = ranked.slice(0, Math.min(20, ranked.length))
+    const randomIndex = Math.floor(Math.random() * candidatePool.length)
+    const selectedPosition = candidatePool[randomIndex]
     console.log('✅ Selected adjacent position: x=%d, y=%d (direction: %s, size: %d)', 
       selectedPosition.x, selectedPosition.y, selectedPosition.direction, size)
     return selectedPosition

@@ -1,11 +1,14 @@
 import { stringToByteArray } from './utils.js';
 import { ToriiQueryBuilder, KeysClause } from "@dojoengine/sdk";
-import { PAYMENT_TOKEN_ADDRESS, RPC_URL, SEPOLIA_WBTC_TOKEN } from './config.js';
+import { IS_SEPOLIA, PAYMENT_TOKEN_ADDRESS, RPC_URL, SEPOLIA_SWAP_WBTC_TOKEN, SEPOLIA_WBTC_TOKEN, TORII_URL } from './config.js';
 import { RpcProvider, hash } from 'starknet';
+import { getQuotes, executeSwap, SEPOLIA_BASE_URL } from '@avnu/avnu-sdk';
 
 const ONE_STRK = 10n ** 18n;
 const DEFAULT_TOKEN_DECIMALS = 18;
 const WBTC_TOKEN_DECIMALS = 8;
+const AVNU_DEFAULT_SLIPPAGE_PERCENT = 1;
+const AVNU_OPTIONS = IS_SEPOLIA ? { baseUrl: SEPOLIA_BASE_URL } : undefined;
 const PAID_POST_MULTIPLIER = 4;
 const AUCTION_POST_CREATION_FEE_STRK = 10;
 const POST_KIND_NORMAL = 0;
@@ -384,6 +387,17 @@ export class DojoManager {
     return tx
   }
 
+  // Starkzap-style smart stake behavior:
+  // one entrypoint that automatically handles first stake and add-to-existing.
+  async stake(amount, useBtcMode = false) {
+    return this.yieldDeposit(amount, useBtcMode)
+  }
+
+  // Alias for "add to an existing stake". Contract-side logic is the same deposit flow.
+  async addToPool(amount, useBtcMode = false) {
+    return this.yieldDeposit(amount, useBtcMode)
+  }
+
   async yieldWithdraw(amountStrk) {
     const tokenDecimals = await this.getActivePoolTokenDecimals()
     const amountUnits = parseAmountToUnits(amountStrk, tokenDecimals)
@@ -416,6 +430,11 @@ export class DojoManager {
       throw new Error(reason)
     }
     return tx
+  }
+
+  // Starkzap-style naming alias.
+  async claimPoolRewards() {
+    return this.yieldClaim()
   }
 
   async yieldSetBtcMode(useBtcMode) {
@@ -683,6 +702,104 @@ export class DojoManager {
     return tx;
   }
 
+  async getWbtcToStrkQuote(amountWbtc) {
+    const q = await this.getTokenSwapQuote(SEPOLIA_SWAP_WBTC_TOKEN, PAYMENT_TOKEN_ADDRESS, amountWbtc);
+    return {
+      ...q,
+      estimatedStrkRaw: q.estimatedBuyRaw,
+      estimatedStrk: q.estimatedBuyAmount,
+      estimatedGasFeeStrk: q.estimatedGasFee,
+    };
+  }
+
+  async swapWbtcToStrk(amountWbtc, slippagePercent = AVNU_DEFAULT_SLIPPAGE_PERCENT) {
+    return this.swapTokens(SEPOLIA_SWAP_WBTC_TOKEN, PAYMENT_TOKEN_ADDRESS, amountWbtc, slippagePercent);
+  }
+
+  async getStrkToWbtcQuote(amountStrk) {
+    const q = await this.getTokenSwapQuote(PAYMENT_TOKEN_ADDRESS, SEPOLIA_SWAP_WBTC_TOKEN, amountStrk);
+    return {
+      ...q,
+      estimatedWbtcRaw: q.estimatedBuyRaw,
+      estimatedWbtc: q.estimatedBuyAmount,
+      estimatedGasFeeStrk: q.estimatedGasFee,
+    };
+  }
+
+  async swapStrkToWbtc(amountStrk, slippagePercent = AVNU_DEFAULT_SLIPPAGE_PERCENT) {
+    return this.swapTokens(PAYMENT_TOKEN_ADDRESS, SEPOLIA_SWAP_WBTC_TOKEN, amountStrk, slippagePercent);
+  }
+
+  async swapTokens(sellTokenAddress, buyTokenAddress, amountSell, slippagePercent = AVNU_DEFAULT_SLIPPAGE_PERCENT) {
+    const { quote } = await this.getTokenSwapQuote(sellTokenAddress, buyTokenAddress, amountSell);
+    const slippage = Math.max(0.001, Number(slippagePercent || AVNU_DEFAULT_SLIPPAGE_PERCENT) / 100);
+
+    const swapResult = await executeSwap({
+      provider: this.account,
+      quote,
+      slippage,
+      executeApprove: true,
+    }, AVNU_OPTIONS);
+
+    const txHash = String(swapResult?.transactionHash || swapResult?.transaction_hash || '').trim();
+    if (!txHash) throw new Error('Swap submitted but transaction hash was not returned');
+
+    const receipt = await this.account.waitForTransaction(txHash);
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Token swap reverted';
+      throw new Error(reason);
+    }
+
+    return { transaction_hash: txHash, quote };
+  }
+
+  async getTokenSwapQuote(sellTokenAddress, buyTokenAddress, amountSell) {
+    const sellToken = String(sellTokenAddress || '').trim();
+    const buyToken = String(buyTokenAddress || '').trim();
+    if (!sellToken || !buyToken) throw new Error('Invalid swap token addresses');
+
+    const sellTokenDecimals = await this.getTokenDecimals(sellToken);
+    const buyTokenDecimals = await this.getTokenDecimals(buyToken);
+    const amountUnits = parseAmountToUnits(amountSell, sellTokenDecimals);
+    if (amountUnits <= 0n) throw new Error('Invalid swap amount');
+
+    let quotes = [];
+    try {
+      quotes = await getQuotes({
+        sellTokenAddress: sellToken,
+        buyTokenAddress: buyToken,
+        sellAmount: amountUnits,
+        takerAddress: String(this.account.address),
+        size: 1,
+      }, AVNU_OPTIONS);
+    } catch (error) {
+      const message = String(error?.message || error || '');
+      if (/cors|network|failed to fetch|cross-origin/i.test(message)) {
+        throw new Error('Swap quote service unavailable (CORS/network). Retry in a few seconds.');
+      }
+      throw new Error(message || 'Could not fetch quote right now.');
+    }
+
+    const quote = Array.isArray(quotes) && quotes.length > 0 ? quotes[0] : null;
+    if (!quote) {
+      throw new Error('No swap route available on Sepolia for this pair/amount right now.');
+    }
+
+    const buyAmountRaw = BigInt(quote.buyAmount || 0);
+    const gasFeeRaw = BigInt(quote.gasFees || 0);
+    return {
+      quote,
+      sellToken,
+      buyToken,
+      estimatedBuyRaw: buyAmountRaw,
+      estimatedBuyAmount: unitsToTokenNumber(buyAmountRaw, buyTokenDecimals, 6),
+      estimatedGasFee: unitsToTokenNumber(gasFeeRaw, DEFAULT_TOKEN_DECIMALS, 6),
+      estimatedGasFeeStrk: unitsToTokenNumber(gasFeeRaw, DEFAULT_TOKEN_DECIMALS, 6),
+      priceImpactBps: Number(quote.priceImpact || 0),
+      estimatedSlippage: Number(quote.estimatedSlippage || 0),
+    };
+  }
+
   /**
    * Create a post on-chain
    * @param {string} imageUrl - URL of the image
@@ -780,6 +897,41 @@ export class DojoManager {
     } catch (error) {
       console.error('❌ Transaction failed:', error);
       throw error;
+    }
+  }
+
+  async getPostCounter() {
+    // Fast path via Torii GraphQL (works even when SDK entity envelopes lag).
+    try {
+      const endpoint = String(TORII_URL || '').replace(/\/+$/, '') + '/graphql'
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          query: 'query { diPostCounterModels(limit: 1) { edges { node { count } } } }',
+        }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        const countRaw = data?.data?.diPostCounterModels?.edges?.[0]?.node?.count
+        if (countRaw !== undefined && countRaw !== null) {
+          return Number(BigInt(String(countRaw)))
+        }
+      }
+    } catch {}
+
+    // Fallback path via SDK entities.
+    try {
+      const resp = await this.toriiClient.getEntities({
+        query: new ToriiQueryBuilder()
+          .withClause(KeysClause(['di-PostCounter'], [], 'VariableLen').build()),
+      })
+      const item = (resp?.items || [])[0]
+      const model = item?.models?.di?.PostCounter
+      const countRaw = model?.count ?? 0
+      return Number(BigInt(String(countRaw)))
+    } catch {
+      return 0
     }
   }
 
@@ -913,9 +1065,12 @@ export class DojoManager {
     const slotId = Number(slotPostId)
     if (!Number.isFinite(slotId) || slotId <= 0) throw new Error('Invalid slot')
     const posts = await this.queryAllPosts().catch(() => [])
-    const slotPost = posts.find((p) => Number(p.id) === slotId)
+    const safePosts = Array.isArray(posts) ? posts.filter(Boolean) : []
+    const slotPost = safePosts.find((p) => Number(p?.id ?? 0) === slotId)
     const groupId = Number(slotPost?.auction_group_id || slotPost?.auction_slot?.group_id || 0)
-    if (!groupId) throw new Error('Cannot resolve auction group for slot')
+    if (!groupId) {
+      throw new Error('Cannot resolve auction group for slot (indexer not ready yet). Reopen slot and retry in a few seconds.')
+    }
     const commitment = simpleCommitment(slotId, groupId, this.account.address, Math.floor(amount), saltFelt)
 
     const amountWei = BigInt(Math.floor(amount)) * ONE_STRK
