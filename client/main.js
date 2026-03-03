@@ -454,9 +454,24 @@ async function handleYieldPrimaryAction() {
   strategyBtcInput.disabled = !YIELD_DUAL_POOL_ENABLED
   modeBtn.style.display = 'none'
   const strkBalance = await getChainBalance(currentAccount.address).catch(() => 0)
-  const tbtcBalance = YIELD_DUAL_POOL_ENABLED
+  let tbtcBalance = YIELD_DUAL_POOL_ENABLED
     ? await dojoManager.getTokenBalance(currentAccount.address, SEPOLIA_BTC_SWAP_TOKEN, 8).catch(() => 0)
     : 0
+  if (YIELD_DUAL_POOL_ENABLED) {
+    const candidateTokenAddresses = new Set()
+    const swapToken = normalizeAddressLike(SEPOLIA_BTC_SWAP_TOKEN)
+    const cfgStakingToken = normalizeAddressLike(SEPOLIA_BTC_STAKING_TOKEN)
+    if (cfgStakingToken && cfgStakingToken !== swapToken) candidateTokenAddresses.add(cfgStakingToken)
+    if (starkzapManager?.getWbtcMemberInfo) {
+      const memberInfo = await starkzapManager.getWbtcMemberInfo(currentAccount.address).catch(() => null)
+      const memberToken = normalizeAddressLike(memberInfo?.tokenAddress)
+      if (memberToken && memberToken !== swapToken) candidateTokenAddresses.add(memberToken)
+    }
+    for (const tokenAddress of candidateTokenAddresses) {
+      const extra = await dojoManager.getTokenBalance(currentAccount.address, tokenAddress, 8).catch(() => 0)
+      tbtcBalance += Number(extra || 0)
+    }
+  }
   const btcSymbol = BTC_TRACK_SYMBOL
 
   titleEl.textContent = 'Stake'
@@ -540,7 +555,9 @@ async function handleYieldPrimaryAction() {
             if (useBtcMode && starkzapManager) {
               const noBtcPoolFromAvnu =
                 /staking info exposes strk pool only/i.test(initialStakeMsg) ||
-                /no viable wbtc staking route/i.test(initialStakeMsg)
+                /no viable wbtc staking route/i.test(initialStakeMsg) ||
+                /no wbtc swap balance available/i.test(initialStakeMsg) ||
+                /insufficient wbtc balance for stake amount/i.test(initialStakeMsg)
               if (noBtcPoolFromAvnu) {
                 try {
                   showToast('AVNU BTC pool unavailable. Trying Starkzap BTC pool fallback...')
