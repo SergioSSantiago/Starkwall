@@ -1205,7 +1205,15 @@ async function tryAutoFinalizeAuctionSlot(post, source = 'auto') {
   autoFinalizingSlots.add(slotId)
   try {
     console.log(`⏱️ Auto-finalizing slot ${slotId} (source: ${source})`)
-    if (sealedCfg?.sealed_mode && SEALED_RELAY_URL) {
+    if (sealedCfg?.sealed_mode) {
+      if (!SEALED_RELAY_URL) {
+        zkConsole('finalize:sealed-relay-missing-skip', { slotId, source })
+        if (!autoFinalizeBlockedSealedSlots.has(slotId)) {
+          autoFinalizeBlockedSealedSlots.add(slotId)
+          showToast('Sealed auto-finalize skipped: relay not configured.')
+        }
+        return false
+      }
       const commits = Array.isArray(post?.auction_commits) ? post.auction_commits : []
       const hasCommits = commits.length > 0
       const hasRevealedCommit = commits.some((c) => Boolean(c?.revealed))
@@ -1225,6 +1233,7 @@ async function tryAutoFinalizeAuctionSlot(post, source = 'auto') {
       autoFinalizeBlockedSealedSlots.delete(slotId)
       await requestSealedImmediateFinalize({ slotPostId: slotId })
     } else {
+      autoFinalizeBlockedSealedSlots.delete(slotId)
       await dojoManager.finalizeAuctionSlot(slotId)
     }
     await new Promise((resolve) => setTimeout(resolve, 5000))
