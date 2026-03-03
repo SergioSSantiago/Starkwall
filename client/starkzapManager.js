@@ -420,6 +420,8 @@ export class StarkzapManager {
         tokenSymbol: '',
         stakedRaw: 0n,
         unclaimedRewardsRaw: 0n,
+        unpoolAmountRaw: 0n,
+        unpoolTimeUnix: 0,
         commissionBps: 0n,
         memberFlag: 0n,
       }
@@ -444,8 +446,11 @@ export class StarkzapManager {
           const stakedRaw = BigInt(parts?.[2] || 0)
           const unclaimedRewardsRaw = BigInt(parts?.[3] || 0)
           const commissionBps = BigInt(parts?.[4] || 0)
-          const memberFlag = BigInt(parts?.[6] || 0)
-          if (stakedRaw > 0n || unclaimedRewardsRaw > 0n || memberFlag > 0n) {
+          const unpoolAmountRaw = BigInt(parts?.[5] || 0)
+          const unpoolTimeOpt = BigInt(parts?.[6] || 1)
+          const unpoolTimeUnix = (unpoolTimeOpt === 0n) ? Number(BigInt(parts?.[7] || 0)) : 0
+          const memberFlag = (stakedRaw > 0n || unclaimedRewardsRaw > 0n || unpoolAmountRaw > 0n || unpoolTimeOpt === 0n) ? 1n : 0n
+          if (stakedRaw > 0n || unclaimedRewardsRaw > 0n || unpoolAmountRaw > 0n || memberFlag > 0n) {
             return {
               found: true,
               poolAddress: normalizeAddress(poolAddress),
@@ -453,6 +458,8 @@ export class StarkzapManager {
               tokenSymbol: String(pool?.token?.symbol || ''),
               stakedRaw,
               unclaimedRewardsRaw,
+              unpoolAmountRaw,
+              unpoolTimeUnix,
               commissionBps,
               memberFlag,
             }
@@ -470,6 +477,8 @@ export class StarkzapManager {
       tokenSymbol: '',
       stakedRaw: 0n,
       unclaimedRewardsRaw: 0n,
+      unpoolAmountRaw: 0n,
+      unpoolTimeUnix: 0,
       commissionBps: 0n,
       memberFlag: 0n,
     }

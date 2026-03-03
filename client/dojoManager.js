@@ -813,7 +813,7 @@ export class DojoManager {
     const base = Number(slippagePercent || AVNU_DEFAULT_SLIPPAGE_PERCENT)
     const extraCandidates = Array.isArray(retryOptions?.slippageCandidates)
       ? retryOptions.slippageCandidates
-      : [2, 3, 5, 8]
+      : [2, 3, 5, 8, 12, 15, 20, 30]
     const slippageCandidates = Array.from(
       new Set([base, ...extraCandidates].filter((v) => Number.isFinite(Number(v)) && Number(v) > 0)),
     )
@@ -845,9 +845,15 @@ export class DojoManager {
         const retryable = isRetryableSwapExecutionError(error)
         const hasMore = i < slippageCandidates.length - 1
         if (!(retryable && hasMore)) {
+          if (retryable) {
+            throw new Error('Swap execution failed due to slippage/liquidity at confirmation time. Try a smaller amount or retry shortly.')
+          }
           throw error
         }
       }
+    }
+    if (isRetryableSwapExecutionError(lastError)) {
+      throw new Error('Swap execution failed due to slippage/liquidity at confirmation time. Try a smaller amount or retry shortly.')
     }
     throw lastError || new Error('Token swap failed')
   }

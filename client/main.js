@@ -9,7 +9,7 @@ import controllerOpts from './controller.js'
 import manifest from './manifest.js'
 import {
   DOMAIN_CHAIN_ID, TORII_URL, IS_SEPOLIA, FAUCET_URL, YIELD_DUAL_POOL_ENABLED,
-  BTC_TRACK_SYMBOL, SEPOLIA_BTC_SWAP_TOKEN, SEALED_BID_VERIFIER_ADDRESS, SEALED_RELAY_URL, PAYMENT_TOKEN_ADDRESS,
+  BTC_TRACK_SYMBOL, SEPOLIA_BTC_SWAP_TOKEN, SEPOLIA_BTC_STAKING_TOKEN, SEALED_BID_VERIFIER_ADDRESS, SEALED_RELAY_URL, PAYMENT_TOKEN_ADDRESS,
 } from './config.js'
 
 // Evitar que un rechazo de promesa no capturado provoque recarga o cierre de la app
@@ -1124,6 +1124,20 @@ function isNoSwapRouteError(error) {
     || msg.includes('no swap route')
     || msg.includes('no route')
     || msg.includes('insufficient liquidity')
+}
+
+function isInsufficientReceivedError(error) {
+  const msg = String(error?.message || error || '').toLowerCase()
+  return msg.includes('insufficient tokens received')
+    || msg.includes('minimum received')
+    || msg.includes('slippage')
+    || msg.includes('argent/multicall-failed')
+}
+
+function normalizeAddressLike(value) {
+  const raw = String(value || '').trim().toLowerCase()
+  if (!raw) return ''
+  return raw.startsWith('0x') ? raw : `0x${raw}`
 }
 
 function isAlreadyFinalizedError(error) {
@@ -2561,32 +2575,95 @@ function setupUIHandlers() {
           // continue; swapTokens will run its own quote call and fail with normalized message if needed.
         }
 
-        const tx = await dojoManager.swapTokens(cfg.sellTokenAddress, cfg.buyTokenAddress, amount, 1)
+        let tx = null
+        let executedBuyTokenAddress = cfg.buyTokenAddress
+        let executedBuySymbol = cfg.buySymbol
+        let executedSellAmount = amount
+        const amountCandidates = Array.from(
+          new Set([amount, amount * 0.9, amount * 0.75, amount * 0.5]
+            .map((v) => Number(v.toFixed(8)))
+            .filter((v) => Number.isFinite(v) && v > 0)),
+        )
+        let lastSwapError = null
+
+        for (const sellAmountCandidate of amountCandidates) {
+          try {
+            tx = await dojoManager.swapTokens(
+              cfg.sellTokenAddress,
+              cfg.buyTokenAddress,
+              sellAmountCandidate,
+              1,
+              { slippageCandidates: [2, 3, 5, 8, 12, 15] },
+            )
+            executedSellAmount = sellAmountCandidate
+            executedBuyTokenAddress = cfg.buyTokenAddress
+            executedBuySymbol = cfg.buySymbol
+            break
+          } catch (primarySwapError) {
+            lastSwapError = primarySwapError
+            const shouldTryWrapperFallback =
+              cfg.sellSymbol === 'STRK' &&
+              cfg.buySymbol === 'WBTC' &&
+              (isInsufficientReceivedError(primarySwapError) || isNoSwapRouteError(primarySwapError))
+
+            if (shouldTryWrapperFallback && starkzapManager) {
+              // Fallback: route to the active WBTC staking wrapper token (e.g. TBTC1),
+              // then rely on unified BTC wallet balance rendering.
+              const pool = await starkzapManager.resolvePool('WBTC', {
+                walletAddress: currentAccount.address,
+              }).catch(() => null)
+              const wrapperBuyToken = normalizeAddressLike(pool?.token?.address)
+              const defaultBuyToken = normalizeAddressLike(cfg.buyTokenAddress)
+              if (wrapperBuyToken && wrapperBuyToken !== defaultBuyToken) {
+                try {
+                  tx = await dojoManager.swapTokens(
+                    cfg.sellTokenAddress,
+                    wrapperBuyToken,
+                    sellAmountCandidate,
+                    1,
+                    { slippageCandidates: [2, 3, 5, 8, 12, 15] },
+                  )
+                  executedSellAmount = sellAmountCandidate
+                  executedBuyTokenAddress = wrapperBuyToken
+                  executedBuySymbol = 'WBTC'
+                  showToast('Direct STRK -> WBTC route unavailable. Executed via WBTC wrapper token.')
+                  break
+                } catch (wrapperSwapError) {
+                  lastSwapError = wrapperSwapError
+                }
+              }
+            }
+          }
+        }
+        if (!tx) throw lastSwapError || new Error('Swap failed for all executable amount attempts.')
         const txHash = String(tx?.transaction_hash || '')
         addActivityEvent({
           actionType: 'swap',
-          token: cfg.buySymbol,
-          amount,
+          token: executedBuySymbol,
+          amount: executedSellAmount,
           providerPath: 'avnu',
           txHash,
           status: 'success',
           details: {
             sellToken: cfg.sellSymbol,
-            buyToken: cfg.buySymbol,
+            buyToken: executedBuySymbol,
+            buyTokenAddress: executedBuyTokenAddress,
             estimatedBuyAmount,
           },
         })
         console.info('[Swap] Success', {
           user: currentAccount.address,
           sellToken: cfg.sellSymbol,
-          buyToken: cfg.buySymbol,
-          amount,
+          buyToken: executedBuySymbol,
+          buyTokenAddress: executedBuyTokenAddress,
+          amount: executedSellAmount,
           txHash,
         })
         closeSwapWbtcModal()
         await updateWalletInfo()
         const txLabel = shortTxHash(txHash)
-        showToast(`Converted ${amount} ${cfg.sellSymbol} to ${cfg.buySymbol}${txLabel ? ` · ${txLabel}` : ''}`)
+        const partialHint = executedSellAmount < amount ? ` (from requested ${amount})` : ''
+        showToast(`Converted ${executedSellAmount} ${cfg.sellSymbol} to ${cfg.buySymbol}${partialHint}${txLabel ? ` · ${txLabel}` : ''}`)
       })
     } catch (error) {
       console.error('Token swap error:', error)
@@ -2606,6 +2683,11 @@ function setupUIHandlers() {
       if (isNoSwapRouteError(error)) {
         if (swapWbtcEstimate) swapWbtcEstimate.textContent = buildNoRouteHint(cfg.sellSymbol, cfg.buySymbol)
         showToast(buildNoRouteHint(cfg.sellSymbol, cfg.buySymbol))
+      } else if (isInsufficientReceivedError(error)) {
+        const msg = `Swap ${cfg.sellSymbol} -> ${cfg.buySymbol} failed due to execution slippage. ` +
+          'No tokens were lost. Try a slightly smaller amount or retry in a few minutes.'
+        if (swapWbtcEstimate) swapWbtcEstimate.textContent = msg
+        showToast(msg)
       } else {
         alert(`Failed to convert ${cfg.sellSymbol} to ${cfg.buySymbol}: ` + (error?.message || 'Unknown error'))
       }
@@ -4579,7 +4661,7 @@ async function updateWalletInfo() {
       : '0.00'
     const yieldModeLabel = `${poolSymbol} real staking`
     const btcSymbol = BTC_TRACK_SYMBOL
-    const btcWalletBalance = Number(swapBtcBalance || 0)
+    let btcWalletBalance = Number(swapBtcBalance || 0)
     const isBtcPoolActive = String(poolSymbol || '').toUpperCase() === 'WBTC'
     // Merge Starkzap + AVNU on Sepolia. AVNU can lag a bit right after a tx;
     // Starkzap reads can be fresher for immediate post-confirmation UI.
@@ -4629,6 +4711,9 @@ async function updateWalletInfo() {
 
     let wbtcStakedRaw = 0n
     let wbtcRewardsRaw = 0n
+    let wbtcUnpoolRaw = 0n
+    let wbtcUnpoolAtLabel = ''
+    let wbtcMemberInfo = null
     let hasWbtcMemberInfo = false
     let wbtcRewardsDisplayOverride = ''
     if (starkzapManager?.getWbtcMemberInfo && currentAccount?.address) {
@@ -4639,7 +4724,15 @@ async function updateWalletInfo() {
           'starkzap WBTC member info',
         )
         if (rawMember?.found) {
+          wbtcMemberInfo = rawMember
           wbtcStakedRaw = BigInt(rawMember.stakedRaw || 0n)
+          wbtcUnpoolRaw = BigInt(rawMember.unpoolAmountRaw || 0n)
+          if (Number(rawMember.unpoolTimeUnix || 0) > 0) {
+            const tMs = Number(rawMember.unpoolTimeUnix) * 1000
+            wbtcUnpoolAtLabel = tMs <= Date.now()
+              ? 'Ready now (press Unstake WBTC)'
+              : new Date(tMs).toLocaleString()
+          }
           // Chain-accurate rewards from pool member info.
           // For WBTC UX, show equivalent WBTC via live quote.
           wbtcRewardsRaw = BigInt(rawMember.unclaimedRewardsRaw || 0n)
@@ -4669,6 +4762,38 @@ async function updateWalletInfo() {
       wbtcRewardsRaw = (() => {
         try { return BigInt(wbtcPosition?.rewards?.toBase?.() ?? 0) } catch { return 0n }
       })()
+      wbtcUnpoolRaw = (() => {
+        try { return BigInt(wbtcPosition?.unpooling?.toBase?.() ?? 0) } catch { return 0n }
+      })()
+      if (wbtcPosition?.unpoolTime) {
+        const tMs = new Date(wbtcPosition.unpoolTime).getTime()
+        if (Number.isFinite(tMs) && tMs > 0) {
+          wbtcUnpoolAtLabel = tMs <= Date.now()
+            ? 'Ready now (press Unstake WBTC)'
+            : new Date(tMs).toLocaleString()
+        }
+      }
+    }
+
+    // Unified BTC wallet balance: include swap token + staking wrapper balances
+    // (e.g. TBTC1) so unstake exits are immediately visible to users.
+    if (currentAccount?.address) {
+      const candidateTokenAddresses = new Set()
+      const swapToken = String(SEPOLIA_BTC_SWAP_TOKEN || '').toLowerCase()
+      const fromMember = String(wbtcMemberInfo?.tokenAddress || '').toLowerCase()
+      const fromPool = String(starkzapWbtcPosition?.pool?.token?.address || '').toLowerCase()
+      const fromCfg = String(SEPOLIA_BTC_STAKING_TOKEN || '').toLowerCase()
+      if (fromMember && fromMember !== swapToken) candidateTokenAddresses.add(fromMember)
+      if (fromPool && fromPool !== swapToken) candidateTokenAddresses.add(fromPool)
+      if (fromCfg && fromCfg !== swapToken) candidateTokenAddresses.add(fromCfg)
+      for (const tokenAddress of candidateTokenAddresses) {
+        const extra = await withTimeout(
+          dojoManager.getTokenBalance(currentAccount.address, tokenAddress, 8),
+          6000,
+          'btc wrapper balance',
+        ).catch(() => 0)
+        btcWalletBalance += Number(extra || 0)
+      }
     }
     // WBTC track in this UI is presented with 8 decimals to match user-facing
     // wallet/swap balance, independent from any SDK token metadata quirks.
@@ -4678,6 +4803,9 @@ async function updateWalletInfo() {
     const btcRewardsLabel = (hasWbtcMemberInfo || wbtcPosition)
       ? (wbtcRewardsDisplayOverride || `${unitsToTokenNumber(wbtcRewardsRaw, 8, 8).toFixed(8)} ${btcSymbol}`)
       : `0.00000000 ${btcSymbol}`
+    const btcUnpoolingLabel = (hasWbtcMemberInfo || wbtcPosition) && wbtcUnpoolRaw > 0n
+      ? `${unitsToTokenNumber(wbtcUnpoolRaw, 8, 8).toFixed(8)} ${btcSymbol}`
+      : ''
     walletInfo.innerHTML = `
       <div class="wallet-box">
         <div class="wallet-top-row">
@@ -4693,7 +4821,7 @@ async function updateWalletInfo() {
             <span class="wallet-balance">💰 ${balanceStr} STRK</span>
             ${hasYieldInManifest ? `<span class="wallet-balance">₿ ${btcWalletBalance.toFixed(8)} ${btcSymbol}</span>` : ''}
             ${hasYieldInManifest ? `<span class="wallet-yield-line">🔒 Staked ${stakedLabel} · ✨ Rewards ${rewardsLabel}${unpoolingLabel ? ` · ⏳ Unpooling ${unpoolingLabel}` : ''}${unpoolAtLabel ? ` · Exit at ${unpoolAtLabel}` : ''}</span>` : ''}
-            ${hasYieldInManifest ? `<span class="wallet-yield-line">🔒 Staked ${btcStakedLabel} · ✨ Rewards ${btcRewardsLabel}</span>` : ''}
+            ${hasYieldInManifest ? `<span class="wallet-yield-line">🔒 Staked ${btcStakedLabel} · ✨ Rewards ${btcRewardsLabel}${btcUnpoolingLabel ? ` · ⏳ Unpooling ${btcUnpoolingLabel}` : ''}${wbtcUnpoolAtLabel ? ` · Exit at ${wbtcUnpoolAtLabel}` : ''}</span>` : ''}
           </div>
         </div>
         ${hasYieldInManifest ? `<div class="wallet-yield-actions">
