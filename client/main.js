@@ -1124,6 +1124,17 @@ function parseStakeRequiredAmount(error, fallbackAmount = 0) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : Number(fallbackAmount || 0)
 }
 
+function parseTokenFormattedNumber(value) {
+  const raw = String(value ?? '').trim()
+  if (!raw) return 0
+  const normalized = raw
+    .replace(/[^0-9,.-]/g, '')
+    .replace(/\.(?=.*\.)/g, '') // keep only last dot as decimal candidate
+    .replace(',', '.')
+  const n = Number(normalized)
+  return Number.isFinite(n) ? n : 0
+}
+
 function unitsToTokenNumber(rawUnits, decimals = 18, precision = 8) {
   const raw = BigInt(rawUnits || 0)
   const d = Math.max(0, Number(decimals || 0))
@@ -4543,8 +4554,8 @@ async function updateWalletInfo() {
     const btcSymbol = BTC_TRACK_SYMBOL
     const btcWalletBalance = Number(swapBtcBalance || 0)
     const isBtcPoolActive = String(poolSymbol || '').toUpperCase() === 'WBTC'
-    // AVNU is source-of-truth for STRK staking status in Sepolia.
-    // Always prefer AVNU values to avoid cross-source inconsistencies.
+    // Merge Starkzap + AVNU on Sepolia. AVNU can lag a bit right after a tx;
+    // Starkzap reads can be fresher for immediate post-confirmation UI.
     if (IS_SEPOLIA && dojoManager?.getAvnuUserStakingByToken) {
       const avnuStrkPosition = await withTimeout(
         dojoManager.getAvnuUserStakingByToken(PAYMENT_TOKEN_ADDRESS, currentAccount.address),
@@ -4555,11 +4566,26 @@ async function updateWalletInfo() {
         const avnuStaked = Number(avnuStrkPosition.amountFormatted || 0)
         const avnuRewards = Number(avnuStrkPosition.rewardsFormatted || 0)
         const avnuUnpool = Number(avnuStrkPosition.unpoolFormatted || 0)
-        stakedLabel = `${avnuStaked.toFixed(6)} STRK`
-        rewardsLabel = `${avnuRewards.toFixed(6)} STRK`
-        totalLabel = `${(avnuStaked + avnuRewards).toFixed(6)} STRK`
-        if (avnuUnpool > 0) {
-          unpoolingLabel = `${avnuUnpool.toFixed(6)} STRK`
+        const zapStaked = position ? parseTokenFormattedNumber(position.staked?.toFormatted?.()) : 0
+        const zapRewards = position ? parseTokenFormattedNumber(position.rewards?.toFormatted?.()) : 0
+        const zapUnpool = position ? parseTokenFormattedNumber(position.unpooling?.toFormatted?.()) : 0
+
+        const effectiveStaked = Math.max(avnuStaked, zapStaked, 0)
+        // Rewards must remain chain-truthful:
+        // - If AVNU reports no active/queued position, keep AVNU rewards (typically 0).
+        // - Only use Starkzap rewards as temporary fallback right after fresh stake
+        //   when AVNU can lag and already reports active stake as 0.
+        const useZapRewardsFallback = avnuStaked <= 0 && avnuUnpool <= 0 && effectiveStaked > 0
+        const effectiveRewards = useZapRewardsFallback
+          ? Math.max(avnuRewards, zapRewards, 0)
+          : Math.max(avnuRewards, 0)
+        const effectiveUnpool = Math.max(avnuUnpool, zapUnpool, 0)
+
+        stakedLabel = `${effectiveStaked.toFixed(6)} STRK`
+        rewardsLabel = `${effectiveRewards.toFixed(6)} STRK`
+        totalLabel = `${(effectiveStaked + effectiveRewards).toFixed(6)} STRK`
+        if (effectiveUnpool > 0) {
+          unpoolingLabel = `${effectiveUnpool.toFixed(6)} STRK`
           const readyToExit = avnuStrkPosition.unpoolTime && new Date(avnuStrkPosition.unpoolTime).getTime() <= Date.now()
           if (readyToExit) {
             unpoolAtLabel = 'Ready now (press Unstake STRK)'
