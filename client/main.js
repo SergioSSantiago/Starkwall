@@ -1100,6 +1100,12 @@ function isNoSwapRouteError(error) {
     || msg.includes('insufficient liquidity')
 }
 
+function isAlreadyFinalizedError(error) {
+  const msg = String(error?.message || error || '').toLowerCase()
+  return msg.includes('already finalized')
+    || msg.includes('auction slot already finalized')
+}
+
 function buildNoRouteHint(sellSymbol, buySymbol) {
   return `No route for ${sellSymbol} -> ${buySymbol} right now. No swap was executed. Try a smaller amount, retry in a few minutes, or swap to a different token first.`
 }
@@ -1228,6 +1234,10 @@ async function tryAutoFinalizeAuctionSlot(post, source = 'auto') {
     await updateWalletInfo()
     return true
   } catch (error) {
+    if (isAlreadyFinalizedError(error)) {
+      zkConsole('finalize:already-finalized', { slotId, source })
+      return true
+    }
     console.warn(`Auto-finalize skipped for slot ${slotId}:`, error?.message || error)
     return false
   } finally {
@@ -1516,7 +1526,11 @@ async function requestSealedImmediateFinalize({ slotPostId }) {
     relayStatus: body?.status || '',
   })
   if (!response.ok || !body?.ok) {
-    throw new Error(String(body?.error || `Relay finalize failed (${response.status})`))
+    const reason = String(body?.error || `Relay finalize failed (${response.status})`)
+    if (isAlreadyFinalizedError(reason)) {
+      return { ok: true, txHash: '', status: 'already_finalized' }
+    }
+    throw new Error(reason)
   }
   return {
     ok: true,
