@@ -79,6 +79,15 @@ function isNoSwapRouteError(error) {
     || message.includes('insufficient liquidity')
 }
 
+function isRetryableSwapExecutionError(error) {
+  const message = String(error?.message || error || '').toLowerCase()
+  return message.includes('insufficient tokens received')
+    || message.includes('argent/multicall-failed')
+    || message.includes('entrypoint_failed')
+    || message.includes('slippage')
+    || message.includes('minimum received')
+}
+
 function poolIdFromMode(useBtcMode) {
   return useBtcMode ? 1 : 0
 }
@@ -800,27 +809,47 @@ export class DojoManager {
     return this.swapTokens(PAYMENT_TOKEN_ADDRESS, SEPOLIA_SWAP_WBTC_TOKEN, amountStrk, slippagePercent);
   }
 
-  async swapTokens(sellTokenAddress, buyTokenAddress, amountSell, slippagePercent = AVNU_DEFAULT_SLIPPAGE_PERCENT) {
-    const { quote } = await this.getTokenSwapQuote(sellTokenAddress, buyTokenAddress, amountSell);
-    const slippage = Math.max(0.001, Number(slippagePercent || AVNU_DEFAULT_SLIPPAGE_PERCENT) / 100);
+  async swapTokens(sellTokenAddress, buyTokenAddress, amountSell, slippagePercent = AVNU_DEFAULT_SLIPPAGE_PERCENT, retryOptions = {}) {
+    const base = Number(slippagePercent || AVNU_DEFAULT_SLIPPAGE_PERCENT)
+    const extraCandidates = Array.isArray(retryOptions?.slippageCandidates)
+      ? retryOptions.slippageCandidates
+      : [2, 3, 5, 8]
+    const slippageCandidates = Array.from(
+      new Set([base, ...extraCandidates].filter((v) => Number.isFinite(Number(v)) && Number(v) > 0)),
+    )
+    let lastError = null
 
-    const swapResult = await executeSwap({
-      provider: this.account,
-      quote,
-      slippage,
-      executeApprove: true,
-    }, AVNU_OPTIONS);
+    for (let i = 0; i < slippageCandidates.length; i += 1) {
+      const candidate = Number(slippageCandidates[i])
+      try {
+        const { quote } = await this.getTokenSwapQuote(sellTokenAddress, buyTokenAddress, amountSell);
+        const slippage = Math.max(0.001, candidate / 100);
+        const swapResult = await executeSwap({
+          provider: this.account,
+          quote,
+          slippage,
+          executeApprove: true,
+        }, AVNU_OPTIONS);
 
-    const txHash = String(swapResult?.transactionHash || swapResult?.transaction_hash || '').trim();
-    if (!txHash) throw new Error('Swap submitted but transaction hash was not returned');
+        const txHash = String(swapResult?.transactionHash || swapResult?.transaction_hash || '').trim();
+        if (!txHash) throw new Error('Swap submitted but transaction hash was not returned');
 
-    const receipt = await this.account.waitForTransaction(txHash);
-    if (!isTxReceiptSuccessful(receipt)) {
-      const reason = receipt?.revert_reason || receipt?.revertReason || 'Token swap reverted';
-      throw new Error(reason);
+        const receipt = await this.account.waitForTransaction(txHash);
+        if (!isTxReceiptSuccessful(receipt)) {
+          const reason = receipt?.revert_reason || receipt?.revertReason || 'Token swap reverted';
+          throw new Error(reason);
+        }
+        return { transaction_hash: txHash, quote };
+      } catch (error) {
+        lastError = error
+        const retryable = isRetryableSwapExecutionError(error)
+        const hasMore = i < slippageCandidates.length - 1
+        if (!(retryable && hasMore)) {
+          throw error
+        }
+      }
     }
-
-    return { transaction_hash: txHash, quote };
+    throw lastError || new Error('Token swap failed')
   }
 
   async getTokenSwapQuote(sellTokenAddress, buyTokenAddress, amountSell) {
@@ -902,6 +931,7 @@ export class DojoManager {
     const multipliers = [1, 1.25, 1.5, 2, 3, 5, 8, 10]
     const plans = []
     const rawErrors = []
+    const targetTolerance = amount * 0.995
 
     for (const candidate of filteredCandidates) {
       for (const mult of multipliers) {
@@ -914,7 +944,9 @@ export class DojoManager {
         try {
           const direct = await this.getTokenSwapQuote(fromToken, candidate.tokenAddress, sellAmount)
           const out = Number(direct?.estimatedBuyAmount || 0)
-          if (out > 0) plans.push({ kind: 'direct', ...candidate, sellAmount, estimatedTargetAmount: out })
+          if (Number.isFinite(out) && out >= targetTolerance) {
+            plans.push({ kind: 'direct', ...candidate, sellAmount, estimatedTargetAmount: out })
+          }
         } catch (error) {
           rawErrors.push(String(error?.message || error || 'Unknown AVNU error'))
           if (!isNoSwapRouteError(error)) continue
@@ -925,7 +957,7 @@ export class DojoManager {
           if (!Number.isFinite(estimatedStrkAmount) || estimatedStrkAmount <= 0) continue
           const hop2 = await this.getTokenSwapQuote(strkToken, candidate.tokenAddress, estimatedStrkAmount)
           const estimatedTargetAmount = Number(hop2?.estimatedBuyAmount || 0)
-          if (estimatedTargetAmount > 0) {
+          if (Number.isFinite(estimatedTargetAmount) && estimatedTargetAmount >= targetTolerance) {
             plans.push({
               kind: 'via-strk',
               ...candidate,

@@ -533,9 +533,32 @@ async function handleYieldPrimaryAction() {
               })
             }
           } catch (starkzapError) {
-            console.error('[Stake] Starkzap failed message:', starkzapError?.message || String(starkzapError))
-            if (useBtcMode && IS_SEPOLIA && dojoManager?.stakeWbtcViaAvnu) {
-              throw new Error(`WBTC staking via AVNU failed: ${starkzapError?.message || 'Unknown error'}`)
+            let effectiveStakeError = starkzapError
+            const startedFromAvnuPath = Boolean(useBtcMode && IS_SEPOLIA && dojoManager?.stakeWbtcViaAvnu)
+            const initialStakeMsg = String(starkzapError?.message || starkzapError || '')
+            console.error('[Stake] Starkzap failed message:', initialStakeMsg)
+            if (useBtcMode && starkzapManager) {
+              const noBtcPoolFromAvnu =
+                /staking info exposes strk pool only/i.test(initialStakeMsg) ||
+                /no viable wbtc staking route/i.test(initialStakeMsg)
+              if (noBtcPoolFromAvnu) {
+                try {
+                  showToast('AVNU BTC pool unavailable. Trying Starkzap BTC pool fallback...')
+                  const fallbackRes = await starkzapManager.stake(symbol, amount)
+                  txHash = String(fallbackRes?.tx?.hash || '')
+                  providerPath = 'starkzap-fallback'
+                  console.info('[Stake] Starkzap fallback success', {
+                    user: currentAccount.address,
+                    symbol,
+                    amount,
+                    txHash,
+                  })
+                  return
+                } catch (fallbackError) {
+                  effectiveStakeError = fallbackError
+                  console.error('[Stake] Starkzap fallback failed message:', fallbackError?.message || String(fallbackError))
+                }
+              }
             }
             // WBTC staking must stay on the Starkzap path; Dojo fallback uses a
             // different token balance and can produce misleading "insufficient" errors.
@@ -544,14 +567,14 @@ async function handleYieldPrimaryAction() {
                 user: currentAccount.address,
                 symbol,
                 amount,
-                error: errorInfo(starkzapError),
+                error: errorInfo(effectiveStakeError),
               })
-              if (isControllerInitError(starkzapError)) {
+              if (isControllerInitError(effectiveStakeError)) {
                 throw new Error('WBTC staking needs Cartridge Controller. Open https://localhost:5173, allow popups/cookies for localhost, reconnect wallet, and retry.')
               }
-              const poolTokenAddress = parseStakePoolTokenAddress(starkzapError)
+              const poolTokenAddress = parseStakePoolTokenAddress(effectiveStakeError)
               const swapTokenAddress = normalizeStarknetAddress(SEPOLIA_BTC_SWAP_TOKEN)
-              const requiredStakeAmount = parseStakeRequiredAmount(starkzapError, amount)
+              const requiredStakeAmount = parseStakeRequiredAmount(effectiveStakeError, amount)
               const canAutoBridge =
                 Boolean(poolTokenAddress) &&
                 poolTokenAddress !== swapTokenAddress &&
@@ -651,15 +674,18 @@ async function handleYieldPrimaryAction() {
                   throw new Error(`WBTC staking failed after AVNU conversion attempt: ${bridgeError?.message || 'Unknown bridge error'}`)
                 }
               }
-              throw new Error(`WBTC staking failed on Starkzap: ${starkzapError?.message || 'Unknown error'}`)
+              const prefix = startedFromAvnuPath
+                ? 'WBTC staking failed after AVNU/Starkzap attempts'
+                : 'WBTC staking failed on Starkzap'
+              throw new Error(`${prefix}: ${effectiveStakeError?.message || 'Unknown error'}`)
             }
             console.error('[Stake] Starkzap failed; fallback to Dojo', {
               user: currentAccount.address,
               symbol,
               amount,
-              error: errorInfo(starkzapError),
+              error: errorInfo(effectiveStakeError),
             })
-            if (isControllerInitError(starkzapError)) {
+            if (isControllerInitError(effectiveStakeError)) {
               showToast('Controller did not open correctly (popup/cookies). Using standard stake flow...')
             } else {
               showToast('Starkzap staking failed. Falling back to standard stake flow...')
