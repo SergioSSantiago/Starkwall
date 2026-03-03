@@ -45,6 +45,7 @@ let finalizeWorkerBusy = false;
 let refundWorkerBusy = false;
 let persistQueued = false;
 let relayerTxQueue = Promise.resolve();
+const slotLocks = new Set();
 
 function validateConfig() {
   if (!ACTIONS_CONTRACT || !ACTIONS_CONTRACT.startsWith('0x')) {
@@ -111,6 +112,25 @@ function normalizeHexAddress(address) {
   const hex = raw.startsWith('0x') ? raw.slice(2) : raw;
   const normalized = hex.replace(/^0+/, '');
   return `0x${normalized || '0'}`;
+}
+
+function lockSlot(slotPostId) {
+  const id = Number(slotPostId || 0);
+  if (!Number.isFinite(id) || id <= 0) return false;
+  if (slotLocks.has(id)) {
+    console.log('[sealed-relayer][slot-lock:busy]', { slotPostId: id });
+    return false;
+  }
+  slotLocks.add(id);
+  console.log('[sealed-relayer][slot-lock:acquired]', { slotPostId: id });
+  return true;
+}
+
+function unlockSlot(slotPostId) {
+  const id = Number(slotPostId || 0);
+  if (!Number.isFinite(id) || id <= 0) return;
+  slotLocks.delete(id);
+  console.log('[sealed-relayer][slot-lock:released]', { slotPostId: id });
 }
 
 function toDecimalField(value) {
@@ -384,6 +404,38 @@ function isPermanentRevealError(message = '') {
   );
 }
 
+function classifyRelayError(message = '', stage = 'reveal') {
+  const normalized = String(message || '').toLowerCase();
+  if (normalized.includes('already finalized')) {
+    return { code: 'already_finalized', hint: 'Slot already finalized; treated as idempotent success.' };
+  }
+  if (normalized.includes('reveal phase closed')) {
+    return { code: 'reveal_phase_closed', hint: 'Reveal window closed; continuing with finalize/refund flow.' };
+  }
+  if (normalized.includes('input too long for arguments')) {
+    return { code: 'verifier_input_too_long', hint: 'Verifier calldata too large for current contract ABI.' };
+  }
+  if (normalized.includes('invalid reveal proof')) {
+    return { code: 'invalid_reveal_proof', hint: 'Proof did not verify on-chain for this reveal.' };
+  }
+  if (normalized.includes('commitment mismatch')) {
+    return { code: 'commitment_mismatch', hint: 'Commitment does not match submitted reveal payload.' };
+  }
+  if (normalized.includes('no commit found')) {
+    return { code: 'no_commit_found', hint: 'No active commit found for this bidder/slot.' };
+  }
+  if (normalized.includes('highest bidder cannot refund')) {
+    return { code: 'refund_not_allowed_for_winner', hint: 'Winner cannot claim loser refund path.' };
+  }
+  if (normalized.includes('already refunded')) {
+    return { code: 'already_refunded', hint: 'Refund already processed for this commit.' };
+  }
+  if (normalized.includes('networkerror') || normalized.includes('failed to fetch') || normalized.includes('rpc')) {
+    return { code: `${stage}_transient_network`, hint: 'Transient RPC/network issue; retrying automatically.' };
+  }
+  return { code: `${stage}_failed`, hint: 'Unexpected relayer error; check logs and retry path.' };
+}
+
 async function runImmediateReveal(payload) {
   const job = createJob(payload);
   const proofCalldata = await generateProofCalldata(job);
@@ -423,7 +475,9 @@ async function processNextJob() {
   if (due.length === 0) return;
 
   // Intermediate privacy mode: reveal only the top scheduled bid per slot.
-  const slotId = due[0].slotPostId;
+  const slotCandidate = due.find((j) => !slotLocks.has(Number(j.slotPostId || 0)));
+  if (!slotCandidate) return;
+  const slotId = slotCandidate.slotPostId;
   const slotDue = due
     .filter((j) => j.slotPostId === slotId)
     .sort((a, b) => {
@@ -431,6 +485,7 @@ async function processNextJob() {
       return b.createdAt - a.createdAt;
     });
 
+  if (!lockSlot(slotId)) return;
   workerBusy = true;
   try {
     let winnerJob = null;
@@ -443,16 +498,21 @@ async function processNextJob() {
         const txHash = await executeReveal(candidate, proofCalldata);
         candidate.status = 'submitted';
         candidate.revealTxHash = txHash;
+        candidate.errorCode = '';
+        candidate.errorHint = '';
         candidate.updatedAt = Date.now();
         winnerJob = candidate;
         queuePersistJobs();
         break;
       } catch (error) {
         const message = String(error?.stack || error?.message || error || 'Unknown relayer error');
+        const classified = classifyRelayError(message, 'reveal');
         const normalized = message.toLowerCase();
         if (normalized.includes('reveal phase closed')) {
           candidate.status = 'skipped';
           candidate.error = message;
+          candidate.errorCode = classified.code;
+          candidate.errorHint = classified.hint;
           if (candidate.finalizeStatus === 'scheduled' && candidate.finalizeAfterUnix <= 0) {
             candidate.finalizeAfterUnix = Math.floor(Date.now() / 1000);
           }
@@ -464,9 +524,13 @@ async function processNextJob() {
           candidate.revealAttempts = Number(candidate.revealAttempts || 0) + 1;
           candidate.revealAfterUnix = Math.floor(Date.now() / 1000) + REVEAL_RETRY_SECONDS;
           candidate.error = message;
+          candidate.errorCode = classified.code;
+          candidate.errorHint = 'Transient reveal error; retry scheduled automatically.';
         } else {
           candidate.status = 'failed';
           candidate.error = message;
+          candidate.errorCode = classified.code;
+          candidate.errorHint = classified.hint;
         }
         candidate.updatedAt = Date.now();
         console.error('[sealed-relayer] job failed', { id: candidate.id, error: candidate.error });
@@ -480,6 +544,8 @@ async function processNextJob() {
         if (candidate.status !== 'scheduled') continue;
         candidate.status = 'skipped';
         candidate.error = 'Winner selected for slot; loser reveal suppressed';
+        candidate.errorCode = 'loser_reveal_suppressed';
+        candidate.errorHint = 'Privacy mode keeps losing bids unrevealed.';
         candidate.finalizeStatus = 'skipped';
         candidate.updatedAt = Date.now();
         queuePersistJobs();
@@ -487,6 +553,7 @@ async function processNextJob() {
     }
   } finally {
     workerBusy = false;
+    unlockSlot(slotId);
   }
 }
 
@@ -496,9 +563,11 @@ async function processNextFinalizeJob() {
   const next = jobs.find((j) =>
     (j.status === 'submitted' || j.status === 'failed' || j.status === 'skipped') &&
     j.finalizeStatus === 'scheduled' &&
-    j.finalizeAfterUnix <= now
+    j.finalizeAfterUnix <= now &&
+    !slotLocks.has(Number(j.slotPostId || 0))
   );
   if (!next) return;
+  if (!lockSlot(next.slotPostId)) return;
 
   finalizeWorkerBusy = true;
   const slotJobs = jobs.filter((j) =>
@@ -518,16 +587,21 @@ async function processNextFinalizeJob() {
     for (const job of slotJobs) {
       job.finalizeStatus = 'submitted';
       job.finalizeTxHash = txHash;
+      job.finalizeErrorCode = '';
+      job.finalizeErrorHint = '';
       job.updatedAt = updatedAt;
     }
     queuePersistJobs();
   } catch (error) {
     const message = String(error?.message || error || 'Unknown finalize error');
+    const classified = classifyRelayError(message, 'finalize');
     // Finalize is idempotent in practice; treat already-finalized as success.
     if (message.toLowerCase().includes('already finalized')) {
       const updatedAt = Date.now();
       for (const job of slotJobs) {
         job.finalizeStatus = 'submitted';
+        job.finalizeErrorCode = 'already_finalized';
+        job.finalizeErrorHint = 'Slot already finalized; relayer marked as success.';
         job.updatedAt = updatedAt;
       }
       queuePersistJobs();
@@ -542,10 +616,14 @@ async function processNextFinalizeJob() {
           job.finalizeStatus = 'scheduled';
           job.finalizeAfterUnix = Math.floor(Date.now() / 1000) + FINALIZE_RETRY_SECONDS;
           job.finalizeError = message;
+          job.finalizeErrorCode = classified.code;
+          job.finalizeErrorHint = 'Transient finalize error; retry scheduled automatically.';
           job.updatedAt = updatedAt;
         } else {
           job.finalizeStatus = 'failed';
           job.finalizeError = message;
+          job.finalizeErrorCode = classified.code;
+          job.finalizeErrorHint = classified.hint;
           job.updatedAt = updatedAt;
         }
       }
@@ -560,6 +638,7 @@ async function processNextFinalizeJob() {
     }
   } finally {
     finalizeWorkerBusy = false;
+    unlockSlot(next.slotPostId);
   }
 }
 
@@ -570,9 +649,11 @@ async function processNextRefundJob() {
     (j.status === 'submitted' || j.status === 'skipped' || j.status === 'failed') &&
     (j.finalizeStatus === 'submitted' || j.finalizeStatus === 'skipped') &&
     j.refundStatus === 'scheduled' &&
-    j.refundAfterUnix <= now
+    j.refundAfterUnix <= now &&
+    !slotLocks.has(Number(j.slotPostId || 0))
   );
   if (!next) return;
+  if (!lockSlot(next.slotPostId)) return;
 
   refundWorkerBusy = true;
   next.refundStatus = 'running';
@@ -582,10 +663,13 @@ async function processNextRefundJob() {
     const txHash = await executeClaimRefund(next.slotPostId, next.bidder);
     next.refundStatus = 'submitted';
     next.refundTxHash = txHash;
+    next.refundErrorCode = '';
+    next.refundErrorHint = '';
     next.updatedAt = Date.now();
     queuePersistJobs();
   } catch (error) {
     const message = String(error?.message || error || 'Unknown refund error');
+    const classified = classifyRelayError(message, 'refund');
     const normalized = message.toLowerCase();
     // Non-loser/duplicate/no-commit are terminal outcomes for automation.
     if (
@@ -595,6 +679,8 @@ async function processNextRefundJob() {
     ) {
       next.refundStatus = 'skipped';
       next.refundError = message;
+      next.refundErrorCode = classified.code;
+      next.refundErrorHint = classified.hint;
       next.updatedAt = Date.now();
       queuePersistJobs();
     } else {
@@ -604,10 +690,14 @@ async function processNextRefundJob() {
         next.refundStatus = 'scheduled';
         next.refundAfterUnix = Math.floor(Date.now() / 1000) + REFUND_RETRY_SECONDS;
         next.refundError = message;
+        next.refundErrorCode = classified.code;
+        next.refundErrorHint = 'Transient refund error; retry scheduled automatically.';
         next.updatedAt = Date.now();
       } else {
         next.refundStatus = 'failed';
         next.refundError = message;
+        next.refundErrorCode = classified.code;
+        next.refundErrorHint = classified.hint;
         next.updatedAt = Date.now();
         console.error('[sealed-relayer] refund failed (max retries reached)', { id: next.id, error: next.refundError });
       }
@@ -615,6 +705,7 @@ async function processNextRefundJob() {
     }
   } finally {
     refundWorkerBusy = false;
+    unlockSlot(next.slotPostId);
   }
 }
 

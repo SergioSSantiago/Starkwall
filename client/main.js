@@ -1286,6 +1286,16 @@ async function tryAutoFinalizeAuctionSlot(post, source = 'auto') {
       const hasCommits = commits.length > 0
       const hasRevealedCommit = commits.some((c) => Boolean(c?.revealed))
       const hasPendingUnrevealedCommit = commits.some((c) => !c?.revealed && !c?.refunded)
+      zkConsole('finalize:terminal-decision', {
+        slotId,
+        source,
+        hasCommits,
+        hasRevealedCommit,
+        hasPendingUnrevealedCommit,
+        decision: hasCommits && !hasRevealedCommit && hasPendingUnrevealedCommit
+          ? 'delay_for_reveal'
+          : 'proceed_finalize',
+      })
       if (hasCommits && !hasRevealedCommit && hasPendingUnrevealedCommit) {
         zkConsole('finalize:blocked-unrevealed-commits', {
           slotId,
@@ -1681,6 +1691,14 @@ function relayStageLabel(status, kind = 'reveal') {
   return 'N/A'
 }
 
+function relayErrorHint(job, kind = 'reveal') {
+  if (!job || typeof job !== 'object') return ''
+  if (kind === 'reveal') return String(job?.errorHint || '')
+  if (kind === 'finalize') return String(job?.finalizeErrorHint || '')
+  if (kind === 'refund') return String(job?.refundErrorHint || '')
+  return ''
+}
+
 function formatRelayUnix(unix) {
   const ts = Number(unix || 0)
   if (!Number.isFinite(ts) || ts <= 0) return 'n/a'
@@ -1717,17 +1735,24 @@ function summarizeRelayPipelineForSlot(jobs, slotId, bidder) {
   if (chosen?.revealTxHash) lines.push(`<br/>Reveal tx: ${shortTxHash(chosen.revealTxHash)}`)
   if (chosen?.finalizeStatus && chosen.finalizeStatus !== 'scheduled') {
     lines.push(`<br/>Finalize: ${relayStageLabel(chosen.finalizeStatus, 'finalize')}`)
+    const hint = relayErrorHint(chosen, 'finalize')
+    if (hint) lines.push(`<br/>Finalize detail: ${hint}`)
   }
   if (chosen?.finalizeTxHash) lines.push(`<br/>Finalize tx: ${shortTxHash(chosen.finalizeTxHash)}`)
   if (chosen?.refundStatus && chosen.refundStatus !== 'scheduled') {
     lines.push(`<br/>Refund: ${relayStageLabel(chosen.refundStatus, 'refund')}`)
+    const hint = relayErrorHint(chosen, 'refund')
+    if (hint) lines.push(`<br/>Refund detail: ${hint}`)
   }
   if (chosen?.refundTxHash) lines.push(`<br/>Refund tx: ${shortTxHash(chosen.refundTxHash)}`)
   if (chosen?.status === 'scheduled' && Number(chosen?.revealAfterUnix || 0) > 0) {
     const wait = Math.max(0, Number(chosen.revealAfterUnix) - Math.floor(Date.now() / 1000))
     lines.push(`<br/>Proof starts after: ${formatRelayUnix(chosen.revealAfterUnix)} (in ${formatRemaining(wait)})`)
   }
-  if (chosen?.status === 'failed' && chosen?.error) lines.push('<br/>Proof error: check relayer logs')
+  if (chosen?.status === 'failed') {
+    const hint = relayErrorHint(chosen, 'reveal')
+    lines.push(`<br/>Proof status: ${hint || 'Relayer reveal failed; automatic retries may continue.'}`)
+  }
   if (chosen?.status === 'skipped' && String(chosen?.error || '').toLowerCase().includes('winner selected')) {
     lines.push('<br/>Privacy mode: loser reveal suppressed')
   }
@@ -1759,6 +1784,19 @@ function shouldShowVerifyProofButton(job) {
   )
 }
 
+function explainVerifyProofVisibility(job) {
+  if (!job || typeof job !== 'object') return 'no_job'
+  if (job.zkTrace) return 'has_zk_trace'
+  if (job.revealTxHash || job.finalizeTxHash || job.refundTxHash) return 'has_tx_hash'
+  const reveal = String(job.status || '')
+  const finalize = String(job.finalizeStatus || '')
+  const refund = String(job.refundStatus || '')
+  if (['running', 'submitted', 'failed', 'skipped'].includes(reveal)) return `reveal_${reveal}`
+  if (['running', 'submitted', 'failed', 'skipped'].includes(finalize)) return `finalize_${finalize}`
+  if (['running', 'submitted', 'failed', 'skipped'].includes(refund)) return `refund_${refund}`
+  return 'not_pertinent_yet'
+}
+
 async function enrichSealedProofStatus(post, postAuctionInfo, expectedPostId, verifyProofBtn = null) {
   if (!post || !postAuctionInfo || !SEALED_RELAY_URL) return
   try {
@@ -1768,8 +1806,16 @@ async function enrichSealedProofStatus(post, postAuctionInfo, expectedPostId, ve
     const job = getRelayJobForSlot(jobs, Number(post?.id || 0), currentAccount?.address || '')
     const snippet = summarizeRelayPipelineForSlot(jobs, Number(post?.id || 0), currentAccount?.address || '')
     if (verifyProofBtn) {
+      const visible = shouldShowVerifyProofButton(job)
+      const reason = explainVerifyProofVisibility(job)
       verifyProofBtn.textContent = '🧪 Verify Sealed Result'
-      verifyProofBtn.style.display = shouldShowVerifyProofButton(job) ? 'inline-block' : 'none'
+      verifyProofBtn.style.display = visible ? 'inline-block' : 'none'
+      zkConsole('verify-proof-visibility', {
+        slotId: Number(post?.id || 0),
+        jobId: String(job?.id || ''),
+        visible,
+        reason,
+      })
     }
     zkConsole('job:selected', {
       slotId: Number(post?.id || 0),
@@ -3541,8 +3587,13 @@ function setupPostDetailsHandlers() {
       const lines = [
         `Job: ${job.id || 'n/a'}`,
         `Reveal stage: ${relayStageLabel(job.status, 'reveal')}`,
+        `Reveal detail: ${relayErrorHint(job, 'reveal') || 'n/a'}`,
         `Proof scheduled after: ${formatRelayUnix(job?.revealAfterUnix)}`,
         `Finalize scheduled after: ${formatRelayUnix(job?.finalizeAfterUnix)}`,
+        `Finalize stage: ${relayStageLabel(job?.finalizeStatus, 'finalize')}`,
+        `Finalize detail: ${relayErrorHint(job, 'finalize') || 'n/a'}`,
+        `Refund stage: ${relayStageLabel(job?.refundStatus, 'refund')}`,
+        `Refund detail: ${relayErrorHint(job, 'refund') || 'n/a'}`,
         `Proof felts: ${Number(z?.proofFelts || 0) || 'n/a'}`,
         `Calldata hash: ${z?.proofCalldataHash || 'n/a'}`,
         `Witness hash: ${z?.witnessHash || 'n/a'}`,
