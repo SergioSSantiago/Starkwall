@@ -18,7 +18,9 @@ export class PostManager {
       .replace(/^https?:\/\//, '')
       .replace(/[^a-z0-9._-]/g, '_')
     this.cacheKey = `starkwall_posts_cache_v2_${String(NETWORK || 'unknown').toLowerCase()}_${toriiScope || 'default'}`
-    this.postsCacheEnabled = !IS_SEPOLIA
+    // Keep a local safety cache in all environments so temporary Torii outages
+    // never render an empty wall on first load.
+    this.postsCacheEnabled = true
     this.clearLegacyCachesIfNeeded()
   }
 
@@ -57,12 +59,10 @@ export class PostManager {
   clearLegacyCachesIfNeeded() {
     if (typeof localStorage === 'undefined') return
     try {
-      // In Sepolia we prefer source-of-truth data from Torii and avoid stale local walls.
-      if (IS_SEPOLIA) {
-        for (const key of Object.keys(localStorage)) {
-          if (key === 'starkwall_posts_cache_v1' || key.startsWith('starkwall_posts_cache_v2_')) {
-            localStorage.removeItem(key)
-          }
+      // Keep scoped v2 caches for resilience; only remove old legacy key.
+      for (const key of Object.keys(localStorage)) {
+        if (key === 'starkwall_posts_cache_v1') {
+          localStorage.removeItem(key)
         }
       }
     } catch (e) {
@@ -72,6 +72,21 @@ export class PostManager {
 
   async loadPosts() {
     let data = [];
+    const previousPosts = Array.isArray(this.posts) ? this.posts : []
+    // If this is the first load and Torii is flaky, pre-hydrate from cache
+    // to avoid a blank canvas while network retries happen.
+    if (this.useDojo && previousPosts.length === 0) {
+      this.loadPostsFromCache()
+    }
+    const dedupeById = (posts) => {
+      const map = new Map()
+      for (const post of (Array.isArray(posts) ? posts : [])) {
+        const id = Number(post?.id ?? 0)
+        if (!id) continue
+        map.set(id, post)
+      }
+      return [...map.values()]
+    }
 
     if (this.useDojo) {
       // Load posts from Dojo
@@ -143,6 +158,45 @@ export class PostManager {
           sale_price: 0,
         }
       ];
+    }
+
+    if (this.useDojo && Array.isArray(data)) {
+      let expectedCount = 0
+      try {
+        expectedCount = Number(await this.dojoManager.getPostCounter())
+      } catch {
+        expectedCount = 0
+      }
+
+      data = dedupeById(data)
+
+      // If Torii returns an incomplete page, retry before accepting a partial wall.
+      if (expectedCount > 0 && data.length < expectedCount) {
+        console.warn(`Post set appears incomplete (${data.length}/${expectedCount}). Retrying fetch...`)
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 1200 * attempt))
+          const retry = await this.dojoManager.queryAllPosts().catch(() => null)
+          if (Array.isArray(retry) && retry.length > data.length) {
+            data = dedupeById(retry)
+          }
+          if (data.length >= expectedCount) break
+        }
+      }
+
+      // Hard safety net: never shrink an already-loaded wall unless we can fully trust
+      // the new snapshot. In this product, posts are append-only.
+      const previousCount = previousPosts.length
+      const fetchedCount = data.length
+      const suspiciousShrink =
+        previousCount > 0 &&
+        fetchedCount > 0 &&
+        fetchedCount < previousCount &&
+        (expectedCount === 0 || expectedCount >= previousCount || fetchedCount < expectedCount)
+
+      if (suspiciousShrink) {
+        console.warn(`Suspicious wall shrink detected (${previousCount} -> ${fetchedCount}). Preserving previous wall.`)
+        data = previousPosts
+      }
     }
 
     // Prevent temporary Torii/RPC outages from wiping the canvas.

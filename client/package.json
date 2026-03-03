@@ -18,7 +18,7 @@
   "packageManager": "pnpm@10.15.1",
   "dependencies": {
     "@avnu/avnu-sdk": "^4.0.1",
-    "@cartridge/controller": "^0.10.5",
+    "@cartridge/controller": "^0.13.9",
     "@dojoengine/core": "1.7.1",
     "@dojoengine/sdk": "^1.7.2",
     "@dojoengine/torii-client": "1.7.2",
@@ -26,6 +26,7 @@
     "starkzap": "^1.0.0"
   },
   "devDependencies": {
+    "@vitejs/plugin-basic-ssl": "^2.1.4",
     "@vitest/coverage-v8": "^4.0.18",
     "jsdom": "^28.1.0",
     "prettier": "^3.6.2",

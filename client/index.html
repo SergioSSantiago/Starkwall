@@ -91,13 +91,6 @@
             <label for="auctionEndAt">Auction end date/time</label>
             <input type="datetime-local" id="auctionEndAt" />
             <p id="auctionEndPreview" class="photo-hint">Displayed in your local timezone and UTC.</p>
-            <div id="sealedAuctionOptions" style="display: none;">
-              <label for="auctionCommitEndAt">Commit end date/time</label>
-              <input type="datetime-local" id="auctionCommitEndAt" />
-              <label for="auctionRevealEndAt">Reveal end date/time</label>
-              <input type="datetime-local" id="auctionRevealEndAt" />
-              <p class="photo-hint">Sealed mode keeps bids private until reveal phase.</p>
-            </div>
             <p class="photo-hint">Creates a 3x3 auction layout: your center post plus 8 surrounding bid slots.</p>
           </div>
           <label>
@@ -281,6 +274,7 @@
           <button type="button" id="buyPostBtn" style="display: none;">🛒 Buy Post</button>
           <button type="button" id="placeBidBtn" style="display: none;">🏷️ Place Bid</button>
           <button type="button" id="commitBidBtn" style="display: none;">🔐 Commit Bid</button>
+          <button type="button" id="verifyProofBtn" style="display: none;">🧪 Verify Sealed Result</button>
           <button type="button" id="revealBidBtn" style="display: none;">🧾 Reveal Bid</button>
           <button type="button" id="claimCommitRefundBtn" style="display: none;">💸 Claim Refund</button>
           <button type="button" id="initializeSlotContentBtn" style="display: none;">🖼️ Publish Won Slot</button>

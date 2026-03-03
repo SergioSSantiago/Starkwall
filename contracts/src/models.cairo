@@ -58,6 +58,14 @@ pub struct AuctionSlot {
 
 #[derive(Copy, Drop, Serde)]
 #[dojo::model]
+pub struct AuctionSlotPricing {
+    #[key]
+    pub slot_post_id: u64,
+    pub second_highest_bid: u128,
+}
+
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
 pub struct AuctionCommit {
     #[key]
     pub slot_post_id: u64,

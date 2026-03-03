@@ -60,8 +60,9 @@ export const FAUCET_URL = String(import.meta.env?.VITE_FAUCET_URL || 'http://127
 export const WBTC_FAUCET_URL = String(import.meta.env?.VITE_WBTC_FAUCET_URL || import.meta.env?.VITE_TBTC1_FAUCET_URL || '')
 export const SEALED_BID_VERIFIER_ADDRESS = String(
   import.meta.env?.VITE_SEALED_BID_VERIFIER_ADDRESS ||
-    (IS_SEPOLIA ? '0x06dae023111f3003f8a755e72f99d109bb32f4ccec194f272c3fb8ae5273f86a' : ''),
+    (IS_SEPOLIA ? '0x03a3af693e4aa3dab8c38ea47b2757443837d5d5fcb6f23263cad63964611624' : ''),
 )
+export const SEALED_RELAY_URL = String(import.meta.env?.VITE_SEALED_RELAY_URL || '')
 
 // Yield strategy adapter config (optional runtime metadata used by UI/ops scripts).
 export const YIELD_STRATEGY_KIND = Number(import.meta.env?.VITE_YIELD_STRATEGY_KIND || 0)

@@ -309,9 +309,11 @@ export class InfiniteCanvas {
       this.ctx.fillStyle = '#1a1a1a'
       this.ctx.fillRect(screen.x, screen.y, screenWidth, screenHeight)
   
-      // Draw border (blue for active auction slots, green if for sale, gold if paid, default gray)
+      const sealedCfg = post.auction_sealed_config || null
+      const isSealedAuctionSlot = showAuctionPlaceholder && Boolean(sealedCfg?.sealed_mode)
+      // Draw border (purple for active sealed slots, blue for active public slots, green if for sale, gold if paid, default gray)
       if (showAuctionPlaceholder) {
-        this.ctx.strokeStyle = '#38b6ff'
+        this.ctx.strokeStyle = isSealedAuctionSlot ? '#b388ff' : '#38b6ff'
       } else if (post.sale_price > 0) {
         this.ctx.strokeStyle = '#4CAF50' // Green for sale
       } else if (post.is_paid) {
@@ -440,21 +442,27 @@ export class InfiniteCanvas {
         this.ctx.fillRect(screen.x + 10, screen.y + 10, screenWidth - 20, screenHeight - 20)
 
         if (showAuctionPlaceholder) {
-          const highest = Number(post.auction_slot?.highest_bid || 0)
           const endTs = Number(post.auction_group?.end_time || 0)
           const now = Math.floor(Date.now() / 1000)
           const remaining = Math.max(0, endTs - now)
           const h = Math.floor(remaining / 3600)
           const m = Math.floor((remaining % 3600) / 60)
+          const label = isSealedAuctionSlot ? 'SEALED SLOT' : 'PUBLIC SLOT'
+          const slotColor = isSealedAuctionSlot ? '#d7c2ff' : '#9ecbff'
 
           if (this.camera.zoom > 0.18) {
-            this.ctx.fillStyle = '#9ecbff'
+            this.ctx.fillStyle = slotColor
             this.ctx.textAlign = 'center'
             this.ctx.font = `bold ${16 * this.camera.zoom}px sans-serif`
-            this.ctx.fillText('AUCTION SLOT', screen.x + screenWidth / 2, screen.y + 70 * this.camera.zoom)
+            this.ctx.fillText(label, screen.x + screenWidth / 2, screen.y + 70 * this.camera.zoom)
 
             this.ctx.font = `${13 * this.camera.zoom}px sans-serif`
-            this.ctx.fillText(`Highest: ${highest} STRK`, screen.x + screenWidth / 2, screen.y + 105 * this.camera.zoom)
+            if (isSealedAuctionSlot) {
+              this.ctx.fillText('Bids hidden until reveal', screen.x + screenWidth / 2, screen.y + 105 * this.camera.zoom)
+            } else {
+              const highest = Number(post.auction_slot?.highest_bid || 0)
+              this.ctx.fillText(`Highest: ${highest} STRK`, screen.x + screenWidth / 2, screen.y + 105 * this.camera.zoom)
+            }
             this.ctx.fillText(`Ends in: ${h}h ${m}m`, screen.x + screenWidth / 2, screen.y + 128 * this.camera.zoom)
             this.ctx.textAlign = 'left'
           }

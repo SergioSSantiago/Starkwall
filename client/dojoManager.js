@@ -2,7 +2,16 @@ import { stringToByteArray } from './utils.js';
 import { ToriiQueryBuilder, KeysClause } from "@dojoengine/sdk";
 import { IS_SEPOLIA, PAYMENT_TOKEN_ADDRESS, RPC_URL, SEPOLIA_SWAP_WBTC_TOKEN, SEPOLIA_WBTC_TOKEN, TORII_URL } from './config.js';
 import { RpcProvider, hash } from 'starknet';
-import { getQuotes, executeSwap, SEPOLIA_BASE_URL } from '@avnu/avnu-sdk';
+import {
+  getQuotes,
+  executeSwap,
+  executeStake,
+  executeInitiateUnstake,
+  executeUnstake,
+  getAvnuStakingInfo,
+  getUserStakingInfo,
+  SEPOLIA_BASE_URL,
+} from '@avnu/avnu-sdk';
 
 const ONE_STRK = 10n ** 18n;
 const DEFAULT_TOKEN_DECIMALS = 18;
@@ -63,6 +72,13 @@ function parseAmountToUnits(amountValue, tokenDecimals = DEFAULT_TOKEN_DECIMALS)
   return (whole * (10n ** BigInt(decimals))) + frac;
 }
 
+function isNoSwapRouteError(error) {
+  const message = String(error?.message || error || '').toLowerCase()
+  return message.includes('no swap route')
+    || message.includes('no route available')
+    || message.includes('insufficient liquidity')
+}
+
 function poolIdFromMode(useBtcMode) {
   return useBtcMode ? 1 : 0
 }
@@ -93,6 +109,60 @@ export class DojoManager {
     this.actionsContract = manifest.contracts.find((c) => c.tag === 'di-actions');
     this.balanceProvider = new RpcProvider({ nodeUrl: RPC_URL });
     this.tokenDecimalsCache = new Map();
+    this.avnuStakingInfoCache = null;
+    this.avnuStakingInfoCacheAt = 0;
+    this.avnuUserStakingCache = new Map();
+    this.lastAvnuRouteProbeErrors = [];
+  }
+
+  async getAvnuStakingInfoCached(forceRefresh = false) {
+    const now = Date.now()
+    const cacheTtlMs = 45_000
+    if (!forceRefresh && this.avnuStakingInfoCache && (now - this.avnuStakingInfoCacheAt) < cacheTtlMs) {
+      return this.avnuStakingInfoCache
+    }
+    const info = await getAvnuStakingInfo(AVNU_OPTIONS)
+    this.avnuStakingInfoCache = info
+    this.avnuStakingInfoCacheAt = now
+    return info
+  }
+
+  async getAvnuUserStakingByToken(tokenAddress, userAddress, forceRefresh = false) {
+    const token = this.normalizeAddress(tokenAddress)
+    const user = this.normalizeAddress(userAddress || this.account?.address)
+    if (!token || !user || token === '0x0' || user === '0x0') return null
+
+    const cacheKey = `${token}:${user}`
+    const now = Date.now()
+    const cacheTtlMs = 30_000
+    const cached = this.avnuUserStakingCache.get(cacheKey)
+    if (!forceRefresh && cached && (now - cached.at) < cacheTtlMs) {
+      return cached.value
+    }
+
+    try {
+      const info = await getUserStakingInfo(token, user, AVNU_OPTIONS)
+      const amountRaw = BigInt(info?.amount || 0n)
+      const rewardsRaw = BigInt(info?.unclaimedRewards || 0n)
+      const unpoolRaw = BigInt(info?.unpoolAmount || 0n)
+      const decimals = await this.getTokenDecimals(token).catch(() => DEFAULT_TOKEN_DECIMALS)
+      const value = {
+        tokenAddress: token,
+        poolAddress: this.normalizeAddress(info?.poolAddress),
+        amountRaw,
+        rewardsRaw,
+        unpoolRaw,
+        unpoolTime: info?.unpoolTime ? new Date(info.unpoolTime) : null,
+        amountFormatted: unitsToTokenNumber(amountRaw, decimals, 6),
+        rewardsFormatted: unitsToTokenNumber(rewardsRaw, decimals, 6),
+        unpoolFormatted: unitsToTokenNumber(unpoolRaw, decimals, 6),
+      }
+      this.avnuUserStakingCache.set(cacheKey, { at: now, value })
+      return value
+    } catch {
+      this.avnuUserStakingCache.set(cacheKey, { at: now, value: null })
+      return null
+    }
   }
 
   async getTokenDecimals(tokenAddress = PAYMENT_TOKEN_ADDRESS) {
@@ -173,14 +243,14 @@ export class DojoManager {
     return 0n
   }
 
-  async getTokenBalance(address, tokenAddress = PAYMENT_TOKEN_ADDRESS) {
+  async getTokenBalance(address, tokenAddress = PAYMENT_TOKEN_ADDRESS, displayDecimals = 6) {
     const tokenAddr = String(tokenAddress || '')
     if (!tokenAddr) return 0
     const [units, tokenDecimals] = await Promise.all([
       this.getTokenBalanceRaw(address, tokenAddr),
       this.getTokenDecimals(tokenAddr),
     ])
-    return unitsToTokenNumber(units, tokenDecimals, 6)
+    return unitsToTokenNumber(units, tokenDecimals, displayDecimals)
   }
 
   async getActivePoolTokenDecimals() {
@@ -773,16 +843,23 @@ export class DojoManager {
         size: 1,
       }, AVNU_OPTIONS);
     } catch (error) {
-      const message = String(error?.message || error || '');
+      const rawMessage = String(
+        error?.response?.data?.message ||
+        error?.response?.data?.error ||
+        error?.message ||
+        error ||
+        ''
+      ).trim();
+      const message = rawMessage || 'Unknown AVNU quote error';
       if (/cors|network|failed to fetch|cross-origin/i.test(message)) {
-        throw new Error('Swap quote service unavailable (CORS/network). Retry in a few seconds.');
+        throw new Error(`AVNU raw: ${message}`);
       }
-      throw new Error(message || 'Could not fetch quote right now.');
+      throw new Error(`AVNU raw: ${message}`);
     }
 
     const quote = Array.isArray(quotes) && quotes.length > 0 ? quotes[0] : null;
     if (!quote) {
-      throw new Error('No swap route available on Sepolia for this pair/amount right now.');
+      throw new Error('AVNU raw: empty quotes response');
     }
 
     const buyAmountRaw = BigInt(quote.buyAmount || 0);
@@ -798,6 +875,221 @@ export class DojoManager {
       priceImpactBps: Number(quote.priceImpact || 0),
       estimatedSlippage: Number(quote.estimatedSlippage || 0),
     };
+  }
+
+  async planWbtcStakeRoute(amountWbtc, candidatePools = [], opts = {}) {
+    const amount = Number(amountWbtc || 0)
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error('Invalid WBTC stake amount')
+    const maxSellAmount = Number(opts?.maxSellAmount || 0)
+    const capSell = Number.isFinite(maxSellAmount) && maxSellAmount > 0 ? maxSellAmount : amount
+
+    const candidates = (Array.isArray(candidatePools) ? candidatePools : [])
+      .map((p) => ({
+        poolAddress: this.normalizeAddress(p?.poolAddress),
+        tokenAddress: this.normalizeAddress(p?.tokenAddress),
+      }))
+      .filter((p) => p.poolAddress && p.tokenAddress)
+    if (candidates.length === 0) throw new Error('No AVNU staking pools available')
+
+    const fromToken = this.normalizeAddress(SEPOLIA_SWAP_WBTC_TOKEN)
+    const strkToken = this.normalizeAddress(PAYMENT_TOKEN_ADDRESS)
+    // WBTC flow must never target STRK staking pools.
+    const filteredCandidates = candidates.filter((c) => c.tokenAddress !== strkToken)
+    if (filteredCandidates.length === 0) {
+      this.lastAvnuRouteProbeErrors = ['AVNU staking info exposes STRK pool only on current network']
+      return null
+    }
+    const multipliers = [1, 1.25, 1.5, 2, 3, 5, 8, 10]
+    const plans = []
+    const rawErrors = []
+
+    for (const candidate of filteredCandidates) {
+      for (const mult of multipliers) {
+        const sellAmount = Number(Math.min(capSell, amount * mult).toFixed(8))
+        if (!Number.isFinite(sellAmount) || sellAmount <= 0) continue
+        if (candidate.tokenAddress === fromToken) {
+          plans.push({ kind: 'none', ...candidate, sellAmount, estimatedTargetAmount: sellAmount })
+          continue
+        }
+        try {
+          const direct = await this.getTokenSwapQuote(fromToken, candidate.tokenAddress, sellAmount)
+          const out = Number(direct?.estimatedBuyAmount || 0)
+          if (out > 0) plans.push({ kind: 'direct', ...candidate, sellAmount, estimatedTargetAmount: out })
+        } catch (error) {
+          rawErrors.push(String(error?.message || error || 'Unknown AVNU error'))
+          if (!isNoSwapRouteError(error)) continue
+        }
+        try {
+          const hop1 = await this.getTokenSwapQuote(fromToken, strkToken, sellAmount)
+          const estimatedStrkAmount = Number(hop1?.estimatedBuyAmount || 0)
+          if (!Number.isFinite(estimatedStrkAmount) || estimatedStrkAmount <= 0) continue
+          const hop2 = await this.getTokenSwapQuote(strkToken, candidate.tokenAddress, estimatedStrkAmount)
+          const estimatedTargetAmount = Number(hop2?.estimatedBuyAmount || 0)
+          if (estimatedTargetAmount > 0) {
+            plans.push({
+              kind: 'via-strk',
+              ...candidate,
+              sellAmount,
+              estimatedStrkAmount,
+              estimatedTargetAmount,
+            })
+          }
+        } catch (error) {
+          rawErrors.push(String(error?.message || error || 'Unknown AVNU error'))
+          continue
+        }
+      }
+    }
+
+    this.lastAvnuRouteProbeErrors = rawErrors.slice(0, 10)
+    if (plans.length === 0) return null
+    plans.sort((a, b) => b.estimatedTargetAmount - a.estimatedTargetAmount)
+    return plans[0]
+  }
+
+  async stakeWbtcViaAvnu(amountWbtc) {
+    if (!IS_SEPOLIA) throw new Error('WBTC staking via AVNU is enabled on Sepolia only.')
+    const amount = Number(amountWbtc || 0)
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error('Invalid WBTC stake amount')
+
+    const info = await this.getAvnuStakingInfoCached()
+    const pools = Array.isArray(info?.delegationPools) ? info.delegationPools : []
+    const availableSwapBalance = Number(
+      await this.getTokenBalance(this.account.address, SEPOLIA_SWAP_WBTC_TOKEN).catch(() => 0),
+    )
+    if (!Number.isFinite(availableSwapBalance) || availableSwapBalance <= 0) {
+      throw new Error('No WBTC swap balance available for staking bridge.')
+    }
+    if (amount > availableSwapBalance + 1e-12) {
+      throw new Error(
+        `Insufficient WBTC balance for stake amount. Requested ${amount.toFixed(8)} WBTC, ` +
+        `available ${availableSwapBalance.toFixed(8)} WBTC.`,
+      )
+    }
+    const route = await this.planWbtcStakeRoute(amount, pools, { maxSellAmount: availableSwapBalance })
+    if (!route) {
+      const raw = Array.isArray(this.lastAvnuRouteProbeErrors) && this.lastAvnuRouteProbeErrors.length > 0
+        ? this.lastAvnuRouteProbeErrors.slice(0, 3).join(' | ')
+        : 'AVNU returned no executable quote'
+      throw new Error(
+        `AVNU raw: ${raw}. Diagnostics: no viable WBTC staking route for ${amount.toFixed(8)} WBTC on current network.`,
+      )
+    }
+
+    const fromToken = this.normalizeAddress(SEPOLIA_SWAP_WBTC_TOKEN)
+    const strkToken = this.normalizeAddress(PAYMENT_TOKEN_ADDRESS)
+    const targetToken = this.normalizeAddress(route.tokenAddress)
+    if (targetToken === strkToken) {
+      throw new Error('Invalid WBTC staking target: resolved STRK pool. Please retry later.')
+    }
+    const targetBeforeRaw = await this.getTokenBalanceRaw(this.account.address, targetToken).catch(() => 0n)
+    let swappedTxHash = ''
+
+    if (route.kind === 'none') {
+      // Pool token already matches the wallet WBTC swap token.
+    } else if (route.kind === 'direct') {
+      const swapTx = await this.swapTokens(fromToken, targetToken, route.sellAmount, 1)
+      swappedTxHash = String(swapTx?.transaction_hash || '')
+    } else {
+      const strkBeforeRaw = await this.getTokenBalanceRaw(this.account.address, strkToken).catch(() => 0n)
+      const hop1 = await this.swapTokens(fromToken, strkToken, route.sellAmount, 1)
+      swappedTxHash = String(hop1?.transaction_hash || '')
+      const strkAfterRaw = await this.getTokenBalanceRaw(this.account.address, strkToken).catch(() => 0n)
+      const bridgedStrkRaw = BigInt(strkAfterRaw || 0n) - BigInt(strkBeforeRaw || 0n)
+      if (bridgedStrkRaw <= 0n) throw new Error('WBTC -> STRK bridge produced no spendable STRK.')
+      const strkDecimals = await this.getTokenDecimals(strkToken).catch(() => 18)
+      const bridgedStrkAmount = unitsToTokenNumber(bridgedStrkRaw, strkDecimals, 10)
+      await this.swapTokens(strkToken, targetToken, bridgedStrkAmount, 1)
+    }
+
+    const targetAfterRaw = await this.getTokenBalanceRaw(this.account.address, targetToken).catch(() => 0n)
+    let stakeRaw = 0n
+    if (route.kind === 'none') {
+      const targetDecimals = await this.getTokenDecimals(targetToken).catch(() => WBTC_TOKEN_DECIMALS)
+      stakeRaw = parseAmountToUnits(amount, targetDecimals)
+      if (stakeRaw <= 0n) throw new Error('Invalid stake amount after token conversion.')
+      if (targetAfterRaw < stakeRaw) throw new Error('Insufficient staking token balance for requested WBTC amount.')
+    } else {
+      stakeRaw = BigInt(targetAfterRaw || 0n) - BigInt(targetBeforeRaw || 0n)
+      if (stakeRaw <= 0n) throw new Error('No staking pool token received after AVNU conversion.')
+    }
+
+    const stakeResult = await executeStake({
+      provider: this.account,
+      poolAddress: route.poolAddress,
+      amount: stakeRaw,
+    }, AVNU_OPTIONS)
+    const stakingTxHash = String(stakeResult?.transactionHash || stakeResult?.transaction_hash || '').trim()
+    if (!stakingTxHash) throw new Error('AVNU stake submitted but transaction hash was not returned')
+    const receipt = await this.account.waitForTransaction(stakingTxHash)
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'AVNU stake reverted'
+      throw new Error(reason)
+    }
+
+    return {
+      transaction_hash: stakingTxHash,
+      poolAddress: route.poolAddress,
+      tokenAddress: route.tokenAddress,
+      routeKind: route.kind,
+      bridgeSellAmount: route.sellAmount,
+      bridgeTxHash: swappedTxHash,
+    }
+  }
+
+  async unstakeStrkViaAvnu() {
+    if (!IS_SEPOLIA) throw new Error('AVNU STRK unstake is enabled on Sepolia only.')
+    const strkToken = this.normalizeAddress(PAYMENT_TOKEN_ADDRESS)
+    const userAddr = this.normalizeAddress(this.account?.address)
+    if (!strkToken || !userAddr || strkToken === '0x0' || userAddr === '0x0') {
+      throw new Error('Invalid wallet/token context for AVNU unstake.')
+    }
+
+    const info = await this.getAvnuUserStakingByToken(strkToken, userAddr, true)
+    const poolAddress = this.normalizeAddress(info?.poolAddress)
+    if (!poolAddress || poolAddress === '0x0') throw new Error('No active STRK staking pool found for this wallet.')
+
+    const amountRaw = BigInt(info?.amountRaw || 0n)
+    const unpoolRaw = BigInt(info?.unpoolRaw || 0n)
+    const baseInfo = await getUserStakingInfo(strkToken, userAddr, AVNU_OPTIONS).catch(() => null)
+    const unpoolTimeMs = baseInfo?.unpoolTime ? new Date(baseInfo.unpoolTime).getTime() : 0
+    const nowMs = Date.now()
+
+    if (amountRaw > 0n) {
+      const tx = await executeInitiateUnstake({
+        provider: this.account,
+        poolAddress,
+        amount: amountRaw,
+      }, AVNU_OPTIONS)
+      const txHash = String(tx?.transactionHash || tx?.transaction_hash || '').trim()
+      if (!txHash) throw new Error('AVNU unstake intent submitted but tx hash was not returned')
+      const receipt = await this.account.waitForTransaction(txHash)
+      if (!isTxReceiptSuccessful(receipt)) {
+        const reason = receipt?.revert_reason || receipt?.revertReason || 'AVNU unstake intent reverted'
+        throw new Error(reason)
+      }
+      return { action: 'intent', txHash, poolAddress, amountRaw, unpoolTimeMs }
+    }
+
+    if (unpoolRaw > 0n) {
+      if (unpoolTimeMs > nowMs) {
+        return { action: 'pending', txHash: '', poolAddress, amountRaw: unpoolRaw, unpoolTimeMs }
+      }
+      const tx = await executeUnstake({
+        provider: this.account,
+        poolAddress,
+      }, AVNU_OPTIONS)
+      const txHash = String(tx?.transactionHash || tx?.transaction_hash || '').trim()
+      if (!txHash) throw new Error('AVNU unstake exit submitted but tx hash was not returned')
+      const receipt = await this.account.waitForTransaction(txHash)
+      if (!isTxReceiptSuccessful(receipt)) {
+        const reason = receipt?.revert_reason || receipt?.revertReason || 'AVNU unstake exit reverted'
+        throw new Error(reason)
+      }
+      return { action: 'exit', txHash, poolAddress, amountRaw: unpoolRaw, unpoolTimeMs }
+    }
+
+    throw new Error('No staked or unpooling STRK position found in AVNU.')
   }
 
   /**
@@ -1031,6 +1323,19 @@ export class DojoManager {
 
     const amountStrk = Number(bidAmountStrk);
     if (!Number.isFinite(amountStrk) || amountStrk <= 0) throw new Error('Invalid bid amount');
+    const slotId = Number(slotPostId);
+    if (!Number.isFinite(slotId) || slotId <= 0) throw new Error('Invalid slot');
+
+    // Client-side guard so creators cannot bid even before contract upgrades are deployed.
+    const posts = await this.queryAllPosts().catch(() => []);
+    const safePosts = Array.isArray(posts) ? posts.filter(Boolean) : [];
+    const slotPost = safePosts.find((p) => Number(p?.id ?? 0) === slotId);
+    const caller = this.normalizeAddress(this.account?.address || '');
+    const creator = this.normalizeAddress(slotPost?.auction_group?.creator || '');
+    const owner = this.normalizeAddress(slotPost?.current_owner || '');
+    if ((creator && caller === creator) || (owner && caller === owner)) {
+      throw new Error('Creator cannot bid in own auction');
+    }
 
     const amountWei = BigInt(Math.floor(amountStrk)) * ONE_STRK;
     const { low, high } = feltToU256(amountWei);
@@ -1044,7 +1349,7 @@ export class DojoManager {
       {
         contractAddress: this.actionsContract.address,
         entrypoint: 'place_bid',
-        calldata: [slotPostId, Math.floor(amountStrk)],
+        calldata: [slotId, Math.floor(amountStrk)],
       },
     ];
 
@@ -1059,21 +1364,30 @@ export class DojoManager {
     return tx;
   }
 
-  async commitAuctionBid(slotPostId, bidAmountStrk, saltFelt) {
+  async commitAuctionBid(slotPostId, bidAmountStrk, saltFelt, escrowAmountStrk = bidAmountStrk) {
     const amount = Number(bidAmountStrk)
     if (!Number.isFinite(amount) || amount <= 0) throw new Error('Invalid bid amount')
+    const escrowAmount = Number(escrowAmountStrk)
+    if (!Number.isFinite(escrowAmount) || escrowAmount <= 0) throw new Error('Invalid escrow amount')
+    if (escrowAmount < amount) throw new Error('Escrow must cover sealed bid amount')
     const slotId = Number(slotPostId)
     if (!Number.isFinite(slotId) || slotId <= 0) throw new Error('Invalid slot')
     const posts = await this.queryAllPosts().catch(() => [])
     const safePosts = Array.isArray(posts) ? posts.filter(Boolean) : []
     const slotPost = safePosts.find((p) => Number(p?.id ?? 0) === slotId)
+    const caller = this.normalizeAddress(this.account?.address || '')
+    const creator = this.normalizeAddress(slotPost?.auction_group?.creator || '')
+    const owner = this.normalizeAddress(slotPost?.current_owner || '')
+    if ((creator && caller === creator) || (owner && caller === owner)) {
+      throw new Error('Creator cannot bid in own auction')
+    }
     const groupId = Number(slotPost?.auction_group_id || slotPost?.auction_slot?.group_id || 0)
     if (!groupId) {
       throw new Error('Cannot resolve auction group for slot (indexer not ready yet). Reopen slot and retry in a few seconds.')
     }
     const commitment = simpleCommitment(slotId, groupId, this.account.address, Math.floor(amount), saltFelt)
 
-    const amountWei = BigInt(Math.floor(amount)) * ONE_STRK
+    const amountWei = BigInt(Math.floor(escrowAmount)) * ONE_STRK
     const { low, high } = feltToU256(amountWei)
     const tx = await this.account.execute([
       {
@@ -1084,7 +1398,7 @@ export class DojoManager {
       {
         contractAddress: this.actionsContract.address,
         entrypoint: 'commit_bid',
-        calldata: [slotId, commitment, Math.floor(amount)],
+        calldata: [slotId, commitment, Math.floor(escrowAmount)],
       },
     ])
     const receipt = await this.account.waitForTransaction(tx.transaction_hash)
@@ -1092,18 +1406,31 @@ export class DojoManager {
       const reason = receipt?.revert_reason || receipt?.revertReason || 'Commit bid transaction reverted'
       throw new Error(reason)
     }
-    return { tx, commitment }
+    return {
+      tx,
+      commitment,
+      slotId,
+      groupId,
+      bidAmount: Math.floor(amount),
+      escrowAmount: Math.floor(escrowAmount),
+    }
   }
 
-  async revealAuctionBidWithProof(slotPostId, bidAmountStrk, saltFelt, proofBlobHash = '0x1') {
+  async revealAuctionBidWithProof(slotPostId, bidderAddress, bidAmountStrk, saltFelt, fullProofWithHints = ['0x1']) {
     const amount = Number(bidAmountStrk)
     if (!Number.isFinite(amount) || amount <= 0) throw new Error('Invalid bid amount')
     const slotId = Number(slotPostId)
     if (!Number.isFinite(slotId) || slotId <= 0) throw new Error('Invalid slot')
+    const bidder = String(bidderAddress || '').trim()
+    if (!bidder || !bidder.startsWith('0x')) throw new Error('Invalid bidder address')
+    const proof = Array.isArray(fullProofWithHints)
+      ? fullProofWithHints.map((v) => String(v))
+      : [String(fullProofWithHints || '0x1')]
+    if (!proof.length) throw new Error('Missing proof calldata')
     const tx = await this.account.execute({
       contractAddress: this.actionsContract.address,
       entrypoint: 'reveal_bid',
-      calldata: [slotId, Math.floor(amount), String(saltFelt), String(proofBlobHash || '0x1')],
+      calldata: [slotId, bidder, Math.floor(amount), String(saltFelt), proof.length, ...proof],
     })
     const receipt = await this.account.waitForTransaction(tx.transaction_hash)
     if (!isTxReceiptSuccessful(receipt)) {
@@ -1116,17 +1443,119 @@ export class DojoManager {
   async claimAuctionCommitRefund(slotPostId) {
     const slotId = Number(slotPostId)
     if (!Number.isFinite(slotId) || slotId <= 0) throw new Error('Invalid slot')
-    const tx = await this.account.execute({
-      contractAddress: this.actionsContract.address,
-      entrypoint: 'claim_commit_refund',
-      calldata: [slotId],
-    })
-    const receipt = await this.account.waitForTransaction(tx.transaction_hash)
-    if (!isTxReceiptSuccessful(receipt)) {
-      const reason = receipt?.revert_reason || receipt?.revertReason || 'Claim refund transaction reverted'
-      throw new Error(reason)
+    const bidder = String(this.account?.address || '').trim()
+    if (!bidder || !bidder.startsWith('0x')) throw new Error('Invalid bidder account')
+    try {
+      // Preferred ABI (new): explicit bidder allows third-party automation.
+      const tx = await this.account.execute({
+        contractAddress: this.actionsContract.address,
+        entrypoint: 'claim_commit_refund',
+        calldata: [slotId, bidder],
+      })
+      const receipt = await this.account.waitForTransaction(tx.transaction_hash)
+      if (!isTxReceiptSuccessful(receipt)) {
+        const reason = receipt?.revert_reason || receipt?.revertReason || 'Claim refund transaction reverted'
+        throw new Error(reason)
+      }
+      return tx
+    } catch (error) {
+      const message = String(error?.message || '')
+      // Backward compatibility with already-deployed ABI using single slot_post_id param.
+      const maybeArgMismatch = message.toLowerCase().includes('input') || message.toLowerCase().includes('calldata')
+      if (!maybeArgMismatch) throw error
+      const tx = await this.account.execute({
+        contractAddress: this.actionsContract.address,
+        entrypoint: 'claim_commit_refund',
+        calldata: [slotId],
+      })
+      const receipt = await this.account.waitForTransaction(tx.transaction_hash)
+      if (!isTxReceiptSuccessful(receipt)) {
+        const reason = receipt?.revert_reason || receipt?.revertReason || 'Claim refund transaction reverted'
+        throw new Error(reason)
+      }
+      return tx
     }
-    return tx
+  }
+
+  async checkSealedVerifierCompatibility(verifierAddress) {
+    const contractAddress = this.normalizeAddress(verifierAddress)
+    if (!contractAddress) {
+      return { ok: false, reason: 'Missing verifier address' }
+    }
+
+    // Probe #1: basic ABI shape check.
+    // verify_sealed_bid(slot_post_id, group_id, bidder, bid_amount, salt, commitment, full_proof_with_hints)
+    // We intentionally send a wrong commitment so compatible contracts can return false early.
+    const bidder = this.normalizeAddress(this.account?.address || '0x1')
+    const basicCalldata = [1, 1, bidder, 1, '0x1', '0x0', 0]
+
+    try {
+      let result
+      try {
+        result = await this.balanceProvider.callContract({
+          contractAddress,
+          entrypoint: 'verify_sealed_bid',
+          calldata: basicCalldata,
+        }, 'latest')
+      } catch {
+        result = await this.balanceProvider.callContract({
+          contractAddress,
+          entrypoint: 'verify_sealed_bid',
+          calldata: basicCalldata,
+        })
+      }
+      const parts = Array.isArray(result) ? result : (result?.result || [])
+      const normalized = String(parts?.[0] ?? '0')
+
+      // Probe #2: stress proof span length enough to catch known incompatible verifier ABI.
+      // Older verifier contracts revert with "Input too long for arguments" here.
+      const slotPostId = '0x1'
+      const groupId = '0x1'
+      const bidAmount = '0x1'
+      const salt = '0x1'
+      const commitment = hash.computePoseidonHashOnElements([slotPostId, groupId, bidder, bidAmount, salt])
+      const proofLen = 64
+      const dummyProof = Array(proofLen).fill('0x0')
+      const stressCalldata = [
+        slotPostId,
+        groupId,
+        bidder,
+        bidAmount,
+        salt,
+        commitment,
+        `0x${proofLen.toString(16)}`,
+        ...dummyProof,
+      ]
+      try {
+        await this.balanceProvider.callContract({
+          contractAddress,
+          entrypoint: 'verify_sealed_bid',
+          calldata: stressCalldata,
+        }, 'latest')
+      } catch (stressError) {
+        const stressMessage = String(stressError?.message || stressError || '')
+        if (stressMessage.toLowerCase().includes('input too long for arguments')) {
+          return {
+            ok: false,
+            reason: 'Incompatible verifier contract for current sealed proof format.',
+            error: stressMessage,
+          }
+        }
+      }
+
+      return { ok: true, result: normalized }
+    } catch (error) {
+      const message = String(error?.message || error || '')
+      const lower = message.toLowerCase()
+      if (lower.includes('entrypoint') || lower.includes('input too long for arguments')) {
+        return {
+          ok: false,
+          reason: 'Incompatible verifier contract. This address does not match current sealed proof ABI.',
+          error: message,
+        }
+      }
+      return { ok: false, reason: 'Verifier probe failed', error: message }
+    }
   }
 
   async finalizeAuctionSlot(slotPostId) {
@@ -1180,9 +1609,31 @@ export class DojoManager {
         ]);
       };
 
-      const postQuery = new ToriiQueryBuilder()
-        .withClause(KeysClause(['di-Post'], [], 'VariableLen').build());
-      const entities = await getWithTimeout(postQuery, 'Post query');
+      // Torii responses are paginated; without cursor paging, older posts vanish from UI
+      // once total entities exceed the default page size.
+      const getAllEntities = async (buildQuery, label, pageLimit = 200, maxPages = 100) => {
+        const items = [];
+        let cursor = null;
+
+        for (let page = 0; page < maxPages; page++) {
+          let query = buildQuery().withLimit(pageLimit);
+          if (cursor) query = query.withCursor(String(cursor));
+          const resp = await getWithTimeout(query, `${label} page ${page + 1}`);
+          const pageItems = Array.isArray(resp?.items) ? resp.items : [];
+          items.push(...pageItems);
+
+          const nextCursor = resp?.nextCursor ?? resp?.next_cursor ?? null;
+          if (!nextCursor || nextCursor === cursor || pageItems.length === 0) break;
+          cursor = nextCursor;
+        }
+
+        return { items };
+      };
+
+      const entities = await getAllEntities(
+        () => new ToriiQueryBuilder().withClause(KeysClause(['di-Post'], [], 'VariableLen').build()),
+        'Post query',
+      );
       
       if (!entities || !entities.items || entities.items.length === 0) {
         console.log('⚠️ No Post entities found');
@@ -1190,26 +1641,29 @@ export class DojoManager {
       }
 
       // Query auction models too; they are not guaranteed to be included in Post envelopes.
-      const slotQuery = new ToriiQueryBuilder()
-        .withClause(KeysClause(['di-AuctionSlot'], [], 'VariableLen').build());
-      const groupQuery = new ToriiQueryBuilder()
-        .withClause(KeysClause(['di-AuctionGroup'], [], 'VariableLen').build());
-      const sealedCfgQuery = new ToriiQueryBuilder()
-        .withClause(KeysClause(['di-AuctionSealedConfig'], [], 'VariableLen').build());
-      const commitQuery = new ToriiQueryBuilder()
-        .withClause(KeysClause(['di-AuctionCommit'], [], 'VariableLen').build());
-
       const [slotEntities, groupEntities, sealedCfgEntities, commitEntities] = await Promise.all([
-        getWithTimeout(slotQuery, 'AuctionSlot query').catch((e) => {
+        getAllEntities(
+          () => new ToriiQueryBuilder().withClause(KeysClause(['di-AuctionSlot'], [], 'VariableLen').build()),
+          'AuctionSlot query',
+        ).catch((e) => {
           console.warn('⚠️ AuctionSlot query failed:', e?.message || e);
           return { items: [] };
         }),
-        getWithTimeout(groupQuery, 'AuctionGroup query').catch((e) => {
+        getAllEntities(
+          () => new ToriiQueryBuilder().withClause(KeysClause(['di-AuctionGroup'], [], 'VariableLen').build()),
+          'AuctionGroup query',
+        ).catch((e) => {
           console.warn('⚠️ AuctionGroup query failed:', e?.message || e);
           return { items: [] };
         }),
-        getWithTimeout(sealedCfgQuery, 'AuctionSealedConfig query').catch(() => ({ items: [] })),
-        getWithTimeout(commitQuery, 'AuctionCommit query').catch(() => ({ items: [] })),
+        getAllEntities(
+          () => new ToriiQueryBuilder().withClause(KeysClause(['di-AuctionSealedConfig'], [], 'VariableLen').build()),
+          'AuctionSealedConfig query',
+        ).catch(() => ({ items: [] })),
+        getAllEntities(
+          () => new ToriiQueryBuilder().withClause(KeysClause(['di-AuctionCommit'], [], 'VariableLen').build()),
+          'AuctionCommit query',
+        ).catch(() => ({ items: [] })),
       ]);
 
       const slotItems = slotEntities?.items || [];

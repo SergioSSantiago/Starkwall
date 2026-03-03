@@ -19,6 +19,7 @@ Ship stable, demo-ready Starknet product features with clear UX and reliable Sep
 - Dojo world (`di-actions`) for app-specific onchain logic.
 - Torii indexer for query hydration.
 - Starkzap for staking flows; AVNU for swap routing.
+- Garaga for verifier generation and onchain proof verification workflows.
 
 ## Interaction Standards
 

@@ -51,14 +51,16 @@ pub trait IActions<T> {
     fn reveal_bid(
         ref self: T,
         slot_post_id: u64,
+        bidder: starknet::ContractAddress,
         bid_amount: u128,
         salt: felt252,
-        proof_blob_hash: felt252
+        full_proof_with_hints: Span<felt252>
     );
 
     fn claim_commit_refund(
         ref self: T,
-        slot_post_id: u64
+        slot_post_id: u64,
+        bidder: starknet::ContractAddress
     );
 
     fn finalize_auction_slot(
@@ -217,7 +219,7 @@ pub trait ISealedBidVerifier<T> {
         bid_amount: u128,
         salt: felt252,
         commitment: felt252,
-        proof_blob_hash: felt252
+        full_proof_with_hints: Span<felt252>
     ) -> bool;
 }
 
@@ -234,6 +236,7 @@ pub mod actions {
     use starknet::{ContractAddress, get_block_timestamp, get_contract_address};
     use crate::models::{
         AuctionCommit, AuctionGroup, AuctionRevealNullifier, AuctionSealedConfig, AuctionSlot,
+        AuctionSlotPricing,
         FollowRelation, FollowStats, Post, PostCounter, UserProfile, UsernameIndex, YieldAdminState,
         YieldExitQueue, YieldPoolState, YieldPosition, YieldRiskState, YieldStrategyState
     };
@@ -269,7 +272,7 @@ pub mod actions {
     fn payment_token(pool_id: u8) -> ContractAddress {
         assert_supported_pool(pool_id);
         if pool_id == YIELD_POOL_BTC_ID {
-            // WBTC wrapper on Starknet Sepolia.
+            // WBTC wrapper on Starknet Sepolia (supports transfer_from for staking flows).
             return 0x00452bd5c0512a61df7c7be8cfea5e4f893cb40e126bdc40aee6054db955129e
                 .try_into()
                 .unwrap();
@@ -910,6 +913,7 @@ pub mod actions {
                     content_initialized: false,
                 };
                 world.write_model(@slot);
+                world.write_model(@AuctionSlotPricing { slot_post_id, second_highest_bid: 0 });
 
                 slot_idx += 1;
             }
@@ -1032,6 +1036,7 @@ pub mod actions {
                         content_initialized: false,
                     }
                 );
+                world.write_model(@AuctionSlotPricing { slot_post_id, second_highest_bid: 0 });
                 slot_idx += 1;
             }
 
@@ -1058,6 +1063,7 @@ pub mod actions {
             assert!(!sealed_cfg.sealed_mode, "Use commit/reveal for sealed auction");
             assert!(now < group.end_time, "Auction already ended");
             assert!(bid_amount > slot.highest_bid, "Bid must be higher than current highest");
+            assert!(bidder != group.creator, "Creator cannot bid in own auction");
 
             let post: Post = world.read_model(slot_post_id);
             assert!(post.post_kind == POST_KIND_AUCTION_SLOT, "Not an auction slot");
@@ -1092,6 +1098,8 @@ pub mod actions {
                 finalized: slot.finalized,
                 content_initialized: slot.content_initialized,
             };
+            let prev_second = if slot.has_bid { slot.highest_bid } else { 0 };
+            world.write_model(@AuctionSlotPricing { slot_post_id: slot.slot_post_id, second_highest_bid: prev_second });
 
             world.write_model(@updated_slot);
         }
@@ -1108,30 +1116,44 @@ pub mod actions {
             assert!(escrow_amount > 0, "Escrow must be > 0");
             assert!(commitment != 0, "Commitment required");
 
-            let slot: AuctionSlot = world.read_model(slot_post_id);
+            let mut slot: AuctionSlot = world.read_model(slot_post_id);
             assert!(!slot.finalized, "Auction slot already finalized");
             let group: AuctionGroup = world.read_model(slot.group_id);
             assert!(group.active, "Auction group inactive");
+            assert!(bidder != group.creator, "Creator cannot bid in own auction");
 
             let sealed_cfg = read_sealed_config_or_default(ref world, slot.group_id, group.end_time);
             assert!(sealed_cfg.sealed_mode, "Not a sealed auction");
             assert!(now < sealed_cfg.commit_end_time, "Commit phase closed");
 
             let existing: AuctionCommit = world.read_model((slot_post_id, bidder));
-            assert!(existing.commitment == 0, "Commit already submitted");
 
             let post: Post = world.read_model(slot_post_id);
             assert!(post.post_kind == POST_KIND_AUCTION_SLOT, "Not an auction slot");
             assert!(post.current_owner != bidder, "Owner cannot bid on this slot");
 
             let token = IERC20Dispatcher { contract_address: payment_token(YIELD_POOL_STRK_ID) };
-            let escrow_low: u128 = escrow_amount * STRK_DECIMALS_FACTOR;
-            let paid = token.transfer_from(
-                bidder,
-                get_contract_address(),
-                u256 { low: escrow_low, high: 0 },
-            );
-            assert!(paid, "Commit escrow payment failed");
+            if existing.commitment == 0 {
+                let escrow_low: u128 = escrow_amount * STRK_DECIMALS_FACTOR;
+                let paid = token.transfer_from(
+                    bidder,
+                    get_contract_address(),
+                    u256 { low: escrow_low, high: 0 },
+                );
+                assert!(paid, "Commit escrow payment failed");
+            } else {
+                assert!(!existing.revealed, "Bid already revealed");
+                assert!(!existing.refunded, "Commit already refunded");
+                assert!(escrow_amount > existing.escrow_amount, "New sealed bid must increase escrow");
+                let additional_escrow = escrow_amount - existing.escrow_amount;
+                let additional_low: u128 = additional_escrow * STRK_DECIMALS_FACTOR;
+                let paid_more = token.transfer_from(
+                    bidder,
+                    get_contract_address(),
+                    u256 { low: additional_low, high: 0 },
+                );
+                assert!(paid_more, "Additional commit escrow payment failed");
+            }
 
             world.write_model(
                 @AuctionCommit {
@@ -1145,19 +1167,44 @@ pub mod actions {
                     refunded: false,
                 }
             );
+
+            // Hard invariant for sealed slots:
+            // once there is at least one commit, keep a valid deterministic winner
+            // candidate using escrow amount (equal to revealed bid in this flow).
+            let mut pricing: AuctionSlotPricing = world.read_model(slot_post_id);
+            if !slot.has_bid {
+                slot.highest_bid = escrow_amount;
+                slot.highest_bidder = bidder;
+                slot.has_bid = true;
+                pricing.second_highest_bid = 0;
+            } else if bidder == slot.highest_bidder {
+                if escrow_amount > slot.highest_bid {
+                    slot.highest_bid = escrow_amount;
+                }
+            } else if escrow_amount > slot.highest_bid {
+                pricing.second_highest_bid = slot.highest_bid;
+                slot.highest_bid = escrow_amount;
+                slot.highest_bidder = bidder;
+            } else if escrow_amount > pricing.second_highest_bid {
+                pricing.second_highest_bid = escrow_amount;
+            }
+            world.write_model(@pricing);
+            world.write_model(@slot);
         }
 
         fn reveal_bid(
             ref self: ContractState,
             slot_post_id: u64,
+            bidder: ContractAddress,
             bid_amount: u128,
             salt: felt252,
-            proof_blob_hash: felt252
+            full_proof_with_hints: Span<felt252>
         ) {
             let mut world = self.world_default();
-            let bidder = starknet::get_caller_address();
             let now = get_block_timestamp();
             assert!(bid_amount > 0, "Bid must be > 0");
+            assert!(full_proof_with_hints.len() > 0, "Proof required");
+            assert!(bidder != zero_address(), "Bidder required");
 
             let mut slot: AuctionSlot = world.read_model(slot_post_id);
             assert!(!slot.finalized, "Auction slot already finalized");
@@ -1170,7 +1217,7 @@ pub mod actions {
             let mut commit: AuctionCommit = world.read_model((slot_post_id, bidder));
             assert!(commit.commitment != 0, "No commit found");
             assert!(!commit.revealed, "Bid already revealed");
-            assert!(commit.escrow_amount >= bid_amount, "Escrow lower than revealed bid");
+            assert!(commit.escrow_amount == bid_amount, "Revealed bid must equal escrow");
 
             let verifier = ISealedBidVerifierDispatcher { contract_address: sealed_cfg.verifier };
             let verified = verifier.verify_sealed_bid(
@@ -1180,7 +1227,7 @@ pub mod actions {
                 bid_amount,
                 salt,
                 commit.commitment,
-                proof_blob_hash,
+                full_proof_with_hints,
             );
             assert!(verified, "Invalid reveal proof");
             assert!(
@@ -1198,21 +1245,33 @@ pub mod actions {
             commit.revealed_bid = bid_amount;
             world.write_model(@commit);
 
-            if !slot.has_bid || bid_amount > slot.highest_bid {
+            if !slot.has_bid {
                 slot.highest_bid = bid_amount;
                 slot.highest_bidder = bidder;
                 slot.has_bid = true;
+                world.write_model(@AuctionSlotPricing { slot_post_id, second_highest_bid: 0 });
                 world.write_model(@slot);
+            } else if bidder != slot.highest_bidder && bid_amount > slot.highest_bid {
+                world.write_model(@AuctionSlotPricing { slot_post_id, second_highest_bid: slot.highest_bid });
+                slot.highest_bid = bid_amount;
+                slot.highest_bidder = bidder;
+                world.write_model(@slot);
+            } else if bidder != slot.highest_bidder {
+                let pricing: AuctionSlotPricing = world.read_model(slot_post_id);
+                if bid_amount > pricing.second_highest_bid {
+                    world.write_model(@AuctionSlotPricing { slot_post_id, second_highest_bid: bid_amount });
+                }
             }
         }
 
         fn claim_commit_refund(
             ref self: ContractState,
-            slot_post_id: u64
+            slot_post_id: u64,
+            bidder: ContractAddress
         ) {
             let mut world = self.world_default();
-            let bidder = starknet::get_caller_address();
             let now = get_block_timestamp();
+            assert!(bidder != zero_address(), "Bidder required");
 
             let slot: AuctionSlot = world.read_model(slot_post_id);
             let group: AuctionGroup = world.read_model(slot.group_id);
@@ -1222,10 +1281,11 @@ pub mod actions {
 
             let mut commit: AuctionCommit = world.read_model((slot_post_id, bidder));
             assert!(commit.commitment != 0, "No commit found");
-            assert!(commit.revealed, "Reveal required before refund");
             assert!(!commit.refunded, "Already refunded");
             assert!(commit.escrow_amount > 0, "Nothing to refund");
-            assert!(commit.revealed_bid <= commit.escrow_amount, "Invalid revealed bid");
+            if commit.revealed {
+                assert!(commit.revealed_bid <= commit.escrow_amount, "Invalid revealed bid");
+            }
             assert!(
                 !(slot.has_bid && slot.highest_bidder == bidder),
                 "Highest bidder cannot refund"
@@ -1270,9 +1330,18 @@ pub mod actions {
             assert!(post.post_kind == POST_KIND_AUCTION_SLOT, "Not an auction slot");
 
             if slot.has_bid {
-                // Release escrowed winning bid to auction creator.
-                let amount_low: u128 = slot.highest_bid * STRK_DECIMALS_FACTOR;
                 let token = IERC20Dispatcher { contract_address: payment_token(YIELD_POOL_STRK_ID) };
+                let mut clearing_price = slot.highest_bid;
+                if sealed_cfg.sealed_mode {
+                    let pricing: AuctionSlotPricing = world.read_model(slot_post_id);
+                    let second_plus_one = pricing.second_highest_bid + 1;
+                    if second_plus_one < clearing_price {
+                        clearing_price = second_plus_one;
+                    }
+                }
+
+                // Release winner payment to auction creator.
+                let amount_low: u128 = clearing_price * STRK_DECIMALS_FACTOR;
                 let paid_out = token.transfer(
                     group.creator,
                     u256 { low: amount_low, high: 0 },
@@ -1288,6 +1357,16 @@ pub mod actions {
                         (slot_post_id, slot.highest_bidder)
                     );
                     if winner_commit.commitment != 0 {
+                        // Winner pays only clearing price; return any extra escrow.
+                        if winner_commit.escrow_amount > clearing_price {
+                            let winner_refund = winner_commit.escrow_amount - clearing_price;
+                            let winner_refund_low: u128 = winner_refund * STRK_DECIMALS_FACTOR;
+                            let winner_refunded = token.transfer(
+                                slot.highest_bidder,
+                                u256 { low: winner_refund_low, high: 0 },
+                            );
+                            assert!(winner_refunded, "Winner refund transfer failed");
+                        }
                         winner_commit.refunded = true;
                         world.write_model(@winner_commit);
                     }

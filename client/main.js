@@ -9,7 +9,7 @@ import controllerOpts from './controller.js'
 import manifest from './manifest.js'
 import {
   DOMAIN_CHAIN_ID, TORII_URL, IS_SEPOLIA, FAUCET_URL, YIELD_DUAL_POOL_ENABLED,
-  BTC_TRACK_SYMBOL, SEPOLIA_BTC_STAKING_TOKEN, SEPOLIA_BTC_SWAP_TOKEN, SEALED_BID_VERIFIER_ADDRESS, PAYMENT_TOKEN_ADDRESS,
+  BTC_TRACK_SYMBOL, SEPOLIA_BTC_SWAP_TOKEN, SEALED_BID_VERIFIER_ADDRESS, SEALED_RELAY_URL, PAYMENT_TOKEN_ADDRESS,
 } from './config.js'
 
 // Evitar que un rechazo de promesa no capturado provoque recarga o cierre de la app
@@ -73,8 +73,8 @@ const actionsContractMeta = manifest.contracts.find((contract) => contract.tag =
 const actionsSystems = new Set(actionsContractMeta?.systems || [])
 const hasOnchainSocialInManifest = actionsSystems.has('follow') && actionsSystems.has('unfollow')
 const hasYieldInManifest = actionsSystems.has('yield_deposit') && actionsSystems.has('yield_withdraw') && actionsSystems.has('yield_claim')
-// Product decision: keep sealed auction mode disabled in UI for now.
-const ENABLE_SEALED_BID_UI = false
+// Sealed bidding is enabled by default for Privacy Track; can be disabled via env.
+const ENABLE_SEALED_BID_UI = String(import.meta.env?.VITE_ENABLE_SEALED_BID_UI || 'true').toLowerCase() !== 'false'
 const hasSealedBidInManifest =
   ENABLE_SEALED_BID_UI &&
   actionsSystems.has('create_auction_post_3x3_sealed') &&
@@ -88,6 +88,9 @@ let postUpdatesSubscription = null
 let postUpdatesRetryTimer = null
 let postUpdatesRetryCount = 0
 let postUpdatesBeforeUnloadBound = false
+let automationTickTimer = null
+let uiHandlersInitialized = false
+let lastSocialRevalidationKickAt = 0
 
 const SOCIAL_FALLBACK_KEY = 'starkwall_social_fallback_v1'
 
@@ -452,7 +455,7 @@ async function handleYieldPrimaryAction() {
   modeBtn.style.display = 'none'
   const strkBalance = await getChainBalance(currentAccount.address).catch(() => 0)
   const tbtcBalance = YIELD_DUAL_POOL_ENABLED
-    ? await dojoManager.getTokenBalance(currentAccount.address, SEPOLIA_BTC_STAKING_TOKEN).catch(() => 0)
+    ? await dojoManager.getTokenBalance(currentAccount.address, SEPOLIA_BTC_SWAP_TOKEN, 8).catch(() => 0)
     : 0
   const btcSymbol = BTC_TRACK_SYMBOL
 
@@ -505,17 +508,151 @@ async function handleYieldPrimaryAction() {
         })
         if (starkzapManager) {
           try {
-            const res = await starkzapManager.stake(symbol, amount)
-            txHash = String(res?.tx?.hash || '')
-            providerPath = 'starkzap'
-            console.info('[Stake] Starkzap success', {
-              user: currentAccount.address,
-              symbol,
-              amount,
-              txHash,
-            })
+            if (useBtcMode && IS_SEPOLIA && dojoManager?.stakeWbtcViaAvnu) {
+              const res = await dojoManager.stakeWbtcViaAvnu(amount)
+              txHash = String(res?.transaction_hash || '')
+              providerPath = 'avnu-staking'
+              console.info('[Stake] AVNU WBTC staking success', {
+                user: currentAccount.address,
+                symbol,
+                amount,
+                txHash,
+                poolAddress: String(res?.poolAddress || ''),
+                tokenAddress: String(res?.tokenAddress || ''),
+                routeKind: String(res?.routeKind || ''),
+              })
+            } else {
+              const res = await starkzapManager.stake(symbol, amount)
+              txHash = String(res?.tx?.hash || '')
+              providerPath = 'starkzap'
+              console.info('[Stake] Starkzap success', {
+                user: currentAccount.address,
+                symbol,
+                amount,
+                txHash,
+              })
+            }
           } catch (starkzapError) {
             console.error('[Stake] Starkzap failed message:', starkzapError?.message || String(starkzapError))
+            if (useBtcMode && IS_SEPOLIA && dojoManager?.stakeWbtcViaAvnu) {
+              throw new Error(`WBTC staking via AVNU failed: ${starkzapError?.message || 'Unknown error'}`)
+            }
+            // WBTC staking must stay on the Starkzap path; Dojo fallback uses a
+            // different token balance and can produce misleading "insufficient" errors.
+            if (useBtcMode) {
+              console.error('[Stake] Starkzap failed; no Dojo fallback for WBTC', {
+                user: currentAccount.address,
+                symbol,
+                amount,
+                error: errorInfo(starkzapError),
+              })
+              if (isControllerInitError(starkzapError)) {
+                throw new Error('WBTC staking needs Cartridge Controller. Open https://localhost:5173, allow popups/cookies for localhost, reconnect wallet, and retry.')
+              }
+              const poolTokenAddress = parseStakePoolTokenAddress(starkzapError)
+              const swapTokenAddress = normalizeStarknetAddress(SEPOLIA_BTC_SWAP_TOKEN)
+              const requiredStakeAmount = parseStakeRequiredAmount(starkzapError, amount)
+              const canAutoBridge =
+                Boolean(poolTokenAddress) &&
+                poolTokenAddress !== swapTokenAddress &&
+                Boolean(dojoManager)
+              if (canAutoBridge) {
+                try {
+                  const availableSwapBalance = Number(
+                    await dojoManager.getTokenBalance(currentAccount.address, SEPOLIA_BTC_SWAP_TOKEN, 8).catch(() => 0),
+                  )
+                  if (availableSwapBalance <= 0 || availableSwapBalance + 1e-12 < requiredStakeAmount) {
+                    throw new Error(
+                      `Insufficient WBTC in swap token for auto-conversion. Need ~${requiredStakeAmount.toFixed(6)} WBTC, available ${availableSwapBalance.toFixed(6)} WBTC.`,
+                    )
+                  }
+                  const strkTokenAddress = normalizeStarknetAddress(PAYMENT_TOKEN_ADDRESS)
+                  const bridgePlan = await planWbtcStakeBridge({
+                    dojoManager,
+                    fromToken: SEPOLIA_BTC_SWAP_TOKEN,
+                    targetToken: poolTokenAddress,
+                    strkToken: strkTokenAddress,
+                    desiredTargetAmount: amount,
+                    maxSellAmount: availableSwapBalance,
+                  })
+                  if (!bridgePlan) {
+                    throw new Error(
+                      `No viable AVNU route currently converts WBTC (swap) into the staking pool token for ${amount.toFixed(6)} WBTC. ` +
+                      `Try a larger amount or retry later when liquidity updates.`,
+                    )
+                  }
+
+                  showToast(
+                    bridgePlan.kind === 'direct'
+                      ? 'Converting WBTC to staking pool token via AVNU...'
+                      : 'Converting WBTC via STRK bridge for staking...',
+                  )
+
+                  if (bridgePlan.kind === 'direct') {
+                    const swapTx = await dojoManager.swapTokens(
+                      SEPOLIA_BTC_SWAP_TOKEN,
+                      poolTokenAddress,
+                      bridgePlan.sellAmount,
+                      1,
+                    )
+                    const swapTxHash = String(swapTx?.transaction_hash || '')
+                    showToast(`WBTC converted for staking${swapTxHash ? ` · ${shortTxHash(swapTxHash)}` : ''}`)
+                    const retried = await starkzapManager.stake(symbol, amount)
+                    txHash = String(retried?.tx?.hash || '')
+                    providerPath = 'starkzap+avnu-bridge'
+                    console.info('[Stake] Starkzap success after AVNU bridge', {
+                      user: currentAccount.address,
+                      symbol,
+                      amount,
+                      sellAmount: bridgePlan.sellAmount,
+                      poolTokenAddress,
+                      txHash,
+                    })
+                    return
+                  }
+
+                  const strkBeforeRaw = await dojoManager.getTokenBalanceRaw(currentAccount.address, strkTokenAddress).catch(() => 0n)
+                  await dojoManager.swapTokens(
+                    SEPOLIA_BTC_SWAP_TOKEN,
+                    strkTokenAddress,
+                    bridgePlan.sellAmount,
+                    1,
+                  )
+                  const strkAfterRaw = await dojoManager.getTokenBalanceRaw(currentAccount.address, strkTokenAddress).catch(() => 0n)
+                  const bridgedStrkRaw = BigInt(strkAfterRaw || 0n) - BigInt(strkBeforeRaw || 0n)
+                  if (bridgedStrkRaw <= 0n) {
+                    throw new Error('WBTC -> STRK bridge produced no spendable STRK.')
+                  }
+                  const strkDecimals = await dojoManager.getTokenDecimals(strkTokenAddress).catch(() => 18)
+                  const bridgedStrkAmount = unitsToTokenNumber(bridgedStrkRaw, strkDecimals, 10)
+                  if (!Number.isFinite(bridgedStrkAmount) || bridgedStrkAmount <= 0) {
+                    throw new Error('Unable to derive bridged STRK amount.')
+                  }
+                  await dojoManager.swapTokens(
+                    strkTokenAddress,
+                    poolTokenAddress,
+                    bridgedStrkAmount,
+                    1,
+                  )
+                  const retriedViaStrk = await starkzapManager.stake(symbol, amount)
+                  txHash = String(retriedViaStrk?.tx?.hash || '')
+                  providerPath = 'starkzap+avnu-bridge-via-strk'
+                  console.info('[Stake] Starkzap success after AVNU bridge via STRK', {
+                    user: currentAccount.address,
+                    symbol,
+                    amount,
+                    sellAmount: bridgePlan.sellAmount,
+                    bridgedStrkAmount,
+                    poolTokenAddress,
+                    txHash,
+                  })
+                  return
+                } catch (bridgeError) {
+                  throw new Error(`WBTC staking failed after AVNU conversion attempt: ${bridgeError?.message || 'Unknown bridge error'}`)
+                }
+              }
+              throw new Error(`WBTC staking failed on Starkzap: ${starkzapError?.message || 'Unknown error'}`)
+            }
             console.error('[Stake] Starkzap failed; fallback to Dojo', {
               user: currentAccount.address,
               symbol,
@@ -634,7 +771,7 @@ async function enterApp(account) {
 
   canvas = new InfiniteCanvas(canvasElement)
   dojoManager = new DojoManager(currentAccount, manifest, toriiClient)
-  starkzapManager = new StarkzapManager()
+  starkzapManager = new StarkzapManager({ account: currentAccount })
   postManager = new PostManager(canvas, dojoManager)
 
   setupUIHandlers()
@@ -676,6 +813,9 @@ async function enterApp(account) {
       await withTimeout(postManager.loadPosts(), 18000, 'loadPosts')
       rememberUsersFromPosts(postManager.posts)
       await refreshSocialData().catch(() => {})
+      await autoRevealPendingSealedCommits('initial-load')
+      await autoFinalizeEndedAuctionSlots('initial-load')
+      await autoClaimPendingSealedRefunds('initial-load')
       console.log('✓ Loaded', postManager.posts.length, 'posts')
     } catch (e) {
       console.warn('Initial post load failed, continuing with cached/empty view:', e?.message || e)
@@ -689,6 +829,13 @@ async function enterApp(account) {
     }
 
     await updateWalletInfo().catch(() => {})
+    if (!automationTickTimer) {
+      automationTickTimer = setInterval(() => {
+        void autoRevealPendingSealedCommits('interval')
+        void autoFinalizeEndedAuctionSlots('interval')
+        void autoClaimPendingSealedRefunds('interval')
+      }, 15000)
+    }
     console.log('✓ App ready!')
   })()
 }
@@ -923,6 +1070,115 @@ globalThis.showToast = showToast
 
 // Tracks slots currently being auto-finalized to avoid duplicate transactions.
 const autoFinalizingSlots = new Set()
+// Tracks sealed commits currently being auto-revealed to avoid duplicate relayer requests.
+const autoRevealingSlots = new Set()
+// Tracks sealed refund claims currently being auto-submitted.
+const autoClaimingRefundSlots = new Set()
+// Prevent noisy repeated toasts/logs when sealed finalize is blocked by unrevealed commits.
+const autoFinalizeBlockedSealedSlots = new Set()
+const ZK_DEBUG_LOGS = Boolean(import.meta.env?.DEV) || ['localhost', '127.0.0.1', '::1'].includes(String(globalThis?.location?.hostname || '').toLowerCase())
+
+function zkConsole(event, payload = {}) {
+  if (!ZK_DEBUG_LOGS) return
+  try {
+    console.info(`[sealed-zk] ${String(event || '')}`, payload)
+  } catch {}
+}
+
+function redactSealedDebugPayload(payload = {}) {
+  const safe = { ...(payload || {}) }
+  if (Object.prototype.hasOwnProperty.call(safe, 'bidAmount')) safe.bidAmount = '[hidden]'
+  if (Object.prototype.hasOwnProperty.call(safe, 'salt')) safe.salt = '[hidden]'
+  return safe
+}
+
+function isNoSwapRouteError(error) {
+  const msg = String(error?.message || error || '').toLowerCase()
+  return msg.includes('no swap route available')
+    || msg.includes('no swap route')
+    || msg.includes('no route')
+    || msg.includes('insufficient liquidity')
+}
+
+function buildNoRouteHint(sellSymbol, buySymbol) {
+  return `No route for ${sellSymbol} -> ${buySymbol} right now. No swap was executed. Try a smaller amount, retry in a few minutes, or swap to a different token first.`
+}
+
+function parseStakePoolTokenAddress(error) {
+  const msg = String(error?.message || error || '')
+  const m = msg.match(/pool token:\s*(0x[0-9a-f]+)/i)
+  return m?.[1] ? normalizeStarknetAddress(m[1]) : ''
+}
+
+function parseStakeRequiredAmount(error, fallbackAmount = 0) {
+  const msg = String(error?.message || error || '')
+  const m = msg.match(/required:\s*[a-z0-9_]+\s*([0-9]+(?:[.,][0-9]+)?)/i)
+  if (!m?.[1]) return Number(fallbackAmount || 0)
+  const parsed = Number(String(m[1]).replace(',', '.'))
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : Number(fallbackAmount || 0)
+}
+
+function unitsToTokenNumber(rawUnits, decimals = 18, precision = 8) {
+  const raw = BigInt(rawUnits || 0)
+  const d = Math.max(0, Number(decimals || 0))
+  if (d === 0) return Number(raw)
+  const base = 10n ** BigInt(d)
+  const whole = raw / base
+  const fraction = (raw % base).toString().padStart(d, '0').slice(0, Math.max(0, precision))
+  const asNum = Number(`${whole.toString()}.${fraction || '0'}`)
+  return Number.isFinite(asNum) ? asNum : 0
+}
+
+async function planWbtcStakeBridge({
+  dojoManager,
+  fromToken,
+  targetToken,
+  strkToken,
+  desiredTargetAmount,
+  maxSellAmount,
+}) {
+  const desired = Math.max(0, Number(desiredTargetAmount || 0))
+  const maxSell = Math.max(0, Number(maxSellAmount || 0))
+  if (!Number.isFinite(desired) || desired <= 0 || !Number.isFinite(maxSell) || maxSell <= 0) return null
+
+  const multipliers = [1, 1.25, 1.5, 2, 3, 5, 8, 10]
+  const candidateSet = new Set()
+  for (const m of multipliers) {
+    const sell = Math.min(maxSell, desired * m)
+    if (sell > 0) candidateSet.add(Number(sell.toFixed(8)))
+  }
+  candidateSet.add(Number(maxSell.toFixed(8)))
+  const candidates = Array.from(candidateSet).filter((v) => Number.isFinite(v) && v > 0).sort((a, b) => a - b)
+  const targetTolerance = desired * 0.995
+
+  for (const sellAmount of candidates) {
+    try {
+      const direct = await dojoManager.getTokenSwapQuote(fromToken, targetToken, sellAmount)
+      const directOut = Number(direct?.estimatedBuyAmount || 0)
+      if (Number.isFinite(directOut) && directOut >= targetTolerance) {
+        return { kind: 'direct', sellAmount, estimatedTargetAmount: directOut }
+      }
+    } catch {}
+
+    try {
+      const hop1 = await dojoManager.getTokenSwapQuote(fromToken, strkToken, sellAmount)
+      const estimatedStrk = Number(hop1?.estimatedBuyAmount || 0)
+      if (!Number.isFinite(estimatedStrk) || estimatedStrk <= 0) continue
+      const hop2 = await dojoManager.getTokenSwapQuote(strkToken, targetToken, estimatedStrk)
+      const estimatedTarget = Number(hop2?.estimatedBuyAmount || 0)
+      if (Number.isFinite(estimatedTarget) && estimatedTarget >= targetTolerance) {
+        return {
+          kind: 'via-strk',
+          sellAmount,
+          estimatedStrkAmount: estimatedStrk,
+          estimatedTargetAmount: estimatedTarget,
+        }
+      }
+    } catch {}
+  }
+
+  return null
+}
 
 async function tryAutoFinalizeAuctionSlot(post, source = 'auto') {
   if (!dojoManager || !postManager || !post) return false
@@ -930,6 +1186,7 @@ async function tryAutoFinalizeAuctionSlot(post, source = 'auto') {
   const isAuctionSlot = Number(post.post_kind) === 2
   const slot = post.auction_slot || null
   const group = post.auction_group || null
+  const sealedCfg = post.auction_sealed_config || null
   if (!isAuctionSlot || !slot || !group || slot.finalized) return false
 
   const now = Math.floor(Date.now() / 1000)
@@ -942,7 +1199,28 @@ async function tryAutoFinalizeAuctionSlot(post, source = 'auto') {
   autoFinalizingSlots.add(slotId)
   try {
     console.log(`⏱️ Auto-finalizing slot ${slotId} (source: ${source})`)
-    await dojoManager.finalizeAuctionSlot(slotId)
+    if (sealedCfg?.sealed_mode && SEALED_RELAY_URL) {
+      const commits = Array.isArray(post?.auction_commits) ? post.auction_commits : []
+      const hasCommits = commits.length > 0
+      const hasRevealedCommit = commits.some((c) => Boolean(c?.revealed))
+      const hasPendingUnrevealedCommit = commits.some((c) => !c?.revealed && !c?.refunded)
+      if (hasCommits && !hasRevealedCommit && hasPendingUnrevealedCommit) {
+        zkConsole('finalize:blocked-unrevealed-commits', {
+          slotId,
+          commits: commits.length,
+          source,
+        })
+        if (!autoFinalizeBlockedSealedSlots.has(slotId)) {
+          autoFinalizeBlockedSealedSlots.add(slotId)
+          showToast('Sealed finalize delayed: waiting for a valid reveal proof.')
+        }
+        return false
+      }
+      autoFinalizeBlockedSealedSlots.delete(slotId)
+      await requestSealedImmediateFinalize({ slotPostId: slotId })
+    } else {
+      await dojoManager.finalizeAuctionSlot(slotId)
+    }
     await new Promise((resolve) => setTimeout(resolve, 5000))
     await postManager.loadPosts()
     await postManager.loadImages()
@@ -986,6 +1264,7 @@ const CONTRACT_SAFE_MAX_CHUNKS_PER_FIELD = 260
 const CONTRACT_SAFE_MAX_BYTES_PER_FIELD = CONTRACT_SAFE_MAX_CHUNKS_PER_FIELD * 31
 const AUCTION_POST_CREATION_FEE_STRK = 10
 const SEALED_BID_SALT_MAP_KEY = 'starkwall_sealed_bid_salts_v1'
+const SEALED_BID_AMOUNT_MAP_KEY = 'starkwall_sealed_bid_amounts_v1'
 
 function randomSaltFelt() {
   const a = BigInt(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER))
@@ -1012,6 +1291,413 @@ function saveSaltForSlot(slotPostId, salt) {
 function getSaltForSlot(slotPostId) {
   const map = readSaltMap()
   return String(map[String(slotPostId)] || '')
+}
+
+function readBidAmountMap() {
+  try {
+    const raw = localStorage.getItem(SEALED_BID_AMOUNT_MAP_KEY)
+    const parsed = raw ? JSON.parse(raw) : {}
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function saveBidAmountForSlot(slotPostId, bidAmount) {
+  const map = readBidAmountMap()
+  map[String(slotPostId)] = Number.isFinite(Number(bidAmount)) ? Number(bidAmount) : 0
+  try { localStorage.setItem(SEALED_BID_AMOUNT_MAP_KEY, JSON.stringify(map)) } catch {}
+}
+
+function getBidAmountForSlot(slotPostId) {
+  const map = readBidAmountMap()
+  const n = Number(map[String(slotPostId)] || 0)
+  return Number.isFinite(n) ? n : 0
+}
+
+async function tryAutoRevealSealedCommit(post, source = 'auto') {
+  if (!post || !postManager || !dojoManager || !currentAccount || !SEALED_RELAY_URL) return false
+
+  const slotId = Number(post.id || 0)
+  if (!Number.isFinite(slotId) || slotId <= 0) return false
+
+  const slot = post.auction_slot || null
+  const group = post.auction_group || null
+  const sealedCfg = post.auction_sealed_config || null
+  if (!slot || !group || !sealedCfg?.sealed_mode || slot.finalized) return false
+
+  const now = Math.floor(Date.now() / 1000)
+  const commitEndTs = Number(sealedCfg.commit_end_time || group.end_time || 0)
+  const revealEndTs = Number(sealedCfg.reveal_end_time || group.end_time || 0)
+  if (!(now >= commitEndTs && now < revealEndTs)) return false
+
+  const myAddr = normalizeSocialAddress(currentAccount.address || '')
+  const myCommit = (post.auction_commits || []).find((c) => normalizeSocialAddress(c.bidder) === myAddr) || null
+  if (!myCommit || myCommit.revealed) return false
+
+  const salt = getSaltForSlot(slotId)
+  if (!salt) return false
+
+  const bidFromLocal = getBidAmountForSlot(slotId)
+  const bidAmount = bidFromLocal > 0 ? bidFromLocal : Number(myCommit.escrow_amount || 0)
+  if (!Number.isFinite(bidAmount) || bidAmount <= 0) return false
+
+  const lockKey = `${slotId}:${myAddr}`
+  if (autoRevealingSlots.has(lockKey)) return false
+
+  autoRevealingSlots.add(lockKey)
+  try {
+    console.log(`🤖 Auto-revealing sealed commit for slot ${slotId} (source: ${source})`)
+    const revealed = await requestSealedImmediateReveal({
+      slotPostId: slotId,
+      groupId: Number(post?.auction_group_id || slot?.group_id || 0),
+      bidder: currentAccount.address,
+      bidAmount,
+      salt,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 5000))
+    await postManager.loadPosts()
+    await postManager.loadImages()
+    canvas.setPosts(postManager.posts)
+    await updateWalletInfo()
+    showToast(revealed?.txHash ? `Auto-reveal sent (${shortTxHash(revealed.txHash)})` : 'Auto-reveal sent')
+    return true
+  } catch (error) {
+    console.warn(`Auto-reveal skipped for slot ${slotId}:`, error?.message || error)
+    return false
+  } finally {
+    autoRevealingSlots.delete(lockKey)
+  }
+}
+
+async function autoRevealPendingSealedCommits(source = 'scan') {
+  if (!postManager?.posts?.length || !currentAccount || !SEALED_RELAY_URL) return
+  for (const post of postManager.posts) {
+    await tryAutoRevealSealedCommit(post, source)
+  }
+}
+
+async function tryAutoClaimSealedRefund(post, source = 'auto') {
+  if (!post || !postManager || !dojoManager || !currentAccount) return false
+
+  const slotId = Number(post.id || 0)
+  if (!Number.isFinite(slotId) || slotId <= 0) return false
+
+  const slot = post.auction_slot || null
+  const group = post.auction_group || null
+  const sealedCfg = post.auction_sealed_config || null
+  if (!slot || !group || !sealedCfg?.sealed_mode) return false
+
+  const now = Math.floor(Date.now() / 1000)
+  const revealEndTs = Number(sealedCfg.reveal_end_time || group.end_time || 0)
+  if (now < revealEndTs) return false
+
+  const myAddr = normalizeSocialAddress(currentAccount.address || '')
+  const myCommit = (post.auction_commits || []).find((c) => normalizeSocialAddress(c.bidder) === myAddr) || null
+  if (!myCommit || myCommit.refunded) return false
+
+  const isWinner = Boolean(slot.has_bid) && normalizeSocialAddress(slot.highest_bidder) === myAddr
+  if (isWinner) return false
+
+  const lockKey = `${slotId}:${myAddr}`
+  if (autoClaimingRefundSlots.has(lockKey)) return false
+
+  autoClaimingRefundSlots.add(lockKey)
+  try {
+    console.log(`🤖 Auto-claiming sealed refund for slot ${slotId} (source: ${source})`)
+    if (SEALED_RELAY_URL) {
+      await requestSealedImmediateRefund({ slotPostId: slotId, bidder: currentAccount.address })
+    } else {
+      await dojoManager.claimAuctionCommitRefund(slotId)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5000))
+    await postManager.loadPosts()
+    await postManager.loadImages()
+    canvas.setPosts(postManager.posts)
+    await updateWalletInfo()
+    showToast('Refund claimed automatically')
+    return true
+  } catch (error) {
+    console.warn(`Auto-refund claim skipped for slot ${slotId}:`, error?.message || error)
+    return false
+  } finally {
+    autoClaimingRefundSlots.delete(lockKey)
+  }
+}
+
+async function autoClaimPendingSealedRefunds(source = 'scan') {
+  if (!postManager?.posts?.length || !currentAccount) return
+  for (const post of postManager.posts) {
+    await tryAutoClaimSealedRefund(post, source)
+  }
+}
+
+async function scheduleSealedAutoReveal({ slotPostId, groupId, bidder, bidAmount, salt, commitEndTime, revealEndTime }) {
+  const baseUrl = String(SEALED_RELAY_URL || '').trim()
+  if (!baseUrl) return { ok: false, reason: 'relay-disabled' }
+  const endpoint = `${baseUrl.replace(/\/$/, '')}/sealed/schedule`
+  const payload = {
+    slotPostId: Number(slotPostId),
+    groupId: Number(groupId),
+    bidder: String(bidder || ''),
+    bidAmount: Number(bidAmount),
+    salt: String(salt || ''),
+    revealAfterUnix: Number(commitEndTime || 0),
+    finalizeAfterUnix: Number(revealEndTime || 0),
+  }
+  zkConsole('schedule:request', redactSealedDebugPayload(payload))
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  const body = await response.json().catch(() => ({}))
+  zkConsole('schedule:response', {
+    ok: response.ok && Boolean(body?.ok),
+    status: response.status,
+    jobId: body?.jobId || '',
+    relayStatus: body?.status || '',
+  })
+  if (!response.ok || !body?.ok) {
+    throw new Error(String(body?.error || `Relay scheduling failed (${response.status})`))
+  }
+  return { ok: true, jobId: String(body.jobId || '') }
+}
+
+async function requestSealedImmediateReveal({ slotPostId, groupId, bidder, bidAmount, salt }) {
+  const baseUrl = String(SEALED_RELAY_URL || '').trim()
+  if (!baseUrl) return { ok: false, reason: 'relay-disabled' }
+  const endpoint = `${baseUrl.replace(/\/$/, '')}/sealed/reveal-now`
+  const payload = {
+    slotPostId: Number(slotPostId),
+    groupId: Number(groupId),
+    bidder: String(bidder || ''),
+    bidAmount: Number(bidAmount),
+    salt: String(salt || ''),
+  }
+  zkConsole('reveal-now:request', redactSealedDebugPayload(payload))
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  const body = await response.json().catch(() => ({}))
+  zkConsole('reveal-now:response', {
+    ok: response.ok && Boolean(body?.ok),
+    status: response.status,
+    txHash: body?.txHash || '',
+    relayStatus: body?.status || '',
+  })
+  if (!response.ok || !body?.ok) {
+    throw new Error(String(body?.error || `Relay reveal failed (${response.status})`))
+  }
+  return {
+    ok: true,
+    txHash: String(body.txHash || ''),
+    status: String(body.status || 'submitted'),
+  }
+}
+
+async function requestSealedImmediateFinalize({ slotPostId }) {
+  const baseUrl = String(SEALED_RELAY_URL || '').trim()
+  if (!baseUrl) return { ok: false, reason: 'relay-disabled' }
+  const endpoint = `${baseUrl.replace(/\/$/, '')}/sealed/finalize-now`
+  zkConsole('finalize-now:request', { slotPostId: Number(slotPostId) })
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ slotPostId: Number(slotPostId) }),
+  })
+  const body = await response.json().catch(() => ({}))
+  zkConsole('finalize-now:response', {
+    ok: response.ok && Boolean(body?.ok),
+    status: response.status,
+    txHash: body?.txHash || '',
+    relayStatus: body?.status || '',
+  })
+  if (!response.ok || !body?.ok) {
+    throw new Error(String(body?.error || `Relay finalize failed (${response.status})`))
+  }
+  return {
+    ok: true,
+    txHash: String(body.txHash || ''),
+    status: String(body.status || 'submitted'),
+  }
+}
+
+async function requestSealedImmediateRefund({ slotPostId, bidder }) {
+  const baseUrl = String(SEALED_RELAY_URL || '').trim()
+  if (!baseUrl) return { ok: false, reason: 'relay-disabled' }
+  const endpoint = `${baseUrl.replace(/\/$/, '')}/sealed/refund-now`
+  zkConsole('refund-now:request', { slotPostId: Number(slotPostId), bidder: String(bidder || '') })
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ slotPostId: Number(slotPostId), bidder: String(bidder || '') }),
+  })
+  const body = await response.json().catch(() => ({}))
+  zkConsole('refund-now:response', {
+    ok: response.ok && Boolean(body?.ok),
+    status: response.status,
+    txHash: body?.txHash || '',
+    relayStatus: body?.status || '',
+  })
+  if (!response.ok || !body?.ok) {
+    throw new Error(String(body?.error || `Relay refund failed (${response.status})`))
+  }
+  return {
+    ok: true,
+    txHash: String(body.txHash || ''),
+    status: String(body.status || 'submitted'),
+  }
+}
+
+const RELAY_JOBS_CACHE_TTL_MS = 8000
+let relayJobsCache = { fetchedAt: 0, jobs: [] }
+
+async function fetchSealedRelayJobs(force = false) {
+  const baseUrl = String(SEALED_RELAY_URL || '').trim()
+  if (!baseUrl) return []
+  const now = Date.now()
+  if (!force && relayJobsCache.jobs.length && (now - relayJobsCache.fetchedAt) < RELAY_JOBS_CACHE_TTL_MS) {
+    return relayJobsCache.jobs
+  }
+  const endpoint = `${baseUrl.replace(/\/$/, '')}/sealed/jobs`
+  const response = await fetch(endpoint, { method: 'GET' })
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok || !body?.ok || !Array.isArray(body?.jobs)) {
+    throw new Error(String(body?.error || `Relay jobs fetch failed (${response.status})`))
+  }
+  if (ZK_DEBUG_LOGS) {
+    const counts = {}
+    for (const job of body.jobs) {
+      const key = String(job?.status || 'n/a')
+      counts[key] = Number(counts[key] || 0) + 1
+    }
+    zkConsole('jobs:snapshot', { total: body.jobs.length, byStatus: counts, force })
+  }
+  relayJobsCache = { fetchedAt: now, jobs: body.jobs }
+  return relayJobsCache.jobs
+}
+
+function relayStageLabel(status, kind = 'reveal') {
+  const s = String(status || '')
+  if (s === 'running') return kind === 'reveal' ? 'Generating ZK proof (Garaga)...' : 'Submitting transaction...'
+  if (s === 'submitted') return kind === 'reveal' ? 'Proof verified onchain' : 'Submitted onchain'
+  if (s === 'scheduled') return kind === 'reveal' ? 'Waiting for commit phase to end (queued)' : 'Queued'
+  if (s === 'skipped') return kind === 'reveal' ? 'Skipped (privacy or phase constraint)' : 'Skipped'
+  if (s === 'failed') return 'Failed'
+  return 'N/A'
+}
+
+function formatRelayUnix(unix) {
+  const ts = Number(unix || 0)
+  if (!Number.isFinite(ts) || ts <= 0) return 'n/a'
+  const d = new Date(ts * 1000)
+  const utc = d.toISOString().replace('T', ' ').slice(0, 16) + ' UTC'
+  return `${d.toLocaleString()} (${utc})`
+}
+
+function summarizeRelayPipelineForSlot(jobs, slotId, bidder) {
+  const slotJobs = (Array.isArray(jobs) ? jobs : []).filter((j) => Number(j?.slotPostId || 0) === Number(slotId || 0))
+  if (!slotJobs.length) return `<br/><strong>ZK pipeline:</strong> Waiting for first sealed commit`
+  const bidderNorm = normalizeSocialAddress(bidder || '')
+  const myJobs = slotJobs
+    .filter((j) => normalizeSocialAddress(j?.bidder || '') === bidderNorm)
+    .sort((a, b) => Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0))
+  const sorted = [...slotJobs].sort((a, b) => Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0))
+  const chosen = myJobs[0] || sorted[0]
+  const isMine = Boolean(myJobs[0])
+
+  const lines = [
+    `<br/><strong>ZK pipeline:</strong> ${relayStageLabel(chosen.status, 'reveal')}`,
+  ]
+
+  // If this wallet has no commit in this slot, keep status generic and privacy-safe.
+  if (!isMine) {
+    if (chosen?.status === 'scheduled') {
+      lines.push('<br/>Slot automation ready. Proof starts when commit phase closes.')
+    }
+    if (chosen?.revealTxHash) lines.push(`<br/>Reveal tx: ${shortTxHash(chosen.revealTxHash)}`)
+    if (chosen?.finalizeTxHash) lines.push(`<br/>Finalize tx: ${shortTxHash(chosen.finalizeTxHash)}`)
+    return lines.join('')
+  }
+
+  if (chosen?.revealTxHash) lines.push(`<br/>Reveal tx: ${shortTxHash(chosen.revealTxHash)}`)
+  if (chosen?.finalizeStatus && chosen.finalizeStatus !== 'scheduled') {
+    lines.push(`<br/>Finalize: ${relayStageLabel(chosen.finalizeStatus, 'finalize')}`)
+  }
+  if (chosen?.finalizeTxHash) lines.push(`<br/>Finalize tx: ${shortTxHash(chosen.finalizeTxHash)}`)
+  if (chosen?.refundStatus && chosen.refundStatus !== 'scheduled') {
+    lines.push(`<br/>Refund: ${relayStageLabel(chosen.refundStatus, 'refund')}`)
+  }
+  if (chosen?.refundTxHash) lines.push(`<br/>Refund tx: ${shortTxHash(chosen.refundTxHash)}`)
+  if (chosen?.status === 'scheduled' && Number(chosen?.revealAfterUnix || 0) > 0) {
+    const wait = Math.max(0, Number(chosen.revealAfterUnix) - Math.floor(Date.now() / 1000))
+    lines.push(`<br/>Proof starts after: ${formatRelayUnix(chosen.revealAfterUnix)} (in ${formatRemaining(wait)})`)
+  }
+  if (chosen?.status === 'failed' && chosen?.error) lines.push('<br/>Proof error: check relayer logs')
+  if (chosen?.status === 'skipped' && String(chosen?.error || '').toLowerCase().includes('winner selected')) {
+    lines.push('<br/>Privacy mode: loser reveal suppressed')
+  }
+  return lines.join('')
+}
+
+function getRelayJobForSlot(jobs, slotId, bidder) {
+  const filtered = (Array.isArray(jobs) ? jobs : []).filter((j) => Number(j?.slotPostId || 0) === Number(slotId || 0))
+  if (!filtered.length) return null
+  const bidderNorm = normalizeSocialAddress(bidder || '')
+  const mine = filtered
+    .filter((j) => normalizeSocialAddress(j?.bidder || '') === bidderNorm)
+    .sort((a, b) => Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0))
+  const sorted = filtered.sort((a, b) => Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0))
+  return mine[0] || sorted[0] || null
+}
+
+function shouldShowVerifyProofButton(job) {
+  if (!job || typeof job !== 'object') return false
+  if (job.zkTrace) return true
+  if (job.revealTxHash || job.finalizeTxHash || job.refundTxHash) return true
+  const reveal = String(job.status || '')
+  const finalize = String(job.finalizeStatus || '')
+  const refund = String(job.refundStatus || '')
+  return (
+    ['running', 'submitted', 'failed', 'skipped'].includes(reveal) ||
+    ['running', 'submitted', 'failed', 'skipped'].includes(finalize) ||
+    ['running', 'submitted', 'failed', 'skipped'].includes(refund)
+  )
+}
+
+async function enrichSealedProofStatus(post, postAuctionInfo, expectedPostId, verifyProofBtn = null) {
+  if (!post || !postAuctionInfo || !SEALED_RELAY_URL) return
+  try {
+    const jobs = await fetchSealedRelayJobs()
+    const modal = document.getElementById('postDetailsModal')
+    if (!modal || String(modal?.dataset?.postId || '') !== String(expectedPostId || '')) return
+    const job = getRelayJobForSlot(jobs, Number(post?.id || 0), currentAccount?.address || '')
+    const snippet = summarizeRelayPipelineForSlot(jobs, Number(post?.id || 0), currentAccount?.address || '')
+    if (verifyProofBtn) {
+      verifyProofBtn.textContent = '🧪 Verify Sealed Result'
+      verifyProofBtn.style.display = shouldShowVerifyProofButton(job) ? 'inline-block' : 'none'
+    }
+    zkConsole('job:selected', {
+      slotId: Number(post?.id || 0),
+      jobId: String(job?.id || ''),
+      status: String(job?.status || ''),
+      finalizeStatus: String(job?.finalizeStatus || ''),
+      refundStatus: String(job?.refundStatus || ''),
+      hasZkTrace: Boolean(job?.zkTrace),
+      revealAfterUnix: Number(job?.revealAfterUnix || 0),
+    })
+    if (!snippet) return
+    if (!postAuctionInfo.innerHTML.includes('<strong>ZK pipeline:</strong>')) {
+      postAuctionInfo.innerHTML += snippet
+    } else {
+      postAuctionInfo.innerHTML = postAuctionInfo.innerHTML.replace(/<br\/?><strong>ZK pipeline:[\s\S]*$/, '') + snippet
+    }
+  } catch (error) {
+    console.warn('Could not load relay ZK status:', error?.message || error)
+  }
 }
 
 function byteArrayChunkCount(str) {
@@ -1184,6 +1870,9 @@ async function tryRestoreSessionOnLoad() {
 }
 
 function setupUIHandlers() {
+  if (uiHandlersInitialized) return
+  uiHandlersInitialized = true
+
   const modal = document.getElementById('modal')
   const postForm = document.getElementById('postForm')
   const imageFileInput = document.getElementById('imageFile')
@@ -1211,6 +1900,9 @@ function setupUIHandlers() {
   const postSizeRadios = document.querySelectorAll('input[name="postSizeRadio"]')
   const auctionModeRadios = document.querySelectorAll('input[name="auctionModeRadio"]')
   const SEALED_REVEAL_WINDOW_SECONDS = 6 * 60 * 60 // 6 hours reveal window before auction end
+  const SEALED_MIN_COMMIT_SECONDS = 6 * 60
+  const SEALED_MIN_REVEAL_SECONDS = 2 * 60
+  const SEALED_MIN_TOTAL_SECONDS = SEALED_MIN_COMMIT_SECONDS + SEALED_MIN_REVEAL_SECONDS
   if (!hasSealedBidInManifest) {
     auctionModeRadios.forEach((r) => {
       if (r.value === 'sealed') {
@@ -1248,6 +1940,8 @@ function setupUIHandlers() {
   const confirmSwapWbtcBtn = document.getElementById('confirmSwapWbtcBtn')
   let swapQuoteRequestId = 0
   let swapQuoteDebounceTimer = null
+  let createPostInFlight = false
+  let sealedVerifierProbe = { address: '', ok: null, reason: '' }
 
   function updatePaidPriceLabel() {
     const size = parseInt(postSizeInput.value) || 2
@@ -1269,23 +1963,57 @@ function setupUIHandlers() {
 
   function updateAuctionEndPreview() {
     if (!auctionEndPreview) return
+    const isSealedMode = getAuctionMode() === 'sealed'
     const raw = String(auctionEndAtInput?.value || '')
     const endMs = Date.parse(raw)
     if (!raw || !Number.isFinite(endMs)) {
-      auctionEndPreview.textContent = 'Displayed in your local timezone and UTC.'
+      auctionEndPreview.textContent = isSealedMode
+        ? 'Displayed in your local timezone and UTC. Sealed mode needs at least 8 minutes from now.'
+        : 'Displayed in your local timezone and UTC.'
       return
     }
 
+    const nowUnix = Math.floor(Date.now() / 1000)
+    const endUnix = Math.floor(endMs / 1000)
     const endDate = new Date(endMs)
     const localLabel = endDate.toLocaleString()
     const utcLabel = endDate.toISOString().replace('T', ' ').slice(0, 16) + ' UTC'
     const remaining = formatRemaining(Math.floor((endMs - Date.now()) / 1000))
-    auctionEndPreview.textContent = `Ends (local): ${localLabel} | Ends (UTC): ${utcLabel} | Remaining: ${remaining}`
+    const base = `Ends (local): ${localLabel} | Ends (UTC): ${utcLabel} | Remaining: ${remaining}`
+    if (!isSealedMode) {
+      auctionEndPreview.textContent = base
+      return
+    }
+
+    const minEndUnix = nowUnix + SEALED_MIN_TOTAL_SECONDS
+    const minEndDate = new Date(minEndUnix * 1000)
+    const minLocal = minEndDate.toLocaleString()
+    const minUtc = minEndDate.toISOString().replace('T', ' ').slice(0, 16) + ' UTC'
+    if (endUnix < minEndUnix) {
+      const shortBy = formatRemaining(minEndUnix - endUnix)
+      auctionEndPreview.textContent = `${base} | Too early for sealed by ${shortBy}. Minimum: ${minLocal} (${minUtc})`
+      return
+    }
+    auctionEndPreview.textContent = `${base} | Sealed minimum satisfied`
   }
 
   function toDatetimeLocalValue(unixSeconds) {
     const d = new Date(Number(unixSeconds || 0) * 1000)
     return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
+  }
+
+  function deriveSealedTimeline(revealEndUnix, nowUnix = Math.floor(Date.now() / 1000)) {
+    const remaining = Math.max(0, revealEndUnix - nowUnix)
+    const dynamicRevealWindow = Math.floor(remaining * 0.2) // 20% reveal, 80% commit for better bidding UX.
+    const revealWindow = Math.min(
+      SEALED_REVEAL_WINDOW_SECONDS,
+      Math.max(SEALED_MIN_REVEAL_SECONDS, dynamicRevealWindow),
+    )
+    const minCommitFromNow = nowUnix + SEALED_MIN_COMMIT_SECONDS
+    const latestCommitAllowed = revealEndUnix - SEALED_MIN_REVEAL_SECONDS
+    const preferredCommit = revealEndUnix - revealWindow
+    const commitEndUnix = Math.min(latestCommitAllowed, Math.max(minCommitFromNow, preferredCommit))
+    return { commitEndUnix, revealEndUnix }
   }
 
   function syncSealedTimelineFromAuctionEnd() {
@@ -1294,7 +2022,7 @@ function setupUIHandlers() {
     const endMs = Date.parse(endRaw)
     if (!Number.isFinite(endMs)) return
     const revealEndUnix = Math.floor(endMs / 1000)
-    const commitEndUnix = revealEndUnix - SEALED_REVEAL_WINDOW_SECONDS
+    const { commitEndUnix } = deriveSealedTimeline(revealEndUnix)
     if (auctionCommitEndAtInput) auctionCommitEndAtInput.value = toDatetimeLocalValue(commitEndUnix)
     if (auctionRevealEndAtInput) auctionRevealEndAtInput.value = toDatetimeLocalValue(revealEndUnix)
   }
@@ -1499,7 +2227,7 @@ function setupUIHandlers() {
       const gas = Number(quote?.estimatedGasFeeStrk || 0)
       const impactBps = Number(quote?.priceImpactBps || 0)
       if (!Number.isFinite(receive) || receive <= 0) {
-        swapWbtcEstimate.textContent = `No swap route available right now for ${cfg.sellSymbol} -> ${cfg.buySymbol}.`
+        swapWbtcEstimate.textContent = buildNoRouteHint(cfg.sellSymbol, cfg.buySymbol)
         return false
       }
       swapWbtcEstimate.textContent =
@@ -1507,7 +2235,9 @@ function setupUIHandlers() {
       return true
     } catch (error) {
       if (requestId !== swapQuoteRequestId) return false
-      swapWbtcEstimate.textContent = String(error?.message || 'Could not fetch quote right now.')
+      swapWbtcEstimate.textContent = isNoSwapRouteError(error)
+        ? buildNoRouteHint(cfg.sellSymbol, cfg.buySymbol)
+        : String(error?.message || 'Could not fetch quote right now.')
       return false
     }
   }
@@ -1813,7 +2543,12 @@ function setupUIHandlers() {
           buyToken: cfg.buySymbol,
         },
       })
-      alert(`Failed to convert ${cfg.sellSymbol} to ${cfg.buySymbol}: ` + (error?.message || 'Unknown error'))
+      if (isNoSwapRouteError(error)) {
+        if (swapWbtcEstimate) swapWbtcEstimate.textContent = buildNoRouteHint(cfg.sellSymbol, cfg.buySymbol)
+        showToast(buildNoRouteHint(cfg.sellSymbol, cfg.buySymbol))
+      } else {
+        alert(`Failed to convert ${cfg.sellSymbol} to ${cfg.buySymbol}: ` + (error?.message || 'Unknown error'))
+      }
     }
   })
 
@@ -1860,6 +2595,12 @@ function setupUIHandlers() {
 
   postForm.addEventListener('submit', async (e) => {
     e.preventDefault()
+    if (createPostInFlight) {
+      showToast('Creation already in progress...')
+      return
+    }
+    createPostInFlight = true
+    try {
 
     const imageUrl = imageDataUrlInput.value
     const caption = truncateToMaxBytes(captionInput.value)
@@ -1931,16 +2672,56 @@ function setupUIHandlers() {
           alert('Missing sealed bid verifier address. Set VITE_SEALED_BID_VERIFIER_ADDRESS.')
           return
         }
-        // Sealed timeline is derived from auction end:
-        // commit_end = auction_end - reveal_window, reveal_end = auction_end.
-        const revealEndUnix = auctionEndUnix
-        const commitEndUnix = revealEndUnix - SEALED_REVEAL_WINDOW_SECONDS
-        const nowUnix = Math.floor(Date.now() / 1000)
-        if (commitEndUnix <= nowUnix + 60) {
-          alert('Auction end is too soon for sealed mode. Choose a later end date/time.')
+        const verifierAddr = normalizeStarknetAddress(SEALED_BID_VERIFIER_ADDRESS)
+        if (sealedVerifierProbe.address !== verifierAddr || sealedVerifierProbe.ok === null) {
+          const probe = await dojoManager.checkSealedVerifierCompatibility(verifierAddr).catch((error) => ({
+            ok: false,
+            reason: String(error?.message || error || 'Verifier probe failed'),
+          }))
+          sealedVerifierProbe = {
+            address: verifierAddr,
+            ok: Boolean(probe?.ok),
+            reason: String(probe?.reason || ''),
+          }
+        }
+        if (!sealedVerifierProbe.ok) {
+          alert(
+            `Sealed verifier misconfigured.\n\n` +
+            `This auction would not be able to reveal a winner.\n` +
+            `Verifier: ${verifierAddr}\n` +
+            `Reason: ${sealedVerifierProbe.reason || 'Incompatible contract ABI'}\n\n` +
+            `Please set a compatible VITE_SEALED_BID_VERIFIER_ADDRESS before creating sealed auctions.`
+          )
           return
         }
-        if (revealEndUnix <= commitEndUnix + 60) {
+        // Sealed timeline is fully derived from auction end.
+        const nowUnix = Math.floor(Date.now() / 1000)
+        const minEndUnix = nowUnix + SEALED_MIN_TOTAL_SECONDS
+        if (auctionEndUnix < minEndUnix) {
+          const minDate = new Date(minEndUnix * 1000)
+          const minLocal = minDate.toLocaleString()
+          const minUtc = minDate.toISOString().replace('T', ' ').slice(0, 16) + ' UTC'
+          const shortBy = formatRemaining(minEndUnix - auctionEndUnix)
+          const shouldAutoAdjust = confirm(
+            `Sealed auction end is too soon by ${shortBy}.\n\n` +
+            `Minimum required end:\n` +
+            `- Local: ${minLocal}\n` +
+            `- UTC: ${minUtc}\n\n` +
+            'Auto-adjust end time to this minimum now?'
+          )
+          if (shouldAutoAdjust && auctionEndAtInput) {
+            auctionEndAtInput.value = toDatetimeLocalValue(minEndUnix)
+            syncSealedTimelineFromAuctionEnd()
+            updateAuctionEndPreview()
+          }
+          return
+        }
+        const { commitEndUnix, revealEndUnix } = deriveSealedTimeline(auctionEndUnix, nowUnix)
+        if (revealEndUnix < nowUnix + SEALED_MIN_TOTAL_SECONDS) {
+          alert('Sealed auction end must be at least 8 minutes from now.')
+          return
+        }
+        if (revealEndUnix < commitEndUnix + SEALED_MIN_REVEAL_SECONDS) {
           alert('Reveal end must be after commit end.')
           return
         }
@@ -1992,6 +2773,9 @@ function setupUIHandlers() {
       } else {
         submitPostBtn.textContent = isPaid ? `Create Paid Post (${PostManager.getPriceForPaidPost(size)} STRK)` : 'Create Post'
       }
+    }
+    } finally {
+      createPostInFlight = false
     }
   })
   const faucetBtn = document.getElementById('faucet-btn')
@@ -2054,6 +2838,7 @@ function setupPostDetailsHandlers() {
   const buyPostBtn = document.getElementById('buyPostBtn')
   const placeBidBtn = document.getElementById('placeBidBtn')
   const commitBidBtn = document.getElementById('commitBidBtn')
+  const verifyProofBtn = document.getElementById('verifyProofBtn')
   const revealBidBtn = document.getElementById('revealBidBtn')
   const claimCommitRefundBtn = document.getElementById('claimCommitRefundBtn')
   const finalizeAuctionBtn = document.getElementById('finalizeAuctionBtn')
@@ -2411,6 +3196,18 @@ function setupPostDetailsHandlers() {
 
   if (placeBidBtn) placeBidBtn.addEventListener('click', async () => {
     if (!currentPost || !dojoManager) return
+    const normalizedAccount = normalizeSocialAddress(currentAccount?.address || '')
+    const isAuctionCreator =
+      normalizedAccount &&
+      (
+        normalizeSocialAddress(currentPost?.auction_group?.creator) === normalizedAccount ||
+        normalizeSocialAddress(currentPost?.current_owner) === normalizedAccount ||
+        normalizeSocialAddress(currentPost?.created_by) === normalizedAccount
+      )
+    if (isAuctionCreator) {
+      alert('Creator cannot bid in own auction.')
+      return
+    }
     const bid = parseInt(auctionBidInput?.value || '0')
     if (!Number.isFinite(bid) || bid <= 0) {
       alert('Enter a valid bid amount.')
@@ -2433,23 +3230,77 @@ function setupPostDetailsHandlers() {
   })
 
   if (commitBidBtn) commitBidBtn.addEventListener('click', async () => {
-    if (!currentPost || !dojoManager) return
+    if (!currentPost || !dojoManager || !currentAccount) return
+    const activePost = currentPost
+    const normalizedAccount = normalizeSocialAddress(currentAccount?.address || '')
+    const isAuctionCreator =
+      normalizedAccount &&
+      (
+        normalizeSocialAddress(activePost?.auction_group?.creator) === normalizedAccount ||
+        normalizeSocialAddress(activePost?.current_owner) === normalizedAccount ||
+        normalizeSocialAddress(activePost?.created_by) === normalizedAccount
+      )
+    if (isAuctionCreator) {
+      alert('Creator cannot bid in own auction.')
+      return
+    }
     const bid = parseInt(sealedBidInput?.value || '0')
     if (!Number.isFinite(bid) || bid <= 0) {
       alert('Enter a valid sealed bid amount.')
       return
     }
+    const myAddr = normalizeSocialAddress(currentAccount.address || '')
+    const existingCommit = (activePost?.auction_commits || []).find((c) => normalizeSocialAddress(c.bidder) === myAddr) || null
+    const previousEscrow = Number(existingCommit?.escrow_amount || 0)
+    const escrowAmount = bid
+    const slotId = Number(activePost?.id || 0)
+    const modalSlotId = Number(postDetailsModal?.dataset?.postId || 0)
+    if (Number.isFinite(modalSlotId) && modalSlotId > 0 && modalSlotId !== slotId) {
+      alert('Slot changed while modal was open. Reopen Post Details and try again.')
+      return
+    }
+    if (existingCommit && escrowAmount <= previousEscrow) {
+      alert(`Sealed bid update must increase above your current sealed bid (${previousEscrow} STRK).`)
+      return
+    }
+    const additionalLock = Math.max(0, escrowAmount - previousEscrow)
+    const confirmMessage = existingCommit
+      ? `Update sealed bid for slot #${slotId} from ${previousEscrow} to ${escrowAmount} STRK?\nAdditional lock now: ${additionalLock} STRK.`
+      : `Commit sealed bid for slot #${slotId}: ${escrowAmount} STRK?`
+    if (!confirm(confirmMessage)) return
     const salt = randomSaltFelt()
     try {
       postDetailsModal.classList.remove('active')
-      await dojoManager.commitAuctionBid(currentPost.id, bid, salt)
-      saveSaltForSlot(currentPost.id, salt)
+      const commitResult = await dojoManager.commitAuctionBid(slotId, bid, salt, escrowAmount)
+      saveSaltForSlot(slotId, salt)
+      saveBidAmountForSlot(slotId, bid)
+      const commitEndTime = Number(activePost?.auction_sealed_config?.commit_end_time || 0)
+      const revealEndTime = Number(activePost?.auction_sealed_config?.reveal_end_time || 0)
+      if (SEALED_RELAY_URL) {
+        try {
+          const scheduled = await scheduleSealedAutoReveal({
+            slotPostId: commitResult?.slotId || slotId,
+            groupId: commitResult?.groupId || activePost.auction_group_id || 0,
+            bidder: currentAccount.address,
+            bidAmount: commitResult?.bidAmount || bid,
+            salt,
+            commitEndTime,
+            revealEndTime,
+          })
+          if (scheduled?.ok) {
+            showToast(`Sealed bid committed (${escrowAmount} STRK). Auto-reveal scheduled.`)
+          }
+        } catch (relayError) {
+          console.warn('Auto-reveal schedule failed:', relayError)
+          showToast(`Sealed bid committed (${escrowAmount} STRK). Auto-reveal scheduling failed, retrying in background.`)
+        }
+      }
       await new Promise((resolve) => setTimeout(resolve, 5000))
       await postManager.loadPosts()
       await postManager.loadImages()
       canvas.setPosts(postManager.posts)
       await updateWalletInfo()
-      showToast('Sealed bid committed')
+      if (!SEALED_RELAY_URL) showToast(`Sealed bid committed (${escrowAmount} STRK)`)
     } catch (error) {
       console.error('Error committing sealed bid:', error)
       alert('Failed to commit bid: ' + (error.message || 'Unknown error'))
@@ -2458,7 +3309,7 @@ function setupPostDetailsHandlers() {
   })
 
   if (revealBidBtn) revealBidBtn.addEventListener('click', async () => {
-    if (!currentPost || !dojoManager) return
+    if (!currentPost || !dojoManager || !currentAccount) return
     const bid = parseInt(sealedBidInput?.value || '0')
     if (!Number.isFinite(bid) || bid <= 0) {
       alert('Enter your bid amount to reveal.')
@@ -2471,13 +3322,22 @@ function setupPostDetailsHandlers() {
     }
     try {
       postDetailsModal.classList.remove('active')
-      await dojoManager.revealAuctionBidWithProof(currentPost.id, bid, salt, '0x1')
+      if (!SEALED_RELAY_URL) {
+        throw new Error('Auto-reveal relay not configured. Set VITE_SEALED_RELAY_URL.')
+      }
+      const revealed = await requestSealedImmediateReveal({
+        slotPostId: currentPost.id,
+        groupId: Number(currentPost?.auction_group_id || currentPost?.auction_slot?.group_id || 0),
+        bidder: currentAccount.address,
+        bidAmount: bid,
+        salt,
+      })
       await new Promise((resolve) => setTimeout(resolve, 5000))
       await postManager.loadPosts()
       await postManager.loadImages()
       canvas.setPosts(postManager.posts)
       await updateWalletInfo()
-      showToast('Sealed bid revealed')
+      showToast(revealed?.txHash ? `Sealed bid revealed (${shortTxHash(revealed.txHash)})` : 'Sealed bid revealed')
     } catch (error) {
       console.error('Error revealing sealed bid:', error)
       alert('Failed to reveal bid: ' + (error.message || 'Unknown error'))
@@ -2500,6 +3360,48 @@ function setupPostDetailsHandlers() {
       console.error('Error claiming commit refund:', error)
       alert('Failed to claim refund: ' + (error.message || 'Unknown error'))
       postDetailsModal.classList.remove('active')
+    }
+  })
+
+  if (verifyProofBtn) verifyProofBtn.addEventListener('click', async () => {
+    if (!currentPost) return
+    const slotId = Number(currentPost?.id || 0)
+    if (!Number.isFinite(slotId) || slotId <= 0) return
+    if (!SEALED_RELAY_URL) {
+      alert('ZK proof verification viewer requires relay URL configuration.')
+      return
+    }
+    try {
+      const jobs = await fetchSealedRelayJobs(true)
+      const job = getRelayJobForSlot(jobs, slotId, currentAccount?.address || '')
+      if (!job) {
+        alert('No relay proof job found yet for this slot.')
+        return
+      }
+      const z = job?.zkTrace || {}
+      const lines = [
+        `Job: ${job.id || 'n/a'}`,
+        `Reveal stage: ${relayStageLabel(job.status, 'reveal')}`,
+        `Proof scheduled after: ${formatRelayUnix(job?.revealAfterUnix)}`,
+        `Finalize scheduled after: ${formatRelayUnix(job?.finalizeAfterUnix)}`,
+        `Proof felts: ${Number(z?.proofFelts || 0) || 'n/a'}`,
+        `Calldata hash: ${z?.proofCalldataHash || 'n/a'}`,
+        `Witness hash: ${z?.witnessHash || 'n/a'}`,
+        `Proof hash: ${z?.proofHash || 'n/a'}`,
+        `VK hash: ${z?.vkHash || 'n/a'}`,
+        `Public inputs hash: ${z?.publicInputsHash || 'n/a'}`,
+        `Reveal tx: ${job?.revealTxHash || 'n/a'}`,
+        `Finalize tx: ${job?.finalizeTxHash || 'n/a'}`,
+        `Refund tx: ${job?.refundTxHash || 'n/a'}`,
+      ]
+      if (job?.status === 'scheduled' && !job?.zkTrace) {
+        lines.push('')
+        lines.push('Expected state: proof artifacts are generated after commit phase ends.')
+      }
+      alert(`Sealed Result Verification\n\n${lines.join('\n')}`)
+    } catch (error) {
+      console.error('Verify proof error:', error)
+      alert('Could not verify proof details: ' + (error?.message || 'Unknown error'))
     }
   })
 
@@ -2541,6 +3443,7 @@ function showPostDetails(post, source = 'canvas') {
   const buyPostBtn = document.getElementById('buyPostBtn')
   const placeBidBtn = document.getElementById('placeBidBtn')
   const commitBidBtn = document.getElementById('commitBidBtn')
+  const verifyProofBtn = document.getElementById('verifyProofBtn')
   const revealBidBtn = document.getElementById('revealBidBtn')
   const claimCommitRefundBtn = document.getElementById('claimCommitRefundBtn')
   const finalizeAuctionBtn = document.getElementById('finalizeAuctionBtn')
@@ -2653,6 +3556,7 @@ function showPostDetails(post, source = 'canvas') {
   buyPostBtn.textContent = '🛒 Buy Post'
   if (placeBidBtn) placeBidBtn.style.display = 'none'
   if (commitBidBtn) commitBidBtn.style.display = 'none'
+  if (verifyProofBtn) verifyProofBtn.style.display = 'none'
   if (revealBidBtn) revealBidBtn.style.display = 'none'
   if (claimCommitRefundBtn) claimCommitRefundBtn.style.display = 'none'
   if (finalizeAuctionBtn) finalizeAuctionBtn.style.display = 'none'
@@ -2682,6 +3586,14 @@ function showPostDetails(post, source = 'canvas') {
     const now = Math.floor(Date.now() / 1000)
     const sealedCfg = post.auction_sealed_config || null
     const isSealed = Boolean(sealedCfg?.sealed_mode)
+    const normalizedAccount = normalizeSocialAddress(currentAccount?.address || '')
+    const isAuctionCreator =
+      normalizedAccount &&
+      (
+        normalizeSocialAddress(group.creator) === normalizedAccount ||
+        normalizeSocialAddress(post.current_owner) === normalizedAccount ||
+        normalizeSocialAddress(post.created_by) === normalizedAccount
+      )
     const commitEndTs = Number(sealedCfg?.commit_end_time || group.end_time || 0)
     const revealEndTs = Number(sealedCfg?.reveal_end_time || group.end_time || 0)
     const endTs = isSealed ? revealEndTs : Number(group.end_time || 0)
@@ -2690,10 +3602,6 @@ function showPostDetails(post, source = 'canvas') {
     const myCommit = (post.auction_commits || []).find((c) => normalizeSocialAddress(c.bidder) === myAddr) || null
 
     if (postAuctionInfo) {
-      const highest = Number(slot.highest_bid || 0)
-      const bidder = slot.has_bid
-        ? String(slot.highest_bidder || '').slice(0, 8) + '...' + String(slot.highest_bidder || '').slice(-6)
-        : 'No bids yet'
       const endDate = new Date(endTs * 1000)
       const endLocal = endDate.toLocaleString()
       const endUtc = endDate.toISOString().replace('T', ' ').slice(0, 16) + ' UTC'
@@ -2711,11 +3619,57 @@ function showPostDetails(post, source = 'canvas') {
         else phaseLine = 'Mode: Sealed · Phase: Finalize'
       }
       const myCommitLine = isSealed && myCommit
-        ? `<br/>My commit: escrow ${Number(myCommit.escrow_amount || 0)} STRK · revealed: ${myCommit.revealed ? 'Yes' : 'No'} · refunded: ${myCommit.refunded ? 'Yes' : 'No'}`
+        ? `<br/>My sealed bid: committed · revealed: ${myCommit.revealed ? 'Yes' : 'No'} · refunded: ${myCommit.refunded ? 'Yes' : 'No'}`
         : ''
-      postAuctionInfo.innerHTML = '<strong>Auction Slot</strong><br/>' + phaseLine + '<br/>Highest bid: ' + highest + ' STRK<br/>Highest bidder: ' + bidder + '<br/>Ends (local): ' + endLocal + '<br/>Ends (UTC): ' + endUtc + '<br/>Remaining: ' + remainingLabel + '<br/>Finalized: ' + (slot.finalized ? 'Yes' : 'No') + '<br/>Content published: ' + (slot.content_initialized ? 'Yes' : 'No') + myCommitLine + (slot.finalized && slot.has_bid ? '<br/>Proceeds: paid to creator' : '')
+      if (!isSealed) {
+        const highest = Number(slot.highest_bid || 0)
+        const bidder = slot.has_bid
+          ? String(slot.highest_bidder || '').slice(0, 8) + '...' + String(slot.highest_bidder || '').slice(-6)
+          : 'No bids yet'
+        postAuctionInfo.innerHTML =
+          '<strong>Auction Slot</strong><br/>' +
+          phaseLine +
+          '<br/>Highest bid: ' + highest + ' STRK' +
+          '<br/>Highest bidder: ' + bidder +
+          '<br/>Ends (local): ' + endLocal +
+          '<br/>Ends (UTC): ' + endUtc +
+          '<br/>Remaining: ' + remainingLabel +
+          '<br/>Finalized: ' + (slot.finalized ? 'Yes' : 'No') +
+          '<br/>Content published: ' + (slot.content_initialized ? 'Yes' : 'No') +
+          (slot.finalized && slot.has_bid ? '<br/>Proceeds: paid to creator' : '')
+      } else {
+        const commitDate = new Date(commitEndTs * 1000)
+        const revealDate = new Date(revealEndTs * 1000)
+        const commitLocal = commitDate.toLocaleString()
+        const revealLocal = revealDate.toLocaleString()
+        const commitUtc = commitDate.toISOString().replace('T', ' ').slice(0, 16) + ' UTC'
+        const revealUtc = revealDate.toISOString().replace('T', ' ').slice(0, 16) + ' UTC'
+        const canShowWinner = Boolean(slot.finalized || now >= revealEndTs)
+        const revealedWinner = slot.has_bid
+          ? String(slot.highest_bidder || '').slice(0, 8) + '...' + String(slot.highest_bidder || '').slice(-6)
+          : 'No revealed winner yet'
+        postAuctionInfo.innerHTML =
+          '<strong>Auction Slot (Sealed)</strong><br/>' +
+          phaseLine +
+          '<br/>Bids are private until reveal/finalize.' +
+          '<br/>Commit closes (local): ' + commitLocal +
+          '<br/>Commit closes (UTC): ' + commitUtc +
+          '<br/>Reveal closes (local): ' + revealLocal +
+          '<br/>Reveal closes (UTC): ' + revealUtc +
+          '<br/>Auction ends (local): ' + endLocal +
+          '<br/>Auction ends (UTC): ' + endUtc +
+          '<br/>Remaining: ' + remainingLabel +
+          '<br/>Revealed winner: ' + (canShowWinner ? revealedWinner : 'Hidden while sealed auction is active') +
+          '<br/>Finalized: ' + (slot.finalized ? 'Yes' : 'No') +
+          '<br/>Content published: ' + (slot.content_initialized ? 'Yes' : 'No') +
+          myCommitLine +
+          (slot.finalized && slot.has_bid ? '<br/>Settlement: winner paid clearing price; non-winners refunded' : '')
+      }
       postAuctionInfo.style.display = 'block'
-      postAuctionInfo.style.color = '#9ecbff'
+      postAuctionInfo.style.color = isSealed ? '#d7c2ff' : '#9ecbff'
+      if (isSealed) {
+        void enrichSealedProofStatus(post, postAuctionInfo, post?.id, verifyProofBtn)
+      }
     }
 
     if (!slot.finalized) {
@@ -2727,27 +3681,48 @@ function showPostDetails(post, source = 'canvas') {
           postSaleInfo.style.color = '#9ecbff'
           void tryAutoFinalizeAuctionSlot(post, 'post-details')
         } else {
-          if (auctionBidRow) auctionBidRow.style.display = 'block'
-          if (auctionBidInput) auctionBidInput.value = String(Math.max(1, Number(slot.highest_bid || 0) + 1))
-          if (placeBidBtn) placeBidBtn.style.display = 'inline-block'
+          if (isAuctionCreator) {
+            postSaleInfo.textContent = 'Auction in progress. Creator cannot bid in own auction.'
+            postSaleInfo.style.color = '#9ecbff'
+          } else {
+            if (auctionBidRow) auctionBidRow.style.display = 'block'
+            if (auctionBidInput) auctionBidInput.value = String(Math.max(1, Number(slot.highest_bid || 0) + 1))
+            if (placeBidBtn) placeBidBtn.style.display = 'inline-block'
+          }
         }
       } else {
         const inCommit = now < commitEndTs
         const inReveal = now >= commitEndTs && now < revealEndTs
         if (inCommit) {
-          postSaleInfo.textContent = 'Sealed auction: commit phase'
+          postSaleInfo.textContent = isAuctionCreator
+            ? 'Sealed auction: commit phase (creator cannot bid in own auction)'
+            : 'Sealed auction: commit phase'
           postSaleInfo.style.color = '#9ecbff'
-          if (sealedBidRow) sealedBidRow.style.display = 'block'
-          if (sealedBidInput && !sealedBidInput.value) sealedBidInput.value = '1'
-          if (commitBidBtn) commitBidBtn.style.display = myCommit ? 'none' : 'inline-block'
+          if (!isAuctionCreator) {
+            if (sealedBidRow) sealedBidRow.style.display = 'block'
+            if (sealedBidInput && !sealedBidInput.value) {
+              const previousEscrow = Number(myCommit?.escrow_amount || 0)
+              sealedBidInput.value = String(Math.max(1, previousEscrow + (myCommit ? 1 : 0)))
+            }
+            if (commitBidBtn) {
+              commitBidBtn.style.display = 'inline-block'
+              commitBidBtn.textContent = myCommit ? 'Increase Sealed Bid' : 'Commit Sealed Bid'
+            }
+          }
         } else if (inReveal) {
           postSaleInfo.textContent = 'Sealed auction: reveal phase'
           postSaleInfo.style.color = '#9ecbff'
           if (sealedBidRow) sealedBidRow.style.display = 'block'
-          if (sealedBidInput && myCommit?.revealed_bid) sealedBidInput.value = String(myCommit.revealed_bid)
-          if (revealBidBtn) revealBidBtn.style.display = myCommit && !myCommit.revealed ? 'inline-block' : 'none'
+          if (sealedBidInput) sealedBidInput.value = ''
+          if (revealBidBtn) revealBidBtn.style.display = 'none'
+          if (myCommit && !myCommit.revealed) {
+            postSaleInfo.textContent = 'Sealed auction: reveal phase (auto-reveal in progress)'
+            void tryAutoRevealSealedCommit(post, 'post-details')
+          } else if (!myCommit) {
+            postSaleInfo.textContent = 'Sealed auction: reveal phase (commit closed; this wallet cannot place new bids now)'
+          }
         } else {
-          postSaleInfo.textContent = 'Sealed auction ended. Finalizing automatically...'
+          postSaleInfo.textContent = 'Sealed auction ended. Settling reveals and finalizing automatically...'
           postSaleInfo.style.color = '#9ecbff'
           void tryAutoFinalizeAuctionSlot(post, 'post-details')
         }
@@ -2794,7 +3769,8 @@ function showPostDetails(post, source = 'canvas') {
       if (isSealed && myCommit && !myCommit.refunded) {
         const isWinner = slot.has_bid && normalizeSocialAddress(slot.highest_bidder) === myAddr
         if (!isWinner) {
-          if (claimCommitRefundBtn) claimCommitRefundBtn.style.display = 'inline-block'
+          if (claimCommitRefundBtn) claimCommitRefundBtn.style.display = 'none'
+          void tryAutoClaimSealedRefund(post, 'post-details')
         }
       }
     }
@@ -2867,6 +3843,9 @@ async function subscribeToPostUpdates(toriiClient) {
           rememberUsersFromPosts(postManager.posts)
           await postManager.loadImages()
           canvas.setPosts(postManager.posts)
+          await autoRevealPendingSealedCommits('subscription')
+          await autoFinalizeEndedAuctionSlots('subscription')
+          await autoClaimPendingSealedRefunds('subscription')
           if (activeOwnerFeedAddress) renderOwnerFeed(activeOwnerFeedAddress, activeOwnerFeedUsername)
         }
         if (error) {
@@ -2894,6 +3873,10 @@ async function subscribeToPostUpdates(toriiClient) {
         if (postUpdatesRetryTimer) {
           clearTimeout(postUpdatesRetryTimer)
           postUpdatesRetryTimer = null
+        }
+        if (automationTickTimer) {
+          clearInterval(automationTickTimer)
+          automationTickTimer = null
         }
         clearSubscription()
       })
@@ -3078,19 +4061,25 @@ function drawOwnerFeedPostCanvas(canvasEl, post) {
     ctx.fillRect(10, 10, width - 20, height - 20)
 
     if (showAuctionPlaceholder) {
-      const highest = Number(post.auction_slot?.highest_bid || 0)
       const endTs = Number(post.auction_group?.end_time || 0)
       const now = Math.floor(Date.now() / 1000)
       const remaining = Math.max(0, endTs - now)
       const h = Math.floor(remaining / 3600)
       const m = Math.floor((remaining % 3600) / 60)
+      const isSealed = Boolean(post?.auction_sealed_config?.sealed_mode)
+      const label = isSealed ? 'SEALED SLOT' : 'PUBLIC SLOT'
 
-      ctx.fillStyle = '#9ecbff'
+      ctx.fillStyle = isSealed ? '#d7c2ff' : '#9ecbff'
       ctx.textAlign = 'center'
       ctx.font = 'bold 16px sans-serif'
-      ctx.fillText('AUCTION SLOT', width / 2, 70)
+      ctx.fillText(label, width / 2, 70)
       ctx.font = '13px sans-serif'
-      ctx.fillText(`Highest: ${highest} STRK`, width / 2, 105)
+      if (isSealed) {
+        ctx.fillText('Bids hidden until reveal', width / 2, 105)
+      } else {
+        const highest = Number(post.auction_slot?.highest_bid || 0)
+        ctx.fillText(`Highest: ${highest} STRK`, width / 2, 105)
+      }
       ctx.fillText(`Ends in: ${h}h ${m}m`, width / 2, 128)
       ctx.textAlign = 'left'
     } else {
@@ -3451,20 +4440,28 @@ async function updateWalletInfo() {
   if (!currentAccount) return
   const addr = normalizeStarknetAddress(currentAccount.address)
   const shortAddr = addr.slice(0, 8) + '...' + addr.slice(-6)
-  // Render immediately so wallet info never appears stuck.
-  walletInfo.innerHTML = `<span style="color: #4CAF50;">● ${currentUsername || shortAddr}</span>`
+  // Avoid repaint flicker: only render fallback when wallet info is still empty.
+  if (!String(walletInfo.innerHTML || '').trim()) {
+    walletInfo.innerHTML = `<span style="color: #4CAF50;">● ${currentUsername || shortAddr}</span>`
+  }
   try {
     const balance = await withTimeout(getChainBalance(currentAccount.address), 7000, 'wallet balance').catch(() => null)
-    const tbtcBalance = (hasYieldInManifest && YIELD_DUAL_POOL_ENABLED)
+    const swapBtcBalance = (hasYieldInManifest && YIELD_DUAL_POOL_ENABLED)
       ? await withTimeout(
-        dojoManager.getTokenBalance(currentAccount.address, SEPOLIA_BTC_STAKING_TOKEN),
+        dojoManager.getTokenBalance(currentAccount.address, SEPOLIA_BTC_SWAP_TOKEN, 8),
         7000,
-        'tbtc balance',
+        'swap btc balance',
       ).catch(() => 0)
       : 0
     // Don't block wallet rendering on social indexing/network.
     if (!socialState.loaded) {
-      scheduleSocialRevalidation(0)
+      const now = Date.now()
+      // Keep retrying social hydration, but don't trigger tight loops that
+      // constantly re-render wallet info and cause visible blinking.
+      if (now - lastSocialRevalidationKickAt > 15000) {
+        lastSocialRevalidationKickAt = now
+        scheduleSocialRevalidation(0)
+      }
     }
     const me = normalizeSocialAddress(currentAccount.address)
     const { following, followers } = getSocialFollowersFollowing(me)
@@ -3490,31 +4487,70 @@ async function updateWalletInfo() {
     const principalNum = yieldState ? Number(yieldState.principal_strk || 0) : 0
     const queuedNum = yieldState ? Number(yieldState.queued_exit_strk || 0) : 0
     const lockedTotalStr = (principalNum + queuedNum).toFixed(2)
-    const earningsNow = yieldState ? computeLiveYieldEarningsStrk(yieldState) : 0
-    const earningsStr = Number.isFinite(earningsNow) ? earningsNow.toFixed(4) : '0.0000'
+    const earningsStr = '0.000000'
     const queuedExitNum = queuedNum
     const queuedExitStr = Number.isFinite(queuedExitNum) ? queuedExitNum.toFixed(2) : '0.00'
     const hasPrincipal = yieldState && Number(yieldState.principal_strk || 0) > 0
     const hasQueue = yieldState && Number(yieldState.queued_exit_strk || 0) > 0
     const yieldDepositBtnLabel = '🔒 Stake'
-    const yieldWithdrawBtnLabel = '💰 Unstake'
+    let yieldWithdrawBtnLabel = '💰 Unstake'
     const yieldClaimBtnLabel = '✨ Claim'
     const poolSymbol = yieldState ? String(yieldState.pool_token_symbol || (yieldState.use_btc_mode ? 'WBTC' : 'STRK')) : 'STRK'
     const position = starkzapPosition?.position || null
-    const stakedLabel = position ? position.staked.toFormatted(true) : `${lockedTotalStr} ${poolSymbol}`
-    const rewardsLabel = position ? position.rewards.toFormatted(true) : `${earningsStr} ${poolSymbol}`
-    const totalLabel = position ? position.total.toFormatted(true) : `${lockedTotalStr} ${poolSymbol}`
-    const unpoolingLabel = position && !position.unpooling.isZero()
+    let stakedLabel = position ? position.staked.toFormatted(true) : `${lockedTotalStr} ${poolSymbol}`
+    let rewardsLabel = position ? position.rewards.toFormatted(true) : `${earningsStr} ${poolSymbol}`
+    let totalLabel = position ? position.total.toFormatted(true) : `${lockedTotalStr} ${poolSymbol}`
+    let unpoolingLabel = position && !position.unpooling.isZero()
       ? position.unpooling.toFormatted(true)
       : null
-    const unpoolAtLabel = position?.unpoolTime ? new Date(position.unpoolTime).toLocaleString() : ''
+    let unpoolAtLabel = position?.unpoolTime ? new Date(position.unpoolTime).toLocaleString() : ''
+    if (position && !position.unpooling.isZero()) {
+      const readyToExit = position?.unpoolTime
+        ? new Date(position.unpoolTime).getTime() <= Date.now()
+        : false
+      if (readyToExit) {
+        unpoolAtLabel = 'Ready now (press Unstake STRK)'
+        yieldWithdrawBtnLabel = '💰 Complete Exit'
+      }
+    }
     const commissionLabel = Number.isFinite(Number(starkzapPosition?.commissionPercent))
       ? Number(starkzapPosition?.commissionPercent).toFixed(2)
       : '0.00'
     const yieldModeLabel = `${poolSymbol} real staking`
     const btcSymbol = BTC_TRACK_SYMBOL
-    const btcWalletBalance = Number(tbtcBalance || 0)
+    const btcWalletBalance = Number(swapBtcBalance || 0)
     const isBtcPoolActive = String(poolSymbol || '').toUpperCase() === 'WBTC'
+    // AVNU is source-of-truth for STRK staking status in Sepolia.
+    // Always prefer AVNU values to avoid cross-source inconsistencies.
+    if (IS_SEPOLIA && dojoManager?.getAvnuUserStakingByToken) {
+      const avnuStrkPosition = await withTimeout(
+        dojoManager.getAvnuUserStakingByToken(PAYMENT_TOKEN_ADDRESS, currentAccount.address),
+        6000,
+        'avnu strk staking position',
+      ).catch(() => null)
+      if (avnuStrkPosition) {
+        const avnuStaked = Number(avnuStrkPosition.amountFormatted || 0)
+        const avnuRewards = Number(avnuStrkPosition.rewardsFormatted || 0)
+        const avnuUnpool = Number(avnuStrkPosition.unpoolFormatted || 0)
+        stakedLabel = `${avnuStaked.toFixed(6)} STRK`
+        rewardsLabel = `${avnuRewards.toFixed(6)} STRK`
+        totalLabel = `${(avnuStaked + avnuRewards).toFixed(6)} STRK`
+        if (avnuUnpool > 0) {
+          unpoolingLabel = `${avnuUnpool.toFixed(6)} STRK`
+          const readyToExit = avnuStrkPosition.unpoolTime && new Date(avnuStrkPosition.unpoolTime).getTime() <= Date.now()
+          if (readyToExit) {
+            unpoolAtLabel = 'Ready now (press Unstake STRK)'
+            yieldWithdrawBtnLabel = '💰 Complete Exit'
+          } else {
+            unpoolAtLabel = avnuStrkPosition.unpoolTime ? new Date(avnuStrkPosition.unpoolTime).toLocaleString() : unpoolAtLabel
+          }
+        } else {
+          unpoolingLabel = null
+          unpoolAtLabel = ''
+        }
+      }
+    }
+
     const btcStakedLabel = isBtcPoolActive ? stakedLabel : `0.000000 ${btcSymbol}`
     const btcRewardsLabel = isBtcPoolActive ? rewardsLabel : `0.000000 ${btcSymbol}`
     walletInfo.innerHTML = `
@@ -3530,7 +4566,7 @@ async function updateWalletInfo() {
               <button id="wallet-logout-btn" class="wallet-logout-btn" type="button" aria-label="Logout" title="Logout">⏻</button>
             </div>
             <span class="wallet-balance">💰 ${balanceStr} STRK</span>
-            ${hasYieldInManifest ? `<span class="wallet-balance">₿ ${btcWalletBalance.toFixed(6)} ${btcSymbol}</span>` : ''}
+            ${hasYieldInManifest ? `<span class="wallet-balance">₿ ${btcWalletBalance.toFixed(8)} ${btcSymbol}</span>` : ''}
             ${hasYieldInManifest ? `<span class="wallet-yield-line">🔒 Staked ${stakedLabel} · ✨ Rewards ${rewardsLabel}${unpoolingLabel ? ` · ⏳ Unpooling ${unpoolingLabel}` : ''}${unpoolAtLabel ? ` · Exit at ${unpoolAtLabel}` : ''}</span>` : ''}
             ${hasYieldInManifest ? `<span class="wallet-yield-line">🔒 Staked ${btcStakedLabel} · ✨ Rewards ${btcRewardsLabel}</span>` : ''}
           </div>
@@ -3606,7 +4642,6 @@ async function updateWalletInfo() {
         window.dispatchEvent(new Event('starkwall:open-swap-strk-wbtc'))
       }
     }
-
     const walletYieldDepositBtn = document.getElementById('wallet-yield-deposit-btn')
     if (walletYieldDepositBtn) {
       walletYieldDepositBtn.onclick = async () => {
@@ -3643,6 +4678,41 @@ async function updateWalletInfo() {
               user: currentAccount.address,
               symbol: activeSymbol,
             })
+            if (IS_SEPOLIA && activeSymbol === 'STRK' && dojoManager?.unstakeStrkViaAvnu) {
+              try {
+                const avnuRes = await dojoManager.unstakeStrkViaAvnu()
+                txHash = String(avnuRes?.txHash || '')
+                providerPath = 'avnu-staking'
+                if (avnuRes?.action === 'pending') {
+                  const when = avnuRes?.unpoolTimeMs ? new Date(avnuRes.unpoolTimeMs).toLocaleString() : 'later'
+                  showToast(`STRK unstake in cooldown. Available at ${when}.`)
+                  await updateWalletInfo()
+                  return
+                }
+                addActivityEvent({
+                  actionType: avnuRes?.action === 'exit' ? 'unstake_exit' : 'unstake_intent',
+                  token: activeSymbol,
+                  amount: 0,
+                  providerPath,
+                  txHash,
+                  status: 'success',
+                })
+                if (avnuRes?.action === 'intent') {
+                  showToast(`Unstake requested for ${activeSymbol}. Complete after cooldown.${txHash ? ` ${shortTxHash(txHash)}` : ''}`)
+                } else {
+                  showToast(`${activeSymbol} returned to wallet balance.${txHash ? ` ${shortTxHash(txHash)}` : ''}`)
+                }
+                await updateWalletInfo()
+                return
+              } catch (avnuUnstakeError) {
+                const msg = String(avnuUnstakeError?.message || avnuUnstakeError || '')
+                if (/no staked or unpooling strk position found/i.test(msg)) {
+                  console.info('[Unstake] AVNU has no STRK position; trying Starkzap/Dojo fallback path')
+                } else {
+                  throw avnuUnstakeError
+                }
+              }
+            }
             if (starkzapManager && IS_SEPOLIA) {
               try {
                 const latest = await dojoManager.queryYieldState(currentAccount.address).catch(() => cachedYieldState || null)

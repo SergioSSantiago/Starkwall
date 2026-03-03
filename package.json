@@ -1,4 +1,8 @@
 {
+  "scripts": {
+    "sealed-relay": "node sealed-relayer-server.js",
+    "faucet": "node faucet-server.js"
+  },
   "dependencies": {
     "starknet": "^6.11.0"
   }

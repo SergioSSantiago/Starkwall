@@ -34,7 +34,7 @@
   "contracts": [
     {
       "address": "0x9b693df0de1b9217493ea72b159beaea15c4299130a1a31279fd7a64adcb8d",
-      "class_hash": "0x4ae44cde820ade10349fdefda7485806d0a0c4c679feeb0c99042a04ecf33fd",
+      "class_hash": "0xa9fe29107e1490be2b5ca1c8c7f9f7f93345b33abbf493f888c68f8d94ee5f",
       "init_calldata": [],
       "tag": "di-actions",
       "selector": "0x4c09d12108e978b8c073f8d7186ed1aa144777a0aad9d1334532b5813038897",
@@ -3574,6 +3574,10 @@
               "type": "core::integer::u64"
             },
             {
+              "name": "bidder",
+              "type": "core::starknet::contract_address::ContractAddress"
+            },
+            {
               "name": "bid_amount",
               "type": "core::integer::u128"
             },
@@ -3582,8 +3586,8 @@
               "type": "core::felt252"
             },
             {
-              "name": "proof_blob_hash",
-              "type": "core::felt252"
+              "name": "full_proof_with_hints",
+              "type": "core::array::Span::<core::felt252>"
             }
           ],
           "outputs": [],
@@ -3596,6 +3600,10 @@
             {
               "name": "slot_post_id",
               "type": "core::integer::u64"
+            },
+            {
+              "name": "bidder",
+              "type": "core::starknet::contract_address::ContractAddress"
             }
           ],
           "outputs": [],
