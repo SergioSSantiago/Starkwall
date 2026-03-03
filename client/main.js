@@ -4538,12 +4538,12 @@ async function updateWalletInfo() {
       yieldState = fetchedYieldState || cachedYieldState || null
     }
     if (yieldState) cachedYieldState = yieldState
-    const activeSymbol = String(yieldState?.pool_token_symbol || (yieldState?.use_btc_mode ? 'WBTC' : 'STRK') || 'STRK').toUpperCase() === 'WBTC'
-      ? 'WBTC'
-      : 'STRK'
-    const starkzapPosition = (starkzapManager && IS_SEPOLIA)
-      ? await withTimeout(starkzapManager.getPoolPosition(activeSymbol), 7000, 'starkzap position').catch(() => null)
-      : null
+    const [starkzapStrkPosition, starkzapWbtcPosition] = (starkzapManager && IS_SEPOLIA)
+      ? await Promise.all([
+        withTimeout(starkzapManager.getPoolPosition('STRK'), 7000, 'starkzap STRK position').catch(() => null),
+        withTimeout(starkzapManager.getPoolPosition('WBTC'), 7000, 'starkzap WBTC position').catch(() => null),
+      ])
+      : [null, null]
     const principalNum = yieldState ? Number(yieldState.principal_strk || 0) : 0
     const queuedNum = yieldState ? Number(yieldState.queued_exit_strk || 0) : 0
     const lockedTotalStr = (principalNum + queuedNum).toFixed(2)
@@ -4556,25 +4556,26 @@ async function updateWalletInfo() {
     let yieldWithdrawBtnLabel = '💰 Unstake'
     const yieldClaimBtnLabel = '✨ Claim'
     const poolSymbol = yieldState ? String(yieldState.pool_token_symbol || (yieldState.use_btc_mode ? 'WBTC' : 'STRK')) : 'STRK'
-    const position = starkzapPosition?.position || null
-    let stakedLabel = position ? position.staked.toFormatted(true) : `${lockedTotalStr} ${poolSymbol}`
-    let rewardsLabel = position ? position.rewards.toFormatted(true) : `${earningsStr} ${poolSymbol}`
-    let totalLabel = position ? position.total.toFormatted(true) : `${lockedTotalStr} ${poolSymbol}`
-    let unpoolingLabel = position && !position.unpooling.isZero()
-      ? position.unpooling.toFormatted(true)
+    const strkPosition = starkzapStrkPosition?.position || null
+    const wbtcPosition = starkzapWbtcPosition?.position || null
+    let stakedLabel = strkPosition ? strkPosition.staked.toFormatted(true) : `${lockedTotalStr} ${poolSymbol}`
+    let rewardsLabel = strkPosition ? strkPosition.rewards.toFormatted(true) : `${earningsStr} ${poolSymbol}`
+    let totalLabel = strkPosition ? strkPosition.total.toFormatted(true) : `${lockedTotalStr} ${poolSymbol}`
+    let unpoolingLabel = strkPosition && !strkPosition.unpooling.isZero()
+      ? strkPosition.unpooling.toFormatted(true)
       : null
-    let unpoolAtLabel = position?.unpoolTime ? new Date(position.unpoolTime).toLocaleString() : ''
-    if (position && !position.unpooling.isZero()) {
-      const readyToExit = position?.unpoolTime
-        ? new Date(position.unpoolTime).getTime() <= Date.now()
+    let unpoolAtLabel = strkPosition?.unpoolTime ? new Date(strkPosition.unpoolTime).toLocaleString() : ''
+    if (strkPosition && !strkPosition.unpooling.isZero()) {
+      const readyToExit = strkPosition?.unpoolTime
+        ? new Date(strkPosition.unpoolTime).getTime() <= Date.now()
         : false
       if (readyToExit) {
         unpoolAtLabel = 'Ready now (press Unstake STRK)'
         yieldWithdrawBtnLabel = '💰 Complete Exit'
       }
     }
-    const commissionLabel = Number.isFinite(Number(starkzapPosition?.commissionPercent))
-      ? Number(starkzapPosition?.commissionPercent).toFixed(2)
+    const commissionLabel = Number.isFinite(Number(starkzapStrkPosition?.commissionPercent))
+      ? Number(starkzapStrkPosition?.commissionPercent).toFixed(2)
       : '0.00'
     const yieldModeLabel = `${poolSymbol} real staking`
     const btcSymbol = BTC_TRACK_SYMBOL
@@ -4592,9 +4593,9 @@ async function updateWalletInfo() {
         const avnuStaked = Number(avnuStrkPosition.amountFormatted || 0)
         const avnuRewards = Number(avnuStrkPosition.rewardsFormatted || 0)
         const avnuUnpool = Number(avnuStrkPosition.unpoolFormatted || 0)
-        const zapStaked = position ? parseTokenFormattedNumber(position.staked?.toFormatted?.()) : 0
-        const zapRewards = position ? parseTokenFormattedNumber(position.rewards?.toFormatted?.()) : 0
-        const zapUnpool = position ? parseTokenFormattedNumber(position.unpooling?.toFormatted?.()) : 0
+        const zapStaked = strkPosition ? parseTokenFormattedNumber(strkPosition.staked?.toFormatted?.()) : 0
+        const zapRewards = strkPosition ? parseTokenFormattedNumber(strkPosition.rewards?.toFormatted?.()) : 0
+        const zapUnpool = strkPosition ? parseTokenFormattedNumber(strkPosition.unpooling?.toFormatted?.()) : 0
 
         const effectiveStaked = Math.max(avnuStaked, zapStaked, 0)
         // Rewards must remain chain-truthful:
@@ -4626,8 +4627,57 @@ async function updateWalletInfo() {
       }
     }
 
-    const btcStakedLabel = isBtcPoolActive ? stakedLabel : `0.000000 ${btcSymbol}`
-    const btcRewardsLabel = isBtcPoolActive ? rewardsLabel : `0.000000 ${btcSymbol}`
+    let wbtcStakedRaw = 0n
+    let wbtcRewardsRaw = 0n
+    let hasWbtcMemberInfo = false
+    let wbtcRewardsDisplayOverride = ''
+    if (starkzapManager?.getWbtcMemberInfo && currentAccount?.address) {
+      try {
+        const rawMember = await withTimeout(
+          starkzapManager.getWbtcMemberInfo(currentAccount.address),
+          7000,
+          'starkzap WBTC member info',
+        )
+        if (rawMember?.found) {
+          wbtcStakedRaw = BigInt(rawMember.stakedRaw || 0n)
+          // Chain-accurate rewards from pool member info.
+          // For WBTC UX, show equivalent WBTC via live quote.
+          wbtcRewardsRaw = BigInt(rawMember.unclaimedRewardsRaw || 0n)
+          const rewardTokenDecimals = await dojoManager.getTokenDecimals(PAYMENT_TOKEN_ADDRESS).catch(() => 18)
+          const rewardValue = unitsToTokenNumber(wbtcRewardsRaw, rewardTokenDecimals, 12)
+          let rewardWbtc = 0
+          if (Number.isFinite(rewardValue) && rewardValue > 0 && dojoManager?.getTokenSwapQuote) {
+            try {
+              const q = await withTimeout(
+                dojoManager.getTokenSwapQuote(PAYMENT_TOKEN_ADDRESS, SEPOLIA_BTC_SWAP_TOKEN, rewardValue),
+                6000,
+                'wbtc rewards quote',
+              )
+              rewardWbtc = Number(q?.estimatedBuyAmount || 0)
+            } catch {}
+          }
+          wbtcRewardsDisplayOverride = `${Math.max(0, Number.isFinite(rewardWbtc) ? rewardWbtc : 0).toFixed(8)} ${btcSymbol}`
+          hasWbtcMemberInfo = true
+        }
+      } catch {}
+    }
+    // Fallback only when direct on-chain member info is unavailable.
+    if (!hasWbtcMemberInfo) {
+      wbtcStakedRaw = (() => {
+        try { return BigInt(wbtcPosition?.staked?.toBase?.() ?? 0) } catch { return 0n }
+      })()
+      wbtcRewardsRaw = (() => {
+        try { return BigInt(wbtcPosition?.rewards?.toBase?.() ?? 0) } catch { return 0n }
+      })()
+    }
+    // WBTC track in this UI is presented with 8 decimals to match user-facing
+    // wallet/swap balance, independent from any SDK token metadata quirks.
+    const btcStakedLabel = (hasWbtcMemberInfo || wbtcPosition)
+      ? `${unitsToTokenNumber(wbtcStakedRaw, 8, 8).toFixed(8)} ${btcSymbol}`
+      : `0.00000000 ${btcSymbol}`
+    const btcRewardsLabel = (hasWbtcMemberInfo || wbtcPosition)
+      ? (wbtcRewardsDisplayOverride || `${unitsToTokenNumber(wbtcRewardsRaw, 8, 8).toFixed(8)} ${btcSymbol}`)
+      : `0.00000000 ${btcSymbol}`
     walletInfo.innerHTML = `
       <div class="wallet-box">
         <div class="wallet-top-row">

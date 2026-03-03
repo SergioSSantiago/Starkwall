@@ -39,6 +39,14 @@ function formatUnits(raw, decimals = 18) {
   return frac ? `${whole}.${frac}` : `${whole}`
 }
 
+function hasNonZeroPosition(position) {
+  if (!position) return false
+  const stakedZero = Boolean(position?.staked?.isZero?.())
+  const rewardsZero = Boolean(position?.rewards?.isZero?.())
+  const unpoolZero = Boolean(position?.unpooling?.isZero?.())
+  return !(stakedZero && rewardsZero && unpoolZero)
+}
+
 export class StarkzapManager {
   constructor(options = {}) {
     this.enabled = IS_SEPOLIA
@@ -362,13 +370,109 @@ export class StarkzapManager {
     if (!wallet) {
       return { wallet: null, pool: null, isMember: false, position: null, commissionPercent: 0 }
     }
-    const pool = await this.resolvePool(symbol)
-    const isMember = await wallet.isPoolMember(pool.poolContract).catch(() => false)
-    const position = isMember
+    // For balance/position reads, resolve with wallet context so WBTC picks the
+    // pool that actually matches the user's held/staked token.
+    let pool = await this.resolvePool(symbol, { walletAddress: wallet.address })
+    let isMember = await wallet.isPoolMember(pool.poolContract).catch(() => false)
+    let position = isMember
       ? await wallet.getPoolPosition(pool.poolContract).catch(() => null)
       : null
-    const commissionPercent = await wallet.getPoolCommission(pool.poolContract).catch(() => 0)
+    let commissionPercent = await wallet.getPoolCommission(pool.poolContract).catch(() => 0)
+
+    // WBTC on Sepolia may have multiple wrappers/pools. If the scored pool is
+    // not the member pool, probe all BTC-like pools and pick the pool that
+    // actually holds the user's position so wallet UI stays chain-accurate.
+    if (normalizeSymbol(symbol) === 'WBTC' && !hasNonZeroPosition(position)) {
+      const validators = Object.values(sepoliaValidators || {})
+      for (const validator of validators) {
+        const pools = await this.sdk.getStakerPools(validator.stakerAddress).catch(() => [])
+        for (const candidate of (pools || [])) {
+          if (!tokenMatches('WBTC', candidate?.token?.symbol)) continue
+          const member = await wallet.isPoolMember(candidate.poolContract).catch(() => false)
+          if (!member) continue
+          const candidatePosition = await wallet.getPoolPosition(candidate.poolContract).catch(() => null)
+          if (!hasNonZeroPosition(candidatePosition)) continue
+          pool = candidate
+          isMember = true
+          position = candidatePosition
+          commissionPercent = await wallet.getPoolCommission(candidate.poolContract).catch(() => commissionPercent)
+          console.info('[Starkzap] getPoolPosition selected member pool', {
+            symbol: 'WBTC',
+            poolContract: String(candidate.poolContract),
+            token: candidate?.token?.symbol,
+            tokenAddress: normalizeAddress(candidate?.token?.address),
+          })
+          return { wallet, pool, isMember, position, commissionPercent }
+        }
+      }
+    }
+
     return { wallet, pool, isMember, position, commissionPercent }
+  }
+
+  async getWbtcMemberInfo(accountAddress) {
+    const user = normalizeAddress(accountAddress || '')
+    if (!user || user === '0x0' || !this.sdk?.provider) {
+      return {
+        found: false,
+        poolAddress: '',
+        tokenAddress: '',
+        tokenSymbol: '',
+        stakedRaw: 0n,
+        unclaimedRewardsRaw: 0n,
+        commissionBps: 0n,
+        memberFlag: 0n,
+      }
+    }
+
+    const validators = Object.values(sepoliaValidators || {})
+    for (const validator of validators) {
+      const pools = await this.sdk.getStakerPools(validator.stakerAddress).catch(() => [])
+      for (const pool of (pools || [])) {
+        if (!tokenMatches('WBTC', pool?.token?.symbol)) continue
+        const poolAddress = String(pool?.poolContract || '')
+        if (!poolAddress) continue
+        try {
+          const res = await this.sdk.provider.callContract({
+            contractAddress: poolAddress,
+            entrypoint: 'get_pool_member_info_v1',
+            calldata: [user],
+          })
+          const parts = Array.isArray(res) ? res : (res?.result || [])
+          // ABI decode (Option<PoolMemberInfoV1>, Some variant index = 0):
+          // [0, reward_address, amount, unclaimed_rewards, commission, unpool_amount, unpool_time]
+          const stakedRaw = BigInt(parts?.[2] || 0)
+          const unclaimedRewardsRaw = BigInt(parts?.[3] || 0)
+          const commissionBps = BigInt(parts?.[4] || 0)
+          const memberFlag = BigInt(parts?.[6] || 0)
+          if (stakedRaw > 0n || unclaimedRewardsRaw > 0n || memberFlag > 0n) {
+            return {
+              found: true,
+              poolAddress: normalizeAddress(poolAddress),
+              tokenAddress: normalizeAddress(pool?.token?.address),
+              tokenSymbol: String(pool?.token?.symbol || ''),
+              stakedRaw,
+              unclaimedRewardsRaw,
+              commissionBps,
+              memberFlag,
+            }
+          }
+        } catch {
+          continue
+        }
+      }
+    }
+
+    return {
+      found: false,
+      poolAddress: '',
+      tokenAddress: '',
+      tokenSymbol: '',
+      stakedRaw: 0n,
+      unclaimedRewardsRaw: 0n,
+      commissionBps: 0n,
+      memberFlag: 0n,
+    }
   }
 
   async unstake(symbol, requestedAmount = null) {
