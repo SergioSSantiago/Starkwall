@@ -35,6 +35,17 @@ pub trait IActions<T> {
         verifier: starknet::ContractAddress
     ) -> u64;
 
+    fn configure_auction_sealed(
+        ref self: T,
+        group_id: u64,
+        commit_end_time: u64,
+        reveal_end_time: u64,
+        verifier: starknet::ContractAddress
+    );
+
+    fn sync_occupancy_index(ref self: T, max_posts: u32) -> (u64, u64);
+    fn occupancy_sync_progress(self: @T) -> (u64, u64);
+
     fn place_bid(
         ref self: T,
         slot_post_id: u64,
@@ -236,7 +247,7 @@ pub mod actions {
     use starknet::{ContractAddress, get_block_timestamp, get_contract_address};
     use crate::models::{
         AuctionCommit, AuctionGroup, AuctionRevealNullifier, AuctionSealedConfig, AuctionSlot,
-        AuctionSlotPricing,
+        AuctionSlotPricing, OccupancySyncState, OccupiedCell,
         FollowRelation, FollowStats, Post, PostCounter, UserProfile, UsernameIndex, YieldAdminState,
         YieldExitQueue, YieldPoolState, YieldPosition, YieldRiskState, YieldStrategyState
     };
@@ -256,6 +267,7 @@ pub mod actions {
     const YIELD_DEFAULT_PROTOCOL_FEE_BPS: u32 = 1000; // 10%
     const YIELD_DEFAULT_USER_SHARE_BPS: u32 = 2500; // 25%
     const REWARD_INDEX_SCALE: u128 = 1_000_000_000_000_000_000; // 1e18
+    const OCCUPANCY_SYNC_STATE_ID: u8 = 0;
 
     // Keep aligned with frontend tile dimensions.
     const TILE_W: i32 = 393;
@@ -311,6 +323,199 @@ pub mod actions {
         counter.count = post_id;
         world.write_model(@counter);
         post_id
+    }
+
+    fn read_occupancy_sync_state(ref world: dojo::world::WorldStorage) -> OccupancySyncState {
+        let state: OccupancySyncState = world.read_model(OCCUPANCY_SYNC_STATE_ID);
+        if state.state_id == OCCUPANCY_SYNC_STATE_ID {
+            state
+        } else {
+            OccupancySyncState { state_id: OCCUPANCY_SYNC_STATE_ID, synced_post_id: 0 }
+        }
+    }
+
+    fn write_occupancy_sync_state(ref world: dojo::world::WorldStorage, synced_post_id: u64) {
+        world.write_model(@OccupancySyncState { state_id: OCCUPANCY_SYNC_STATE_ID, synced_post_id });
+    }
+
+    fn tile_cell_x(x_position: i32) -> i32 {
+        x_position / TILE_W
+    }
+
+    fn tile_cell_y(y_position: i32) -> i32 {
+        y_position / TILE_H
+    }
+
+    fn is_cell_occupied(ref world: dojo::world::WorldStorage, cell_x: i32, cell_y: i32) -> bool {
+        if cell_x < 0 || cell_y < 0 {
+            return false;
+        }
+        let cell: OccupiedCell = world.read_model((cell_x, cell_y));
+        cell.cell_x == cell_x && cell.cell_y == cell_y && cell.occupied
+    }
+
+    fn mark_block_cells_occupied(
+        ref world: dojo::world::WorldStorage,
+        top_left_x: i32,
+        top_left_y: i32,
+        size: u8,
+        occupied: bool,
+    ) {
+        let base_cell_x = tile_cell_x(top_left_x);
+        let base_cell_y = tile_cell_y(top_left_y);
+        let size_i32: i32 = size.try_into().unwrap();
+        let mut dx: i32 = 0;
+        loop {
+            if dx >= size_i32 {
+                break;
+            }
+            let mut dy: i32 = 0;
+            loop {
+                if dy >= size_i32 {
+                    break;
+                }
+                world.write_model(
+                    @OccupiedCell {
+                        cell_x: base_cell_x + dx,
+                        cell_y: base_cell_y + dy,
+                        occupied,
+                    }
+                );
+                dy += 1;
+            };
+            dx += 1;
+        };
+    }
+
+    fn assert_region_free_indexed(
+        ref world: dojo::world::WorldStorage,
+        new_x: i32,
+        new_y: i32,
+        new_size: u8,
+    ) {
+        assert!(new_size > 0, "Invalid post size");
+        let base_cell_x = tile_cell_x(new_x);
+        let base_cell_y = tile_cell_y(new_y);
+        let size_i32: i32 = new_size.try_into().unwrap();
+        let mut dx: i32 = 0;
+        loop {
+            if dx >= size_i32 {
+                break;
+            }
+            let mut dy: i32 = 0;
+            loop {
+                if dy >= size_i32 {
+                    break;
+                }
+                assert!(
+                    !is_cell_occupied(ref world, base_cell_x + dx, base_cell_y + dy),
+                    "Post overlaps an occupied area"
+                );
+                dy += 1;
+            };
+            dx += 1;
+        };
+    }
+
+    fn assert_adjacent_to_existing_indexed(
+        ref world: dojo::world::WorldStorage,
+        new_x: i32,
+        new_y: i32,
+        new_size: u8,
+    ) {
+        let counter: PostCounter = world.read_model(0_u8);
+        if counter.count == 0 {
+            return;
+        }
+        let base_cell_x = tile_cell_x(new_x);
+        let base_cell_y = tile_cell_y(new_y);
+        let size_i32: i32 = new_size.try_into().unwrap();
+        let min_x = base_cell_x - 1;
+        let max_x = base_cell_x + size_i32;
+        let min_y = base_cell_y - 1;
+        let max_y = base_cell_y + size_i32;
+
+        let mut found_adjacent = false;
+        let mut x = min_x;
+        loop {
+            if x > max_x {
+                break;
+            }
+            let mut y = min_y;
+            loop {
+                if y > max_y {
+                    break;
+                }
+                let is_border = x == min_x || x == max_x || y == min_y || y == max_y;
+                if is_border && is_cell_occupied(ref world, x, y) {
+                    found_adjacent = true;
+                    break;
+                }
+                y += 1;
+            };
+            if found_adjacent {
+                break;
+            }
+            x += 1;
+        };
+        assert!(found_adjacent, "New post must be adjacent to an existing post");
+    }
+
+    fn sync_occupancy_index_step(
+        ref world: dojo::world::WorldStorage, max_posts: u32
+    ) -> (u64, u64) {
+        let mut state = read_occupancy_sync_state(ref world);
+        let counter: PostCounter = world.read_model(0_u8);
+        if state.synced_post_id >= counter.count {
+            if state.synced_post_id != counter.count {
+                state.synced_post_id = counter.count;
+                write_occupancy_sync_state(ref world, state.synced_post_id);
+            }
+            return (state.synced_post_id, counter.count);
+        }
+
+        let mut processed: u32 = 0;
+        let mut next_post_id = state.synced_post_id + 1;
+        loop {
+            if next_post_id > counter.count || processed >= max_posts {
+                break;
+            }
+            let post: Post = world.read_model(next_post_id);
+            mark_block_cells_occupied(
+                ref world,
+                post.x_position,
+                post.y_position,
+                post.size,
+                true
+            );
+            state.synced_post_id = next_post_id;
+            processed += 1;
+            next_post_id += 1;
+        };
+
+        write_occupancy_sync_state(ref world, state.synced_post_id);
+        (state.synced_post_id, counter.count)
+    }
+
+    fn should_use_indexed_occupancy(
+        ref world: dojo::world::WorldStorage, counter_before: u64
+    ) -> bool {
+        let state = read_occupancy_sync_state(ref world);
+        state.synced_post_id >= counter_before
+    }
+
+    fn maybe_advance_occupancy_cursor_after_writes(
+        ref world: dojo::world::WorldStorage,
+        counter_before: u64,
+    ) {
+        let state = read_occupancy_sync_state(ref world);
+        if state.synced_post_id < counter_before {
+            return;
+        }
+        let counter: PostCounter = world.read_model(0_u8);
+        if state.synced_post_id < counter.count {
+            write_occupancy_sync_state(ref world, counter.count);
+        }
     }
 
 
@@ -731,6 +936,7 @@ pub mod actions {
         };
 
         world.write_model(@post);
+        mark_block_cells_occupied(ref world, x_position, y_position, size, true);
     }
 
     #[abi(embed_v0)]
@@ -747,6 +953,7 @@ pub mod actions {
         ) -> u64 {
             let mut world = self.world_default();
             let caller = starknet::get_caller_address();
+            let counter_before: PostCounter = world.read_model(0_u8);
 
             // Validate size: free posts must be size 1, paid posts can be 2+
             if is_paid {
@@ -761,8 +968,13 @@ pub mod actions {
 
             assert!(x_position >= 0, "x_position must be non-negative");
             assert!(y_position >= 0, "y_position must be non-negative");
-            assert_region_free(ref world, x_position, y_position, size);
-            assert_adjacent_to_existing(ref world, x_position, y_position, size);
+            if should_use_indexed_occupancy(ref world, counter_before.count) {
+                assert_region_free_indexed(ref world, x_position, y_position, size);
+                assert_adjacent_to_existing_indexed(ref world, x_position, y_position, size);
+            } else {
+                assert_region_free(ref world, x_position, y_position, size);
+                assert_adjacent_to_existing(ref world, x_position, y_position, size);
+            }
 
             if is_paid {
                 let price_strk = paid_post_price(size);
@@ -796,6 +1008,7 @@ pub mod actions {
                 0,
                 0,
             );
+            maybe_advance_occupancy_cursor_after_writes(ref world, counter_before.count);
 
             post_id
         }
@@ -812,6 +1025,7 @@ pub mod actions {
             let mut world = self.world_default();
             let caller = starknet::get_caller_address();
             let now = get_block_timestamp();
+            let counter_before: PostCounter = world.read_model(0_u8);
 
             assert!(end_time > now, "Auction end time must be in the future");
 
@@ -828,8 +1042,13 @@ pub mod actions {
             let auction_top_left_y = center_y_position - TILE_H;
             assert!(auction_top_left_x >= 0, "Auction 3x3 would exceed left boundary");
             assert!(auction_top_left_y >= 0, "Auction 3x3 would exceed top boundary");
-            assert_region_free(ref world, auction_top_left_x, auction_top_left_y, 3);
-            assert_adjacent_to_existing(ref world, auction_top_left_x, auction_top_left_y, 3);
+            if should_use_indexed_occupancy(ref world, counter_before.count) {
+                assert_region_free_indexed(ref world, auction_top_left_x, auction_top_left_y, 3);
+                assert_adjacent_to_existing_indexed(ref world, auction_top_left_x, auction_top_left_y, 3);
+            } else {
+                assert_region_free(ref world, auction_top_left_x, auction_top_left_y, 3);
+                assert_adjacent_to_existing(ref world, auction_top_left_x, auction_top_left_y, 3);
+            }
 
             // 1) Create center tile (owner=creator)
             let center_post_id = next_post_id(ref world);
@@ -917,6 +1136,7 @@ pub mod actions {
 
                 slot_idx += 1;
             }
+            maybe_advance_occupancy_cursor_after_writes(ref world, counter_before.count);
 
             center_post_id
         }
@@ -935,6 +1155,7 @@ pub mod actions {
             let mut world = self.world_default();
             let caller = starknet::get_caller_address();
             let now = get_block_timestamp();
+            let counter_before: PostCounter = world.read_model(0_u8);
 
             assert!(verifier != zero_address(), "Verifier required");
             assert!(commit_end_time > now, "Commit end must be in the future");
@@ -953,8 +1174,13 @@ pub mod actions {
             let auction_top_left_y = center_y_position - TILE_H;
             assert!(auction_top_left_x >= 0, "Auction 3x3 would exceed left boundary");
             assert!(auction_top_left_y >= 0, "Auction 3x3 would exceed top boundary");
-            assert_region_free(ref world, auction_top_left_x, auction_top_left_y, 3);
-            assert_adjacent_to_existing(ref world, auction_top_left_x, auction_top_left_y, 3);
+            if should_use_indexed_occupancy(ref world, counter_before.count) {
+                assert_region_free_indexed(ref world, auction_top_left_x, auction_top_left_y, 3);
+                assert_adjacent_to_existing_indexed(ref world, auction_top_left_x, auction_top_left_y, 3);
+            } else {
+                assert_region_free(ref world, auction_top_left_x, auction_top_left_y, 3);
+                assert_adjacent_to_existing(ref world, auction_top_left_x, auction_top_left_y, 3);
+            }
 
             let center_post_id = next_post_id(ref world);
             write_post(
@@ -1039,8 +1265,68 @@ pub mod actions {
                 world.write_model(@AuctionSlotPricing { slot_post_id, second_highest_bid: 0 });
                 slot_idx += 1;
             }
+            maybe_advance_occupancy_cursor_after_writes(ref world, counter_before.count);
 
             center_post_id
+        }
+
+        fn configure_auction_sealed(
+            ref self: ContractState,
+            group_id: u64,
+            commit_end_time: u64,
+            reveal_end_time: u64,
+            verifier: ContractAddress
+        ) {
+            let mut world = self.world_default();
+            let caller = starknet::get_caller_address();
+            let now = get_block_timestamp();
+
+            assert!(verifier != zero_address(), "Verifier required");
+            assert!(commit_end_time > now, "Commit end must be in the future");
+            assert!(reveal_end_time > commit_end_time, "Reveal end must be after commit end");
+
+            let mut group: AuctionGroup = world.read_model(group_id);
+            assert!(group.group_id == group_id, "Auction group not found");
+            assert!(group.creator == caller, "Only creator can configure sealed mode");
+            assert!(group.active, "Auction group inactive");
+            assert!(now < group.end_time, "Auction already ended");
+
+            // Prevent mode switch after bidding activity starts.
+            let mut idx: u8 = 1;
+            loop {
+                if idx > 8_u8 {
+                    break;
+                }
+                let slot_post_id = group_id + idx.into();
+                let slot: AuctionSlot = world.read_model(slot_post_id);
+                assert!(!slot.has_bid, "Cannot configure sealed after bids");
+                idx += 1_u8;
+            };
+
+            group.end_time = reveal_end_time;
+            world.write_model(@group);
+            world.write_model(
+                @AuctionSealedConfig {
+                    group_id,
+                    sealed_mode: true,
+                    commit_end_time,
+                    reveal_end_time,
+                    verifier,
+                }
+            );
+        }
+
+        fn sync_occupancy_index(ref self: ContractState, max_posts: u32) -> (u64, u64) {
+            let mut world = self.world_default();
+            let batch = if max_posts == 0 { 1_u32 } else { max_posts };
+            sync_occupancy_index_step(ref world, batch)
+        }
+
+        fn occupancy_sync_progress(self: @ContractState) -> (u64, u64) {
+            let mut world = self.world_default();
+            let state = read_occupancy_sync_state(ref world);
+            let counter: PostCounter = world.read_model(0_u8);
+            (state.synced_post_id, counter.count)
         }
 
         fn place_bid(

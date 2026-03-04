@@ -15,7 +15,7 @@ import { createHash } from 'crypto';
 
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
-const { Account, RpcProvider } = require('/Users/sss/Webs/Starkwall/client/node_modules/starknet');
+const { Account, RpcProvider } = require('starknet');
 
 const PORT = Number(process.env.SEALED_RELAY_PORT || 3002);
 const RPC_URL = String(process.env.SEALED_RELAY_RPC_URL || 'https://starknet-sepolia.public.blastapi.io/rpc/v0_8');
@@ -23,7 +23,7 @@ const ACTIONS_CONTRACT = String(process.env.SEALED_RELAY_ACTIONS_ADDRESS || '').
 const RELAYER_ACCOUNT_ADDRESS = String(process.env.SEALED_RELAY_ACCOUNT_ADDRESS || '').trim();
 const RELAYER_PRIVATE_KEY = String(process.env.SEALED_RELAY_PRIVATE_KEY || '').trim();
 
-const REPO_ROOT = '/Users/sss/Webs/Starkwall';
+const REPO_ROOT = process.env.SEALED_RELAY_REPO_ROOT || path.resolve(path.dirname(new URL(import.meta.url).pathname), '.');
 const NOIR_DIR = path.join(REPO_ROOT, 'zk/noir-sealed-bid');
 const TARGET_DIR = path.join(NOIR_DIR, 'target');
 const PROVER_TOML_PATH = path.join(NOIR_DIR, 'Prover.toml');
@@ -38,6 +38,16 @@ const MAX_REFUND_RETRIES = Number(process.env.SEALED_RELAY_MAX_REFUND_RETRIES ||
 const REVEAL_RETRY_SECONDS = Number(process.env.SEALED_RELAY_REVEAL_RETRY_SECONDS || 15);
 const FINALIZE_RETRY_SECONDS = Number(process.env.SEALED_RELAY_FINALIZE_RETRY_SECONDS || 15);
 const REFUND_RETRY_SECONDS = Number(process.env.SEALED_RELAY_REFUND_RETRY_SECONDS || 15);
+const MEDIA_PROVIDER = String(process.env.SEALED_RELAY_MEDIA_PROVIDER || 'none').toLowerCase();
+const MEDIA_MAX_BYTES = Number(process.env.SEALED_RELAY_MEDIA_MAX_BYTES || 1_500_000);
+const MEDIA_PUBLIC_BASE_URL = String(process.env.SEALED_RELAY_PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
+const MEDIA_LOCAL_DIR = String(process.env.SEALED_RELAY_MEDIA_LOCAL_DIR || path.join(REPO_ROOT, '.media-uploads'));
+const CF_ACCOUNT_ID = String(process.env.SEALED_RELAY_CF_ACCOUNT_ID || '').trim();
+const CF_IMAGES_API_TOKEN = String(process.env.SEALED_RELAY_CF_IMAGES_API_TOKEN || '').trim();
+const PINATA_JWT = String(process.env.SEALED_RELAY_PINATA_JWT || '').trim();
+const IPFS_GATEWAY_BASE_URL = String(
+  process.env.SEALED_RELAY_IPFS_GATEWAY_BASE_URL || 'https://gateway.pinata.cloud/ipfs',
+).trim().replace(/\/+$/, '');
 
 const jobs = [];
 let workerBusy = false;
@@ -714,6 +724,130 @@ function json(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
+function safeFileKey(prefix = 'post', ext = 'jpg') {
+  const hash = createHash('sha256')
+    .update(`${Date.now()}-${Math.random()}-${Math.random()}`)
+    .digest('hex')
+    .slice(0, 24);
+  return `${prefix}-${hash}.${ext}`;
+}
+
+function parseDataUrlImage(dataUrl) {
+  const input = String(dataUrl || '').trim();
+  const match = input.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/);
+  if (!match) throw new Error('Invalid image data URL');
+  const contentType = String(match[1] || 'image/jpeg').toLowerCase();
+  const base64 = String(match[2] || '');
+  const bytes = Buffer.from(base64, 'base64');
+  if (!bytes.length) throw new Error('Empty image payload');
+  if (bytes.length > MEDIA_MAX_BYTES) throw new Error(`Image too large (${bytes.length} bytes > ${MEDIA_MAX_BYTES})`);
+  const ext = contentType.includes('png') ? 'png' : contentType.includes('webp') ? 'webp' : 'jpg';
+  return { bytes, contentType, ext };
+}
+
+function buildPublicBaseUrl(req) {
+  if (MEDIA_PUBLIC_BASE_URL) return MEDIA_PUBLIC_BASE_URL;
+  const protoHeader = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+  const proto = protoHeader || 'http';
+  return host ? `${proto}://${host}` : `http://127.0.0.1:${PORT}`;
+}
+
+async function uploadToLocalMedia(req, image, purpose = 'post') {
+  await fs.mkdir(MEDIA_LOCAL_DIR, { recursive: true });
+  const key = safeFileKey(purpose, image.ext);
+  const filePath = path.join(MEDIA_LOCAL_DIR, key);
+  await fs.writeFile(filePath, image.bytes);
+  const base = buildPublicBaseUrl(req);
+  return {
+    url: `${base}/media/files/${encodeURIComponent(key)}`,
+    key,
+    provider: 'local',
+    bytes: image.bytes.length,
+  };
+}
+
+async function uploadToCloudflareImages(image, purpose = 'post') {
+  if (!CF_ACCOUNT_ID || !CF_IMAGES_API_TOKEN) {
+    throw new Error('Cloudflare Images is not configured');
+  }
+  const form = new FormData();
+  form.append('file', new Blob([image.bytes], { type: image.contentType }), safeFileKey(purpose, image.ext));
+  form.append('requireSignedURLs', 'false');
+
+  const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/images/v1`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${CF_IMAGES_API_TOKEN}` },
+    body: form,
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || !body?.success) {
+    throw new Error(String(body?.errors?.[0]?.message || body?.error || `Cloudflare upload failed (${response.status})`));
+  }
+
+  const variant = String(body?.result?.variants?.[0] || '').trim();
+  const direct = String(body?.result?.url || '').trim();
+  const url = variant || direct;
+  if (!url.startsWith('http')) throw new Error('Cloudflare upload returned no public URL');
+  return {
+    url,
+    key: String(body?.result?.id || ''),
+    provider: 'cloudflare_images',
+    bytes: image.bytes.length,
+  };
+}
+
+async function uploadToIpfsPinata(image, purpose = 'post') {
+  if (!PINATA_JWT) {
+    throw new Error('Pinata JWT is not configured');
+  }
+  const form = new FormData();
+  form.append('file', new Blob([image.bytes], { type: image.contentType }), safeFileKey(purpose, image.ext));
+  form.append('pinataMetadata', JSON.stringify({
+    name: safeFileKey(purpose, image.ext),
+    keyvalues: {
+      app: 'starkwall',
+      purpose: String(purpose || 'post'),
+    },
+  }));
+
+  const response = await fetch('https://api.pinata.cloud/pinning/pinFileToIPFS', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${PINATA_JWT}` },
+    body: form,
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(String(body?.error?.details || body?.error || body?.message || `Pinata upload failed (${response.status})`));
+  }
+
+  const cid = String(body?.IpfsHash || '').trim();
+  if (!cid) throw new Error('Pinata upload returned no CID');
+  const gateway = `${IPFS_GATEWAY_BASE_URL}/${cid}`;
+  return {
+    url: gateway,
+    key: cid,
+    cid,
+    provider: 'ipfs_pinata',
+    bytes: image.bytes.length,
+  };
+}
+
+async function uploadMedia(req, payload) {
+  const image = parseDataUrlImage(payload?.dataUrl);
+  const purpose = String(payload?.purpose || 'post').toLowerCase().replace(/[^a-z0-9-_]/g, '') || 'post';
+  if (MEDIA_PROVIDER === 'ipfs_pinata') {
+    return uploadToIpfsPinata(image, purpose);
+  }
+  if (MEDIA_PROVIDER === 'cloudflare_images') {
+    return uploadToCloudflareImages(image, purpose);
+  }
+  if (MEDIA_PROVIDER === 'local') {
+    return uploadToLocalMedia(req, image, purpose);
+  }
+  throw new Error('Media upload provider disabled');
+}
+
 function parseBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
@@ -769,6 +903,7 @@ function createJob(payload) {
 const server = createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     res.end();
@@ -783,6 +918,48 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && req.url?.startsWith('/sealed/jobs')) {
     json(res, 200, { ok: true, jobs });
     return;
+  }
+
+  if (req.method === 'GET' && req.url?.startsWith('/media/files/')) {
+    if (MEDIA_PROVIDER !== 'local') {
+      json(res, 404, { ok: false, error: 'Not found' });
+      return;
+    }
+    const name = decodeURIComponent(String(req.url || '').replace('/media/files/', '').split('?')[0] || '');
+    if (!name || name.includes('/') || name.includes('..')) {
+      json(res, 400, { ok: false, error: 'Invalid media key' });
+      return;
+    }
+    const filePath = path.join(MEDIA_LOCAL_DIR, name);
+    try {
+      const bytes = await fs.readFile(filePath);
+      const ext = path.extname(name).toLowerCase();
+      const contentType = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
+      res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'public, max-age=31536000, immutable' });
+      res.end(bytes);
+      return;
+    } catch {
+      json(res, 404, { ok: false, error: 'Media not found' });
+      return;
+    }
+  }
+
+  if (req.method === 'POST' && req.url === '/media/upload') {
+    try {
+      const payload = await parseBody(req);
+      const uploaded = await uploadMedia(req, payload);
+      json(res, 200, {
+        ok: true,
+        url: uploaded.url,
+        key: uploaded.key,
+        provider: uploaded.provider,
+        bytes: uploaded.bytes,
+      });
+      return;
+    } catch (error) {
+      json(res, 400, { ok: false, error: String(error?.message || 'Upload failed') });
+      return;
+    }
   }
 
   if (req.method === 'POST' && req.url === '/sealed/schedule') {

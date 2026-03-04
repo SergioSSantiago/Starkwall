@@ -9,7 +9,7 @@ import controllerOpts from './controller.js'
 import manifest from './manifest.js'
 import {
   DOMAIN_CHAIN_ID, TORII_URL, IS_SEPOLIA, FAUCET_URL, YIELD_DUAL_POOL_ENABLED,
-  BTC_TRACK_SYMBOL, SEPOLIA_BTC_SWAP_TOKEN, SEPOLIA_BTC_STAKING_TOKEN, SEALED_BID_VERIFIER_ADDRESS, SEALED_RELAY_URL, PAYMENT_TOKEN_ADDRESS,
+  BTC_TRACK_SYMBOL, SEPOLIA_BTC_SWAP_TOKEN, SEPOLIA_BTC_STAKING_TOKEN, SEALED_BID_VERIFIER_ADDRESS, SEALED_RELAY_URL, PAYMENT_TOKEN_ADDRESS, MEDIA_UPLOAD_URL,
 } from './config.js'
 
 // Evitar que un rechazo de promesa no capturado provoque recarga o cierre de la app
@@ -1274,7 +1274,7 @@ async function tryAutoFinalizeAuctionSlot(post, source = 'auto') {
   try {
     console.log(`⏱️ Auto-finalizing slot ${slotId} (source: ${source})`)
     if (sealedCfg?.sealed_mode) {
-      if (!SEALED_RELAY_URL) {
+      if (!hasRelayAvailable()) {
         zkConsole('finalize:sealed-relay-missing-skip', { slotId, source })
         if (!autoFinalizeBlockedSealedSlots.has(slotId)) {
           autoFinalizeBlockedSealedSlots.add(slotId)
@@ -1413,7 +1413,7 @@ function getBidAmountForSlot(slotPostId) {
 }
 
 async function tryAutoRevealSealedCommit(post, source = 'auto') {
-  if (!post || !postManager || !dojoManager || !currentAccount || !SEALED_RELAY_URL) return false
+  if (!post || !postManager || !dojoManager || !currentAccount || !hasRelayAvailable()) return false
 
   const slotId = Number(post.id || 0)
   if (!Number.isFinite(slotId) || slotId <= 0) return false
@@ -1468,7 +1468,7 @@ async function tryAutoRevealSealedCommit(post, source = 'auto') {
 }
 
 async function autoRevealPendingSealedCommits(source = 'scan') {
-  if (!postManager?.posts?.length || !currentAccount || !SEALED_RELAY_URL) return
+  if (!postManager?.posts?.length || !currentAccount || !hasRelayAvailable()) return
   for (const post of postManager.posts) {
     await tryAutoRevealSealedCommit(post, source)
   }
@@ -1502,7 +1502,7 @@ async function tryAutoClaimSealedRefund(post, source = 'auto') {
   autoClaimingRefundSlots.add(lockKey)
   try {
     console.log(`🤖 Auto-claiming sealed refund for slot ${slotId} (source: ${source})`)
-    if (SEALED_RELAY_URL) {
+    if (hasRelayAvailable()) {
       await requestSealedImmediateRefund({ slotPostId: slotId, bidder: currentAccount.address })
     } else {
       await dojoManager.claimAuctionCommitRefund(slotId)
@@ -1529,10 +1529,57 @@ async function autoClaimPendingSealedRefunds(source = 'scan') {
   }
 }
 
+const DEFAULT_SEPOLIA_RELAY_URL = 'https://starkwall-sealed-relay.fly.dev'
+
+function isLoopbackRelay(url) {
+  const raw = String(url || '').trim().toLowerCase()
+  return raw.includes('127.0.0.1') || raw.includes('localhost')
+}
+
+function getRelayBaseCandidates() {
+  const primary = String(SEALED_RELAY_URL || '').trim().replace(/\/+$/, '')
+  const candidates = []
+  if (primary) candidates.push(primary)
+
+  // In Sepolia always keep Fly relay as fallback, especially when local env points
+  // to 127.0.0.1 but the local relay is not running.
+  if (IS_SEPOLIA && (!primary || isLoopbackRelay(primary) || !primary.startsWith('https://'))) {
+    candidates.push(DEFAULT_SEPOLIA_RELAY_URL)
+  }
+
+  const seen = new Set()
+  return candidates.filter((url) => {
+    const key = String(url).toLowerCase()
+    if (!key || seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function hasRelayAvailable() {
+  return getRelayBaseCandidates().length > 0
+}
+
+async function fetchRelayJsonWithFallback(pathname, init) {
+  const bases = getRelayBaseCandidates()
+  if (!bases.length) throw new Error('Relay not configured')
+  let lastError = null
+  for (const base of bases) {
+    const endpoint = `${base}${pathname}`
+    try {
+      const response = await fetch(endpoint, init)
+      const body = await response.json().catch(() => ({}))
+      if (response.ok && body?.ok) return { response, body, endpoint }
+      lastError = new Error(String(body?.error || `Relay request failed (${response.status})`))
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError || new Error('Relay request failed')
+}
+
 async function scheduleSealedAutoReveal({ slotPostId, groupId, bidder, bidAmount, salt, commitEndTime, revealEndTime }) {
-  const baseUrl = String(SEALED_RELAY_URL || '').trim()
-  if (!baseUrl) return { ok: false, reason: 'relay-disabled' }
-  const endpoint = `${baseUrl.replace(/\/$/, '')}/sealed/schedule`
+  if (!hasRelayAvailable()) return { ok: false, reason: 'relay-disabled' }
   const payload = {
     slotPostId: Number(slotPostId),
     groupId: Number(groupId),
@@ -1543,28 +1590,22 @@ async function scheduleSealedAutoReveal({ slotPostId, groupId, bidder, bidAmount
     finalizeAfterUnix: Number(revealEndTime || 0),
   }
   zkConsole('schedule:request', redactSealedDebugPayload(payload))
-  const response = await fetch(endpoint, {
+  const { response, body } = await fetchRelayJsonWithFallback('/sealed/schedule', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
-  const body = await response.json().catch(() => ({}))
   zkConsole('schedule:response', {
     ok: response.ok && Boolean(body?.ok),
     status: response.status,
     jobId: body?.jobId || '',
     relayStatus: body?.status || '',
   })
-  if (!response.ok || !body?.ok) {
-    throw new Error(String(body?.error || `Relay scheduling failed (${response.status})`))
-  }
   return { ok: true, jobId: String(body.jobId || '') }
 }
 
 async function requestSealedImmediateReveal({ slotPostId, groupId, bidder, bidAmount, salt }) {
-  const baseUrl = String(SEALED_RELAY_URL || '').trim()
-  if (!baseUrl) return { ok: false, reason: 'relay-disabled' }
-  const endpoint = `${baseUrl.replace(/\/$/, '')}/sealed/reveal-now`
+  if (!hasRelayAvailable()) return { ok: false, reason: 'relay-disabled' }
   const payload = {
     slotPostId: Number(slotPostId),
     groupId: Number(groupId),
@@ -1573,21 +1614,17 @@ async function requestSealedImmediateReveal({ slotPostId, groupId, bidder, bidAm
     salt: String(salt || ''),
   }
   zkConsole('reveal-now:request', redactSealedDebugPayload(payload))
-  const response = await fetch(endpoint, {
+  const { response, body } = await fetchRelayJsonWithFallback('/sealed/reveal-now', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
-  const body = await response.json().catch(() => ({}))
   zkConsole('reveal-now:response', {
     ok: response.ok && Boolean(body?.ok),
     status: response.status,
     txHash: body?.txHash || '',
     relayStatus: body?.status || '',
   })
-  if (!response.ok || !body?.ok) {
-    throw new Error(String(body?.error || `Relay reveal failed (${response.status})`))
-  }
   return {
     ok: true,
     txHash: String(body.txHash || ''),
@@ -1596,29 +1633,19 @@ async function requestSealedImmediateReveal({ slotPostId, groupId, bidder, bidAm
 }
 
 async function requestSealedImmediateFinalize({ slotPostId }) {
-  const baseUrl = String(SEALED_RELAY_URL || '').trim()
-  if (!baseUrl) return { ok: false, reason: 'relay-disabled' }
-  const endpoint = `${baseUrl.replace(/\/$/, '')}/sealed/finalize-now`
+  if (!hasRelayAvailable()) return { ok: false, reason: 'relay-disabled' }
   zkConsole('finalize-now:request', { slotPostId: Number(slotPostId) })
-  const response = await fetch(endpoint, {
+  const { response, body } = await fetchRelayJsonWithFallback('/sealed/finalize-now', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ slotPostId: Number(slotPostId) }),
   })
-  const body = await response.json().catch(() => ({}))
   zkConsole('finalize-now:response', {
     ok: response.ok && Boolean(body?.ok),
     status: response.status,
     txHash: body?.txHash || '',
     relayStatus: body?.status || '',
   })
-  if (!response.ok || !body?.ok) {
-    const reason = String(body?.error || `Relay finalize failed (${response.status})`)
-    if (isAlreadyFinalizedError(reason)) {
-      return { ok: true, txHash: '', status: 'already_finalized' }
-    }
-    throw new Error(reason)
-  }
   return {
     ok: true,
     txHash: String(body.txHash || ''),
@@ -1627,25 +1654,19 @@ async function requestSealedImmediateFinalize({ slotPostId }) {
 }
 
 async function requestSealedImmediateRefund({ slotPostId, bidder }) {
-  const baseUrl = String(SEALED_RELAY_URL || '').trim()
-  if (!baseUrl) return { ok: false, reason: 'relay-disabled' }
-  const endpoint = `${baseUrl.replace(/\/$/, '')}/sealed/refund-now`
+  if (!hasRelayAvailable()) return { ok: false, reason: 'relay-disabled' }
   zkConsole('refund-now:request', { slotPostId: Number(slotPostId), bidder: String(bidder || '') })
-  const response = await fetch(endpoint, {
+  const { response, body } = await fetchRelayJsonWithFallback('/sealed/refund-now', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ slotPostId: Number(slotPostId), bidder: String(bidder || '') }),
   })
-  const body = await response.json().catch(() => ({}))
   zkConsole('refund-now:response', {
     ok: response.ok && Boolean(body?.ok),
     status: response.status,
     txHash: body?.txHash || '',
     relayStatus: body?.status || '',
   })
-  if (!response.ok || !body?.ok) {
-    throw new Error(String(body?.error || `Relay refund failed (${response.status})`))
-  }
   return {
     ok: true,
     txHash: String(body.txHash || ''),
@@ -1657,18 +1678,13 @@ const RELAY_JOBS_CACHE_TTL_MS = 8000
 let relayJobsCache = { fetchedAt: 0, jobs: [] }
 
 async function fetchSealedRelayJobs(force = false) {
-  const baseUrl = String(SEALED_RELAY_URL || '').trim()
-  if (!baseUrl) return []
+  if (!hasRelayAvailable()) return []
   const now = Date.now()
   if (!force && relayJobsCache.jobs.length && (now - relayJobsCache.fetchedAt) < RELAY_JOBS_CACHE_TTL_MS) {
     return relayJobsCache.jobs
   }
-  const endpoint = `${baseUrl.replace(/\/$/, '')}/sealed/jobs`
-  const response = await fetch(endpoint, { method: 'GET' })
-  const body = await response.json().catch(() => ({}))
-  if (!response.ok || !body?.ok || !Array.isArray(body?.jobs)) {
-    throw new Error(String(body?.error || `Relay jobs fetch failed (${response.status})`))
-  }
+  const { body } = await fetchRelayJsonWithFallback('/sealed/jobs', { method: 'GET' })
+  if (!Array.isArray(body?.jobs)) throw new Error('Relay jobs fetch failed')
   if (ZK_DEBUG_LOGS) {
     const counts = {}
     for (const job of body.jobs) {
@@ -1798,7 +1814,7 @@ function explainVerifyProofVisibility(job) {
 }
 
 async function enrichSealedProofStatus(post, postAuctionInfo, expectedPostId, verifyProofBtn = null) {
-  if (!post || !postAuctionInfo || !SEALED_RELAY_URL) return
+  if (!post || !postAuctionInfo || !hasRelayAvailable()) return
   try {
     const jobs = await fetchSealedRelayJobs()
     const modal = document.getElementById('postDetailsModal')
@@ -1840,6 +1856,53 @@ async function enrichSealedProofStatus(post, postAuctionInfo, expectedPostId, ve
 function byteArrayChunkCount(str) {
   const bytes = new TextEncoder().encode(String(str || '')).length
   return Math.ceil(bytes / 31)
+}
+
+function textByteLength(value) {
+  return new TextEncoder().encode(String(value || '')).length
+}
+
+function isInsufficientMaxL2GasError(error) {
+  const msg = String(error?.message || error || '').toLowerCase()
+  return msg.includes('insufficient max l2gas')
+}
+
+async function uploadImageToMediaEndpoint(dataUrl, purpose = 'post') {
+  const directEndpoint = String(MEDIA_UPLOAD_URL || '').trim()
+  const endpoints = []
+  if (directEndpoint) endpoints.push(directEndpoint)
+  for (const base of getRelayBaseCandidates()) {
+    endpoints.push(`${base}/media/upload`)
+  }
+  const uniqueEndpoints = [...new Set(endpoints.map((x) => String(x || '').trim()).filter(Boolean))]
+  if (!uniqueEndpoints.length) return dataUrl
+  if (!String(dataUrl || '').startsWith('data:image/')) return dataUrl
+  let lastError = null
+  for (const endpoint of uniqueEndpoints) {
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataUrl: String(dataUrl || ''),
+          purpose: String(purpose || 'post'),
+        }),
+      })
+      const body = await response.json().catch(() => ({}))
+      if (response.ok && body?.ok && String(body?.url || '').startsWith('http')) {
+        return String(body.url)
+      }
+      lastError = new Error(String(body?.error || `Media upload failed (${response.status})`))
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError || new Error('Media upload failed')
+}
+
+function requiresOffchainMedia({ isAuction = false } = {}) {
+  // On Sepolia we prefer URL-based media to avoid L2 gas bound issues.
+  return Boolean(IS_SEPOLIA && isAuction)
 }
 
 /** Redimensiona y comprime una imagen hasta que quepa en el contrato (data URL <= safe ByteArray margin). */
@@ -1895,6 +1958,37 @@ function resizeImageToDataUrlWithMaxLength(fileOrDataUrl, maxBytes = CONTRACT_SA
       img.src = URL.createObjectURL(fileOrDataUrl)
     }
   })
+}
+
+async function buildUltraTinyAuctionPreview(fileOrDataUrl) {
+  const tinyBudgetBytes = 1200
+  try {
+    return await resizeImageToDataUrlWithMaxLength(fileOrDataUrl, tinyBudgetBytes)
+  } catch {
+    // Last resort: force tiny canvas + low quality.
+    return new Promise((resolve, reject) => {
+      const img = new Image()
+      img.onload = () => {
+        if (img.src.startsWith('blob:')) URL.revokeObjectURL(img.src)
+        const canvas = document.createElement('canvas')
+        canvas.width = 72
+        canvas.height = 72
+        const ctx = canvas.getContext('2d')
+        if (!ctx) {
+          reject(new Error('Could not prepare auction image preview'))
+          return
+        }
+        ctx.drawImage(img, 0, 0, 72, 72)
+        resolve(canvas.toDataURL('image/jpeg', 0.12))
+      }
+      img.onerror = () => {
+        if (img.src.startsWith('blob:')) URL.revokeObjectURL(img.src)
+        reject(new Error('Could not load image for tiny preview'))
+      }
+      if (typeof fileOrDataUrl === 'string') img.src = fileOrDataUrl
+      else img.src = URL.createObjectURL(fileOrDataUrl)
+    })
+  }
 }
 
 /** Cerrar sesión y volver a la pantalla de login. Obliga a hacer login de nuevo. */
@@ -2807,7 +2901,7 @@ function setupUIHandlers() {
     createPostInFlight = true
     try {
 
-    const imageUrl = imageDataUrlInput.value
+    let imageUrl = imageDataUrlInput.value
     const caption = truncateToMaxBytes(captionInput.value)
     const username = truncateToMaxBytes(currentUsername || 'user')
     const size = parseInt(postSizeInput.value) || 1
@@ -2819,10 +2913,27 @@ function setupUIHandlers() {
       return
     }
 
-    const imageChunks = byteArrayChunkCount(imageUrl)
-    if (imageChunks > CONTRACT_SAFE_MAX_CHUNKS_PER_FIELD) {
-      alert(`Image too large for on-chain post (${imageChunks} chunks). Pick a lighter image.`)
-      return
+    try {
+      imageUrl = await uploadImageToMediaEndpoint(imageUrl, isAuction ? 'auction' : 'post')
+    } catch (uploadError) {
+      const strictOffchain = requiresOffchainMedia({ isAuction })
+      if (strictOffchain) {
+        throw new Error(
+          `Media upload failed (${uploadError?.message || uploadError}). ` +
+          'Auction creation now requires off-chain media URL to avoid L2 gas errors.'
+        )
+      }
+      console.warn('Media upload failed, keeping inline image:', uploadError?.message || uploadError)
+      showToast('Upload unavailable. Falling back to on-chain compressed image.')
+    }
+
+    const isInlineImage = String(imageUrl || '').startsWith('data:image/')
+    if (isInlineImage) {
+      const imageChunks = byteArrayChunkCount(imageUrl)
+      if (imageChunks > CONTRACT_SAFE_MAX_CHUNKS_PER_FIELD) {
+        alert(`Image too large for on-chain post (${imageChunks} chunks). Pick a lighter image.`)
+        return
+      }
     }
 
     if (isPaid) {
@@ -2945,7 +3056,7 @@ function setupUIHandlers() {
     submitPostBtn.textContent = isAuction ? 'Creating auction...' : 'Creando...'
     try {
       if (isAuction) {
-        await postManager.createAuctionPost(imageUrl, caption, username, auctionEndUnix, () => {
+        const finishAuctionSuccessUi = () => {
           document.getElementById('modal').classList.remove('active')
           postForm.reset()
           clearPhoto()
@@ -2957,7 +3068,53 @@ function setupUIHandlers() {
           submitPostBtn.disabled = false
           submitPostBtn.textContent = 'Create Post'
           updateWalletInfo().catch(() => {})
-        }, sealedAuctionConfig)
+        }
+
+        const createAuction = async (img, customCaption = caption, customUsername = username) => postManager.createAuctionPost(
+          img,
+          truncateToMaxBytes(customCaption, 96),
+          truncateToMaxBytes(customUsername, 24),
+          auctionEndUnix,
+          finishAuctionSuccessUi,
+          sealedAuctionConfig
+        )
+
+        try {
+          await createAuction(imageUrl)
+        } catch (auctionError) {
+          if (!isInsufficientMaxL2GasError(auctionError)) {
+            throw auctionError
+          }
+
+          // Retry #1: reduce text payload first (cheap and often enough when close to limit).
+          try {
+            console.warn('Auction hit max L2Gas. Retrying with shorter caption...')
+            showToast('Retrying auction with lighter metadata...')
+            submitPostBtn.textContent = 'Retrying auction...'
+            await createAuction(imageUrl, '', username)
+            return
+          } catch (retryTextError) {
+            if (!isInsufficientMaxL2GasError(retryTextError)) throw retryTextError
+          }
+
+          if (!String(imageUrl || '').startsWith('data:image/')) {
+            throw new Error(
+              'Auction still exceeds L2 gas after metadata reduction. ' +
+              'Please retry with a shorter caption and try again.'
+            )
+          }
+
+          console.warn('Auction still above L2Gas. Retrying with ultra-compressed preview...')
+          showToast('Retrying auction with lighter image...')
+          submitPostBtn.textContent = 'Retrying auction with lighter image...'
+
+          const tinyImageUrl = await buildUltraTinyAuctionPreview(imageUrl)
+          if (!tinyImageUrl || textByteLength(tinyImageUrl) <= 0) {
+            throw auctionError
+          }
+          setPhotoFromDataUrl(tinyImageUrl)
+          await createAuction(tinyImageUrl, '', username)
+        }
       } else {
         await postManager.createPost(imageUrl, caption, username, size, isPaid, () => {
           document.getElementById('modal').classList.remove('active')
@@ -3214,7 +3371,7 @@ function setupPostDetailsHandlers() {
   if (wonSlotPublishBtn) wonSlotPublishBtn.addEventListener('click', async () => {
     const postId = Number(wonSlotModal?.dataset?.postId || 0)
     const caption = String(wonSlotCaptionInput?.value || '').trim()
-    const imageDataUrl = wonSlotImageDataUrl
+    let imageDataUrl = wonSlotImageDataUrl
 
     if (!Number.isFinite(postId) || postId <= 0) {
       alert('Invalid slot reference. Reopen the slot and try again.')
@@ -3230,6 +3387,12 @@ function setupPostDetailsHandlers() {
     }
 
     try {
+      try {
+        imageDataUrl = await uploadImageToMediaEndpoint(imageDataUrl, 'won-slot')
+      } catch (uploadError) {
+        console.warn('Won slot media upload failed, using inline data URL:', uploadError?.message || uploadError)
+      }
+
       closeWonSlotModal()
       postDetailsModal.classList.remove('active')
       await dojoManager.setWonSlotContent(postId, imageDataUrl, caption)
@@ -3481,7 +3644,7 @@ function setupPostDetailsHandlers() {
       saveBidAmountForSlot(slotId, bid)
       const commitEndTime = Number(activePost?.auction_sealed_config?.commit_end_time || 0)
       const revealEndTime = Number(activePost?.auction_sealed_config?.reveal_end_time || 0)
-      if (SEALED_RELAY_URL) {
+      if (hasRelayAvailable()) {
         try {
           const scheduled = await scheduleSealedAutoReveal({
             slotPostId: commitResult?.slotId || slotId,
@@ -3505,7 +3668,7 @@ function setupPostDetailsHandlers() {
       await postManager.loadImages()
       canvas.setPosts(postManager.posts)
       await updateWalletInfo()
-      if (!SEALED_RELAY_URL) showToast(`Sealed bid committed (${escrowAmount} STRK)`)
+      if (!hasRelayAvailable()) showToast(`Sealed bid committed (${escrowAmount} STRK)`)
     } catch (error) {
       console.error('Error committing sealed bid:', error)
       alert('Failed to commit bid: ' + (error.message || 'Unknown error'))
@@ -3527,7 +3690,7 @@ function setupPostDetailsHandlers() {
     }
     try {
       postDetailsModal.classList.remove('active')
-      if (!SEALED_RELAY_URL) {
+      if (!hasRelayAvailable()) {
         throw new Error('Auto-reveal relay not configured. Set VITE_SEALED_RELAY_URL.')
       }
       const revealed = await requestSealedImmediateReveal({
@@ -3572,7 +3735,7 @@ function setupPostDetailsHandlers() {
     if (!currentPost) return
     const slotId = Number(currentPost?.id || 0)
     if (!Number.isFinite(slotId) || slotId <= 0) return
-    if (!SEALED_RELAY_URL) {
+    if (!hasRelayAvailable()) {
       alert('ZK proof verification viewer requires relay URL configuration.')
       return
     }

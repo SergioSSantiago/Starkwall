@@ -150,6 +150,8 @@ Defined in `client/config.js`:
 - `VITE_STRK_TOKEN` (optional override)
 - `VITE_FAUCET_URL` (local/dev helper)
 - `VITE_WBTC_FAUCET_URL` (optional UI helper)
+- `VITE_SEALED_RELAY_URL` (sealed automation + optional media upload endpoint)
+- `VITE_MEDIA_UPLOAD_URL` (recommended: `${VITE_SEALED_RELAY_URL}/media/upload`)
 - `VITE_YIELD_DUAL_POOL_ENABLED`
 - Optional yield metadata:
   - `VITE_YIELD_STRATEGY_KIND`
@@ -173,6 +175,33 @@ Defined in `client/config.js`:
 - WBTC test acquisition on Sepolia can be difficult and is the main blocker for BTC-path E2E user testing.
 - If Torii lags, frontend still relies on direct onchain yield view.
 - Yield admin protections apply after admin initialization.
+- Large inline `data:image/...` payloads can exceed Starknet tx L2 gas bounds; configure media upload to store URLs onchain instead.
+
+## Relay Media Upload (Recommended)
+
+To avoid `Insufficient max L2Gas` in post/auction creation, upload media off-chain and store only the URL in `image_url`.
+
+`sealed-relayer-server.js` supports `POST /media/upload` providers:
+
+- `SEALED_RELAY_MEDIA_PROVIDER=ipfs_pinata` (recommended for IPFS flow)
+- `SEALED_RELAY_MEDIA_PROVIDER=cloudflare_images`
+- `SEALED_RELAY_MEDIA_PROVIDER=local` (local/dev only)
+
+IPFS (Pinata) env vars:
+
+- `SEALED_RELAY_PINATA_JWT`
+- `SEALED_RELAY_IPFS_GATEWAY_BASE_URL` (optional, default `https://gateway.pinata.cloud/ipfs`)
+
+Cloudflare Images env vars (alternative):
+
+- `SEALED_RELAY_CF_ACCOUNT_ID`
+- `SEALED_RELAY_CF_IMAGES_API_TOKEN`
+- `SEALED_RELAY_PUBLIC_BASE_URL` (optional)
+
+Optional shared vars:
+
+- `SEALED_RELAY_MEDIA_MAX_BYTES` (default `1500000`)
+- `SEALED_RELAY_MEDIA_LOCAL_DIR` (used by `local` provider)
 
 ## Repo Structure
 

@@ -41,6 +41,89 @@ function isTxReceiptSuccessful(receipt) {
   return true;
 }
 
+function isInsufficientMaxL2GasError(error) {
+  const message = String(error?.message || error || '').toLowerCase()
+  return message.includes('insufficient max l2gas')
+}
+
+async function waitOrThrow(account, tx, fallbackReason) {
+  const receipt = await account.waitForTransaction(tx.transaction_hash)
+  if (!isTxReceiptSuccessful(receipt)) {
+    const reason = receipt?.revert_reason || receipt?.revertReason || fallbackReason
+    throw new Error(reason)
+  }
+  return receipt
+}
+
+const HIGH_L2_GAS_TX_DETAILS = {
+  // tx v3 style (common in Controller/starknet.js)
+  resourceBounds: {
+    L1_GAS: {
+      max_amount: '0x186a0',
+      max_price_per_unit: '0x174876e800', // 100 gwei
+    },
+    L2_GAS: {
+      max_amount: '0x77359400', // 2,000,000,000
+      max_price_per_unit: '0x2540be400', // 10 gwei
+    },
+  },
+}
+
+const HIGH_L2_GAS_TX_DETAILS_LEGACY_KEYS = {
+  // Compatibility fallback for wrappers expecting lowercase keys.
+  resourceBounds: {
+    l1_gas: {
+      max_amount: '0x186a0',
+      max_price_per_unit: '0x174876e800',
+    },
+    l2_gas: {
+      max_amount: '0x77359400',
+      max_price_per_unit: '0x2540be400',
+    },
+  },
+}
+
+async function executeWithDetailsCompat(account, calls, details) {
+  // Some account wrappers expect `execute(calls, details)`, others `execute(calls, undefined, details)`.
+  try {
+    return await account.execute(calls, undefined, details)
+  } catch (firstError) {
+    try {
+      return await account.execute(calls, details)
+    } catch {
+      throw firstError
+    }
+  }
+}
+
+async function executeWithL2GasFallback(account, calls) {
+  try {
+    return await account.execute(calls)
+  } catch (error) {
+    if (!isInsufficientMaxL2GasError(error)) throw error
+  }
+
+  // First fallback: same call set with larger L2 gas bounds (v3 keys).
+  try {
+    return await executeWithDetailsCompat(account, calls, HIGH_L2_GAS_TX_DETAILS)
+  } catch (error) {
+    if (!isInsufficientMaxL2GasError(error)) throw error
+  }
+
+  // Second fallback: lowercase resource keys for compatibility wrappers.
+  try {
+    return await executeWithDetailsCompat(account, calls, HIGH_L2_GAS_TX_DETAILS_LEGACY_KEYS)
+  } catch (error) {
+    if (!isInsufficientMaxL2GasError(error)) throw error
+  }
+
+  // Final fallback: high bounds + explicit maxFee.
+  return executeWithDetailsCompat(account, calls, {
+    ...HIGH_L2_GAS_TX_DETAILS_LEGACY_KEYS,
+    maxFee: '0xee6b2800', // 4e9
+  })
+}
+
 function feltToU256(val) {
   const n = BigInt(val);
   const low = n & ((1n << 128n) - 1n);
@@ -122,6 +205,28 @@ export class DojoManager {
     this.avnuStakingInfoCacheAt = 0;
     this.avnuUserStakingCache = new Map();
     this.lastAvnuRouteProbeErrors = [];
+    this.sealedConfigureSupport = null;
+  }
+
+  async supportsConfigureSealedEntrypoint() {
+    if (typeof this.sealedConfigureSupport === 'boolean') return this.sealedConfigureSupport
+    const verifierProbe = this.actionsContract?.address || '0x1'
+    try {
+      await this.balanceProvider.callContract({
+        contractAddress: this.actionsContract.address,
+        entrypoint: 'configure_auction_sealed',
+        calldata: ['0', '0', '1', verifierProbe],
+      }, 'latest')
+      this.sealedConfigureSupport = true
+      return true
+    } catch (error) {
+      const msg = String(error?.message || error || '').toLowerCase()
+      this.sealedConfigureSupport = !(
+        msg.includes('entrypoint_not_found') ||
+        msg.includes('entry point') && msg.includes('not found')
+      )
+      return this.sealedConfigureSupport
+    }
   }
 
   async getAvnuStakingInfoCached(forceRefresh = false) {
@@ -1282,7 +1387,7 @@ export class DojoManager {
     const amountWei = BigInt(AUCTION_POST_CREATION_FEE_STRK) * ONE_STRK;
     const { low, high } = feltToU256(amountWei);
 
-    const tx = await this.account.execute([
+    const calls = [
       {
         contractAddress: PAYMENT_TOKEN_ADDRESS,
         entrypoint: 'approve',
@@ -1293,13 +1398,26 @@ export class DojoManager {
         entrypoint: 'create_auction_post_3x3',
         calldata,
       },
-    ]);
-
-    const receipt = await this.account.waitForTransaction(tx.transaction_hash);
-    if (!isTxReceiptSuccessful(receipt)) {
-      const reason = receipt?.revert_reason || receipt?.revertReason || 'Create auction transaction reverted';
-      throw new Error(reason);
+    ]
+    let tx
+    try {
+      tx = await executeWithL2GasFallback(this.account, calls)
+    } catch (error) {
+      if (!isInsufficientMaxL2GasError(error)) throw error
+      // Last resort: split approval and creation to reduce peak tx complexity.
+      const approveTx = await executeWithL2GasFallback(this.account, {
+        contractAddress: PAYMENT_TOKEN_ADDRESS,
+        entrypoint: 'approve',
+        calldata: [this.actionsContract.address, low, high],
+      })
+      await waitOrThrow(this.account, approveTx, 'Approve transaction reverted')
+      tx = await executeWithL2GasFallback(this.account, {
+        contractAddress: this.actionsContract.address,
+        entrypoint: 'create_auction_post_3x3',
+        calldata,
+      })
     }
+    await waitOrThrow(this.account, tx, 'Create auction transaction reverted')
 
     return tx;
   }
@@ -1314,6 +1432,26 @@ export class DojoManager {
     revealEndTimeUnix,
     verifierAddress,
   ) {
+    const supportsSplitConfig = await this.supportsConfigureSealedEntrypoint().catch(() => false)
+    if (supportsSplitConfig) {
+      const expectedGroupId = Number(await this.getPostCounter().catch(() => 0)) + 1
+      const createTx = await this.createAuctionPost3x3(
+        imageUrl,
+        caption,
+        creatorUsername,
+        centerX,
+        centerY,
+        Number(revealEndTimeUnix),
+      )
+      await this.configureAuctionSealed(
+        expectedGroupId,
+        Number(commitEndTimeUnix),
+        Number(revealEndTimeUnix),
+        verifierAddress,
+      )
+      return createTx
+    }
+
     const imageUrlBytes = stringToByteArray(imageUrl || '')
     const captionBytes = stringToByteArray(caption || '')
     const usernameBytes = stringToByteArray(creatorUsername || '')
@@ -1333,7 +1471,7 @@ export class DojoManager {
 
     const amountWei = BigInt(AUCTION_POST_CREATION_FEE_STRK) * ONE_STRK
     const { low, high } = feltToU256(amountWei)
-    const tx = await this.account.execute([
+    const calls = [
       {
         contractAddress: PAYMENT_TOKEN_ADDRESS,
         entrypoint: 'approve',
@@ -1344,14 +1482,44 @@ export class DojoManager {
         entrypoint: 'create_auction_post_3x3_sealed',
         calldata,
       },
-    ])
-
-    const receipt = await this.account.waitForTransaction(tx.transaction_hash)
-    if (!isTxReceiptSuccessful(receipt)) {
-      const reason = receipt?.revert_reason || receipt?.revertReason || 'Create sealed auction transaction reverted'
-      throw new Error(reason)
+    ]
+    let tx
+    try {
+      tx = await executeWithL2GasFallback(this.account, calls)
+    } catch (error) {
+      if (!isInsufficientMaxL2GasError(error)) throw error
+      // Last resort: split approval and creation to reduce peak tx complexity.
+      const approveTx = await executeWithL2GasFallback(this.account, {
+        contractAddress: PAYMENT_TOKEN_ADDRESS,
+        entrypoint: 'approve',
+        calldata: [this.actionsContract.address, low, high],
+      })
+      await waitOrThrow(this.account, approveTx, 'Approve transaction reverted')
+      tx = await executeWithL2GasFallback(this.account, {
+        contractAddress: this.actionsContract.address,
+        entrypoint: 'create_auction_post_3x3_sealed',
+        calldata,
+      })
     }
+    await waitOrThrow(this.account, tx, 'Create sealed auction transaction reverted')
 
+    return tx
+  }
+
+  async configureAuctionSealed(groupId, commitEndTimeUnix, revealEndTimeUnix, verifierAddress) {
+    const verifier = String(verifierAddress || '').trim()
+    if (!verifier || !verifier.startsWith('0x')) throw new Error('Invalid verifier address')
+    const tx = await this.account.execute({
+      contractAddress: this.actionsContract.address,
+      entrypoint: 'configure_auction_sealed',
+      calldata: [
+        Number(groupId),
+        Number(commitEndTimeUnix),
+        Number(revealEndTimeUnix),
+        verifier,
+      ],
+    })
+    await waitOrThrow(this.account, tx, 'Configure sealed auction transaction reverted')
     return tx
   }
 
@@ -1710,14 +1878,118 @@ export class DojoManager {
       const commitItems = commitEntities?.items || [];
 
       const mergedItems = [...entities.items, ...slotItems, ...groupItems, ...sealedCfgItems, ...commitItems];
-      const posts = this.parseSDKEntities(mergedItems);
+      const sdkPosts = this.parseSDKEntities(mergedItems);
+      let posts = sdkPosts;
+
+      // Browser-dependent SDK pagination/indexer lag can hide older posts.
+      // Merge with direct GraphQL snapshot for stable cross-browser visibility.
+      const gqlPosts = await this.fetchPostModelsViaGraphQL().catch(() => []);
+      if (Array.isArray(gqlPosts) && gqlPosts.length > 0) {
+        posts = this.mergePostSnapshots(sdkPosts, gqlPosts);
+      }
+
+      const expectedCount = await this.getPostCounter().catch(() => 0);
+      if (expectedCount > 0 && posts.length < expectedCount && Array.isArray(gqlPosts) && gqlPosts.length >= posts.length) {
+        posts = this.mergePostSnapshots(posts, gqlPosts);
+      }
+
       console.log(`✅ Parsed ${posts.length} posts`);
-      
       return posts;
     } catch (error) {
       console.error('❌ Error querying posts:', error?.message || error);
       return [];
     }
+  }
+
+  async fetchPostModelsViaGraphQL(limit = 2000) {
+    const endpoint = String(TORII_URL || '').replace(/\/+$/, '') + '/graphql';
+    const query = `
+      query GetPosts($limit: Int!) {
+        diPostModels(first: $limit, order: { field: ID, direction: ASC }) {
+          edges {
+            node {
+              id
+              image_url
+              caption
+              x_position
+              y_position
+              size
+              is_paid
+              created_at
+              created_by
+              creator_username
+              current_owner
+              sale_price
+              post_kind
+              auction_group_id
+              auction_slot_index
+            }
+          }
+        }
+      }
+    `;
+
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query, variables: { limit } }),
+    });
+    if (!res.ok) throw new Error(`GraphQL posts fetch failed (${res.status})`);
+    const body = await res.json();
+    const edges = body?.data?.diPostModels?.edges || [];
+    return edges
+      .map((e) => e?.node || null)
+      .filter(Boolean)
+      .map((node) => {
+        let salePrice = 0;
+        const rawPrice = node.sale_price;
+        if (typeof rawPrice === 'object' && rawPrice !== null) {
+          if ('low' in rawPrice) salePrice = Number(rawPrice.low || 0);
+          else if ('0' in rawPrice) salePrice = Number(rawPrice['0'] || 0);
+        } else {
+          salePrice = Number(rawPrice || 0);
+        }
+
+        const createdAtUnix = Number(node.created_at || 0);
+        return {
+          id: Number(node.id || 0),
+          image_url: typeof node.image_url === 'string' ? node.image_url : this.byteArrayToString(node.image_url),
+          caption: typeof node.caption === 'string' ? node.caption : this.byteArrayToString(node.caption),
+          x_position: Number(node.x_position || 0),
+          y_position: Number(node.y_position || 0),
+          size: Number(node.size || 1),
+          is_paid: Boolean(node.is_paid),
+          created_at: createdAtUnix > 0 ? new Date(createdAtUnix * 1000).toISOString() : new Date(0).toISOString(),
+          created_by: node.created_by || null,
+          creator_username: typeof node.creator_username === 'string'
+            ? node.creator_username
+            : this.byteArrayToString(node.creator_username),
+          current_owner: node.current_owner || null,
+          sale_price: Number.isFinite(salePrice) ? salePrice : 0,
+          post_kind: Number(node.post_kind ?? 0),
+          auction_group_id: Number(node.auction_group_id ?? 0),
+          auction_slot_index: Number(node.auction_slot_index ?? 0),
+        };
+      })
+      .filter((p) => Number(p.id || 0) > 0);
+  }
+
+  mergePostSnapshots(primaryPosts = [], fallbackPosts = []) {
+    const map = new Map();
+    for (const post of (Array.isArray(primaryPosts) ? primaryPosts : [])) {
+      const id = Number(post?.id || 0);
+      if (!id) continue;
+      map.set(id, post);
+    }
+
+    for (const post of (Array.isArray(fallbackPosts) ? fallbackPosts : [])) {
+      const id = Number(post?.id || 0);
+      if (!id) continue;
+      const prev = map.get(id) || {};
+      map.set(id, { ...prev, ...post });
+    }
+
+    return [...map.values()].sort((a, b) => Number(a.id || 0) - Number(b.id || 0));
   }
 
   /**

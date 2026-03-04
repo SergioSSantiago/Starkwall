@@ -1,0 +1,17 @@
+app = "starkwall-sealed-relay"
+primary_region = "cdg"
+
+[build]
+  dockerfile = "Dockerfile.relay"
+
+[env]
+  SEALED_RELAY_PORT = "3002"
+  SEALED_RELAY_RPC_URL = "https://api.cartridge.gg/x/starknet/sepolia"
+  SEALED_RELAY_REPO_ROOT = "/app"
+
+[http_service]
+  internal_port = 3002
+  force_https = true
+  auto_start_machines = true
+  auto_stop_machines = true
+  min_machines_running = 1

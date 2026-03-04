@@ -1,0 +1,13 @@
+FROM node:20-bookworm-slim
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+COPY sealed-relayer-server.js ./
+COPY zk ./zk
+
+EXPOSE 3002
+
+CMD ["node", "sealed-relayer-server.js"]

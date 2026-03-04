@@ -98,6 +98,24 @@ pub struct AuctionRevealNullifier {
     pub used: bool,
 }
 
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct OccupiedCell {
+    #[key]
+    pub cell_x: i32,
+    #[key]
+    pub cell_y: i32,
+    pub occupied: bool,
+}
+
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct OccupancySyncState {
+    #[key]
+    pub state_id: u8, // singleton key = 0
+    pub synced_post_id: u64,
+}
+
 #[derive(Drop, Serde)]
 #[dojo::model]
 pub struct UserProfile {

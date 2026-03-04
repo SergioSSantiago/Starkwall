@@ -34,7 +34,7 @@
   "contracts": [
     {
       "address": "0x9b693df0de1b9217493ea72b159beaea15c4299130a1a31279fd7a64adcb8d",
-      "class_hash": "0xa9fe29107e1490be2b5ca1c8c7f9f7f93345b33abbf493f888c68f8d94ee5f",
+      "class_hash": "0x38dcfd60ea9946ddb696aac88b08e87d998e680313c939f349c4cd8176f25c4",
       "init_calldata": [],
       "tag": "di-actions",
       "selector": "0x4c09d12108e978b8c073f8d7186ed1aa144777a0aad9d1334532b5813038897",
@@ -42,6 +42,8 @@
         "create_post",
         "create_auction_post_3x3",
         "create_auction_post_3x3_sealed",
+        "configure_auction_sealed",
+        "sync_occupancy_index",
         "place_bid",
         "commit_bid",
         "reveal_bid",
@@ -314,6 +316,45 @@
       "class_hash": "0x3524feb12689c1392efb97ebaed71c64c9838ce8065a5f4d31db2540c56e7d3",
       "tag": "di-FollowStats",
       "selector": "0x2e86e53a9b9647e4e5e6d3a6b81347f6a1322805b64a1ee5a7b64f9416ce26"
+    },
+    {
+      "members": [
+        {
+          "name": "state_id",
+          "type": "core::integer::u8",
+          "key": true
+        },
+        {
+          "name": "synced_post_id",
+          "type": "core::integer::u64",
+          "key": false
+        }
+      ],
+      "class_hash": "0x707342a8dcb74fe4179c6a6e93075f93e7c0ebfe9d1d84a37f433767964ca0f",
+      "tag": "di-OccupancySyncState",
+      "selector": "0x31ba3e0a2a3b0177707acda6092cd8f199520d2ff6a86188f6e22302b25cdf4"
+    },
+    {
+      "members": [
+        {
+          "name": "cell_x",
+          "type": "core::integer::i32",
+          "key": true
+        },
+        {
+          "name": "cell_y",
+          "type": "core::integer::i32",
+          "key": true
+        },
+        {
+          "name": "occupied",
+          "type": "core::bool",
+          "key": false
+        }
+      ],
+      "class_hash": "0x60cb2b0a206e3913f598f0b6e123b023b6349f66f4075974478624adb3a0d",
+      "tag": "di-OccupiedCell",
+      "selector": "0x42d9bba1b5f9624a25826aff48a0c2d5ac5ada2d8a6fefd02dcf47736a54a84"
     },
     {
       "members": [
@@ -2802,6 +2843,58 @@
     },
     {
       "type": "struct",
+      "name": "dojo_intro::models::OccupancySyncState",
+      "members": [
+        {
+          "name": "state_id",
+          "type": "core::integer::u8"
+        },
+        {
+          "name": "synced_post_id",
+          "type": "core::integer::u64"
+        }
+      ]
+    },
+    {
+      "type": "struct",
+      "name": "dojo_intro::models::OccupancySyncStateValue",
+      "members": [
+        {
+          "name": "synced_post_id",
+          "type": "core::integer::u64"
+        }
+      ]
+    },
+    {
+      "type": "struct",
+      "name": "dojo_intro::models::OccupiedCell",
+      "members": [
+        {
+          "name": "cell_x",
+          "type": "core::integer::i32"
+        },
+        {
+          "name": "cell_y",
+          "type": "core::integer::i32"
+        },
+        {
+          "name": "occupied",
+          "type": "core::bool"
+        }
+      ]
+    },
+    {
+      "type": "struct",
+      "name": "dojo_intro::models::OccupiedCellValue",
+      "members": [
+        {
+          "name": "occupied",
+          "type": "core::bool"
+        }
+      ]
+    },
+    {
+      "type": "struct",
       "name": "dojo_intro::models::Post",
       "members": [
         {
@@ -3394,6 +3487,18 @@
     },
     {
       "type": "event",
+      "name": "dojo_intro::models::m_OccupancySyncState::Event",
+      "kind": "enum",
+      "variants": []
+    },
+    {
+      "type": "event",
+      "name": "dojo_intro::models::m_OccupiedCell::Event",
+      "kind": "enum",
+      "variants": []
+    },
+    {
+      "type": "event",
       "name": "dojo_intro::models::m_Post::Event",
       "kind": "enum",
       "variants": []
@@ -3575,6 +3680,57 @@
             }
           ],
           "state_mutability": "external"
+        },
+        {
+          "type": "function",
+          "name": "configure_auction_sealed",
+          "inputs": [
+            {
+              "name": "group_id",
+              "type": "core::integer::u64"
+            },
+            {
+              "name": "commit_end_time",
+              "type": "core::integer::u64"
+            },
+            {
+              "name": "reveal_end_time",
+              "type": "core::integer::u64"
+            },
+            {
+              "name": "verifier",
+              "type": "core::starknet::contract_address::ContractAddress"
+            }
+          ],
+          "outputs": [],
+          "state_mutability": "external"
+        },
+        {
+          "type": "function",
+          "name": "sync_occupancy_index",
+          "inputs": [
+            {
+              "name": "max_posts",
+              "type": "core::integer::u32"
+            }
+          ],
+          "outputs": [
+            {
+              "type": "(core::integer::u64, core::integer::u64)"
+            }
+          ],
+          "state_mutability": "external"
+        },
+        {
+          "type": "function",
+          "name": "occupancy_sync_progress",
+          "inputs": [],
+          "outputs": [
+            {
+              "type": "(core::integer::u64, core::integer::u64)"
+            }
+          ],
+          "state_mutability": "view"
         },
         {
           "type": "function",

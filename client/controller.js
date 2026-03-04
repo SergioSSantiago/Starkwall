@@ -36,6 +36,11 @@ const actionMethods = [
     description: 'Create a 3x3 auction post',
   },
   {
+    name: 'Configure Sealed Auction',
+    entrypoint: 'configure_auction_sealed',
+    description: 'Configure commit/reveal windows and verifier for auction group',
+  },
+  {
     name: 'Place Bid',
     entrypoint: 'place_bid',
     description: 'Place bid on auction slot',

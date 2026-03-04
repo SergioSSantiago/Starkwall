@@ -56,6 +56,32 @@ export class PostManager {
     }
   }
 
+  readPostsCacheSnapshot() {
+    if (!this.postsCacheEnabled) return []
+    try {
+      const raw = localStorage.getItem(this.cacheKey)
+      const parsed = raw ? JSON.parse(raw) : []
+      return Array.isArray(parsed) ? parsed : []
+    } catch {
+      return []
+    }
+  }
+
+  mergePostsById(primary = [], secondary = []) {
+    const map = new Map()
+    for (const post of (Array.isArray(secondary) ? secondary : [])) {
+      const id = Number(post?.id ?? 0)
+      if (!id) continue
+      map.set(id, post)
+    }
+    for (const post of (Array.isArray(primary) ? primary : [])) {
+      const id = Number(post?.id ?? 0)
+      if (!id) continue
+      map.set(id, post)
+    }
+    return [...map.values()]
+  }
+
   clearLegacyCachesIfNeeded() {
     if (typeof localStorage === 'undefined') return
     try {
@@ -195,7 +221,16 @@ export class PostManager {
 
       if (suspiciousShrink) {
         console.warn(`Suspicious wall shrink detected (${previousCount} -> ${fetchedCount}). Preserving previous wall.`)
-        data = previousPosts
+        data = this.mergePostsById(data, previousPosts)
+      }
+
+      // Extra safety: merge cache snapshot when expected count is above fetched count.
+      if (expectedCount > 0 && data.length < expectedCount) {
+        const cached = this.readPostsCacheSnapshot()
+        if (Array.isArray(cached) && cached.length > data.length) {
+          data = this.mergePostsById(data, cached)
+          console.warn(`Merged cache snapshot to avoid missing posts (${data.length}/${expectedCount}).`)
+        }
       }
     }
 
@@ -618,19 +653,20 @@ export class PostManager {
     // Always re-sync before selecting the 3x3 block to prevent stale overlaps.
     await this.loadPosts()
 
+    const placementPosts = await this.fetchPlacementPostsSnapshot().catch(() => this.posts)
     let blockTopLeft
 
-    if (this.posts.length === 0) {
+    if (!Array.isArray(placementPosts) || placementPosts.length === 0) {
       blockTopLeft = { x: 0, y: 0 }
     } else {
-      const oldestPost = this.posts.reduce((oldest, p) => {
+      const oldestPost = placementPosts.reduce((oldest, p) => {
         if (!oldest) return p
         return Number(p.id) < Number(oldest.id) ? p : oldest
       }, null)
       const anchor = oldestPost
         ? { x: Number(oldestPost.x_position || 0), y: Number(oldestPost.y_position || 0) }
         : { x: 0, y: 0 }
-      blockTopLeft = this.getAdjacentPosition(3, anchor)
+      blockTopLeft = this.getAdjacentPositionFromPosts(3, anchor, placementPosts)
       if (!blockTopLeft) {
         throw new Error('No available adjacent space for a 3x3 auction post.')
       }
@@ -646,26 +682,77 @@ export class PostManager {
       throw new Error('Auction posts require Dojo mode')
     }
 
-    try {
-      const tx = auctionConfig?.sealed
-        ? await this.dojoManager.createAuctionPost3x3Sealed(
+    const submitAuctionAt = async (center) => (
+      auctionConfig?.sealed
+        ? this.dojoManager.createAuctionPost3x3Sealed(
             imageUrl,
             caption,
             creatorUsername,
-            centerPosition.x,
-            centerPosition.y,
+            center.x,
+            center.y,
             Number(auctionConfig?.commitEndTimeUnix || 0),
             Number(auctionConfig?.revealEndTimeUnix || 0),
             String(auctionConfig?.verifier || ''),
           )
-        : await this.dojoManager.createAuctionPost3x3(
+        : this.dojoManager.createAuctionPost3x3(
             imageUrl,
             caption,
             creatorUsername,
-            centerPosition.x,
-            centerPosition.y,
+            center.x,
+            center.y,
             endTimeUnix,
           )
+    )
+
+    try {
+      let tx
+      let resolvedCenter = centerPosition
+      const attempted = new Set([`${Number(centerPosition.x)},${Number(centerPosition.y)}`])
+
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        try {
+          tx = await submitAuctionAt(resolvedCenter)
+          break
+        } catch (error) {
+          const msg = String(error?.message || error || '').toLowerCase()
+          const isOverlap = msg.includes('post overlaps an occupied area')
+          if (!isOverlap || attempt >= 5) throw error
+
+          console.warn(`Auction overlap at ${resolvedCenter.x},${resolvedCenter.y}. Retrying with new block...`)
+          await new Promise((resolve) => setTimeout(resolve, 1200))
+          await this.loadPosts()
+          const refreshedPlacement = await this.fetchPlacementPostsSnapshot().catch(() => this.posts)
+
+          const oldestPost = refreshedPlacement.reduce((oldest, p) => {
+            if (!oldest) return p
+            return Number(p.id) < Number(oldest.id) ? p : oldest
+          }, null)
+          const anchor = oldestPost
+            ? { x: Number(oldestPost.x_position || 0), y: Number(oldestPost.y_position || 0) }
+            : { x: 0, y: 0 }
+
+          let nextTopLeft = null
+          for (let pick = 0; pick < 12; pick += 1) {
+            const candidate = this.getAdjacentPositionFromPosts(3, anchor, refreshedPlacement)
+            if (!candidate) break
+            const candidateCenter = {
+              x: candidate.x + this.canvas.postWidth,
+              y: candidate.y + this.canvas.postHeight,
+            }
+            const key = `${Number(candidateCenter.x)},${Number(candidateCenter.y)}`
+            if (attempted.has(key)) continue
+            attempted.add(key)
+            nextTopLeft = candidate
+            break
+          }
+          if (!nextTopLeft) throw error
+          resolvedCenter = {
+            x: nextTopLeft.x + this.canvas.postWidth,
+            y: nextTopLeft.y + this.canvas.postHeight,
+          }
+        }
+      }
+      if (!tx) throw new Error('Auction transaction could not be submitted')
 
       if (typeof onSuccess === 'function') {
         setTimeout(() => {
@@ -679,8 +766,8 @@ export class PostManager {
       this.canvas.setPosts(this.posts)
 
       const centerPost = this.posts.find((p) =>
-        Number(p.x_position) === Number(centerPosition.x) &&
-        Number(p.y_position) === Number(centerPosition.y) &&
+        Number(p.x_position) === Number(resolvedCenter.x) &&
+        Number(p.y_position) === Number(resolvedCenter.y) &&
         Number(p.post_kind) === 1
       )
 
@@ -699,6 +786,10 @@ export class PostManager {
   }
 
   getAdjacentPosition(size = 1, anchor = { x: 0, y: 0 }) {
+    return this.getAdjacentPositionFromPosts(size, anchor, this.posts)
+  }
+
+  getAdjacentPositionFromPosts(size = 1, anchor = { x: 0, y: 0 }, posts = []) {
     const postWidth = this.canvas.postWidth
     const postHeight = this.canvas.postHeight
     const blockW = postWidth * size
@@ -707,7 +798,7 @@ export class PostManager {
     // Collect candidate positions: adjacent to existing posts (edges of the grid)
     const possiblePositions = []
 
-    this.posts.forEach(post => {
+    ;(Array.isArray(posts) ? posts : []).forEach(post => {
       const postRight = post.x_position + (post.size || 1) * postWidth
       const postBottom = post.y_position + (post.size || 1) * postHeight
       // One tile in each direction (for size 1); for size > 1 we push the block beside the post
@@ -726,7 +817,7 @@ export class PostManager {
       if (seen.has(key)) return false
       seen.add(key)
       const isNonNegative = pos.x >= 0 && pos.y >= 0
-      const blockFree = !this.isBlockOccupied(pos.x, pos.y, size)
+      const blockFree = !this.isBlockOccupiedIn(pos.x, pos.y, size, posts)
       return isNonNegative && blockFree
     })
 
@@ -752,7 +843,11 @@ export class PostManager {
   }
 
   isPositionOccupied(x, y) {
-    return this.posts.some(post => {
+    return this.isPositionOccupiedIn(x, y, this.posts)
+  }
+
+  isPositionOccupiedIn(x, y, posts = []) {
+    return (Array.isArray(posts) ? posts : []).some(post => {
       const pw = this.canvas.postWidth * (post.size || 1)
       const ph = this.canvas.postHeight * (post.size || 1)
       return x >= post.x_position && x < post.x_position + pw &&
@@ -762,14 +857,49 @@ export class PostManager {
 
   /** Returns true if the block [x, x+size*W) x [y, y+size*H) overlaps any existing post */
   isBlockOccupied(x, y, size) {
+    return this.isBlockOccupiedIn(x, y, size, this.posts)
+  }
+
+  isBlockOccupiedIn(x, y, size, posts = []) {
     const postWidth = this.canvas.postWidth
     const postHeight = this.canvas.postHeight
     for (let i = 0; i < size; i++) {
       for (let j = 0; j < size; j++) {
-        if (this.isPositionOccupied(x + i * postWidth, y + j * postHeight)) return true
+        if (this.isPositionOccupiedIn(x + i * postWidth, y + j * postHeight, posts)) return true
       }
     }
     return false
+  }
+
+  async fetchPlacementPostsSnapshot() {
+    if (!this.useDojo) return this.posts
+    const endpoint = String(TORII_URL || '').replace(/\/+$/, '') + '/graphql'
+    const query = `
+      query {
+        diPostModels(first: 600, order: { field: ID, direction: ASC }) {
+          edges { node { id x_position y_position size } }
+        }
+      }
+    `
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query }),
+    })
+    if (!res.ok) throw new Error(`Placement snapshot failed (${res.status})`)
+    const body = await res.json()
+    const edges = body?.data?.diPostModels?.edges || []
+    const posts = edges
+      .map((e) => e?.node || null)
+      .filter(Boolean)
+      .map((n) => ({
+        id: Number(n.id || 0),
+        x_position: Number(n.x_position || 0),
+        y_position: Number(n.y_position || 0),
+        size: Number(n.size || 1),
+      }))
+      .filter((p) => Number(p.id || 0) > 0)
+    return posts
   }
 
   async subscribeToChanges() {

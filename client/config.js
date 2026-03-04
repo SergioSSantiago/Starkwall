@@ -63,6 +63,9 @@ export const SEALED_BID_VERIFIER_ADDRESS = String(
     (IS_SEPOLIA ? '0x03a3af693e4aa3dab8c38ea47b2757443837d5d5fcb6f23263cad63964611624' : ''),
 )
 export const SEALED_RELAY_URL = String(import.meta.env?.VITE_SEALED_RELAY_URL || '')
+export const MEDIA_UPLOAD_URL = String(
+  import.meta.env?.VITE_MEDIA_UPLOAD_URL || (SEALED_RELAY_URL ? `${SEALED_RELAY_URL.replace(/\/+$/, '')}/media/upload` : ''),
+)
 
 // Yield strategy adapter config (optional runtime metadata used by UI/ops scripts).
 export const YIELD_STRATEGY_KIND = Number(import.meta.env?.VITE_YIELD_STRATEGY_KIND || 0)
