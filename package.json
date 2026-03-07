@@ -1,9 +1,13 @@
 {
   "scripts": {
     "sealed-relay": "node sealed-relayer-server.js",
-    "faucet": "node faucet-server.js"
+    "faucet": "node faucet-server.js",
+    "demo:record": "node scripts/record-demo-video.mjs"
   },
   "dependencies": {
-    "starknet": "^6.11.0"
+    "starknet": "^9.2.1"
+  },
+  "devDependencies": {
+    "playwright": "^1.58.2"
   }
 }

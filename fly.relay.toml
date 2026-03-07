@@ -8,10 +8,20 @@ primary_region = "cdg"
   SEALED_RELAY_PORT = "3002"
   SEALED_RELAY_RPC_URL = "https://api.cartridge.gg/x/starknet/sepolia"
   SEALED_RELAY_REPO_ROOT = "/app"
+  SEALED_RELAY_JOBS_FILE = "/data/sealed-relayer-jobs.json"
 
 [http_service]
   internal_port = 3002
   force_https = true
   auto_start_machines = true
-  auto_stop_machines = true
+  auto_stop_machines = false
   min_machines_running = 1
+
+[mounts]
+  source = "sealed_relayer_data"
+  destination = "/data"
+
+[vm]
+  memory = "2048mb"
+  cpu_kind = "shared"
+  cpus = 1

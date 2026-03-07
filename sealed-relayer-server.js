@@ -15,9 +15,10 @@ import { createHash } from 'crypto';
 
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
-const { Account, RpcProvider } = require('starknet');
+const { Account, RpcProvider, hash } = require('starknet');
 
 const PORT = Number(process.env.SEALED_RELAY_PORT || 3002);
+const HOST = String(process.env.SEALED_RELAY_HOST || '0.0.0.0');
 const RPC_URL = String(process.env.SEALED_RELAY_RPC_URL || 'https://starknet-sepolia.public.blastapi.io/rpc/v0_8');
 const ACTIONS_CONTRACT = String(process.env.SEALED_RELAY_ACTIONS_ADDRESS || '').trim();
 const RELAYER_ACCOUNT_ADDRESS = String(process.env.SEALED_RELAY_ACCOUNT_ADDRESS || '').trim();
@@ -27,9 +28,69 @@ const REPO_ROOT = process.env.SEALED_RELAY_REPO_ROOT || path.resolve(path.dirnam
 const NOIR_DIR = path.join(REPO_ROOT, 'zk/noir-sealed-bid');
 const TARGET_DIR = path.join(NOIR_DIR, 'target');
 const PROVER_TOML_PATH = path.join(NOIR_DIR, 'Prover.toml');
-const GARAGA_BIN = process.env.SEALED_RELAY_GARAGA_BIN || path.join(REPO_ROOT, '.venv-garaga/bin/garaga');
-const BB_BIN = process.env.SEALED_RELAY_BB_BIN || path.join(process.env.HOME || '', '.bb/bb');
+const GARAGA_BIN = process.env.SEALED_RELAY_GARAGA_BIN || 'garaga';
+const BB_BIN = process.env.SEALED_RELAY_BB_BIN || 'bb';
 const NARGO_BIN = process.env.SEALED_RELAY_NARGO_BIN || 'nargo';
+const TX_VERSION = String(process.env.SEALED_RELAY_TX_VERSION || '').trim();
+const VERIFIER_CONTRACT = String(process.env.SEALED_RELAY_VERIFIER_ADDRESS || '').trim();
+const TX_MAX_FEE = String(process.env.SEALED_RELAY_TX_MAX_FEE || '0xee6b2800').trim();
+const HIGH_L2_GAS_TX_DETAILS = {
+  resourceBounds: {
+    L1_GAS: {
+      max_amount: 0x2710n,
+      max_price_per_unit: 0x300000000000n,
+    },
+    // Starknet RPC v0.8 requires this field for v3 invokes.
+    L1_DATA_GAS: {
+      max_amount: 0x800n,
+      max_price_per_unit: 0x2540be400n,
+    },
+    L2_GAS: {
+      max_amount: 0xa00000n,
+      max_price_per_unit: 0x2540be400n,
+    },
+  },
+};
+const HIGH_L2_GAS_TX_DETAILS_NO_DATA = {
+  resourceBounds: {
+    L1_GAS: {
+      max_amount: 0x2710n,
+      max_price_per_unit: 0x300000000000n,
+    },
+    L2_GAS: {
+      max_amount: 0xa00000n,
+      max_price_per_unit: 0x2540be400n,
+    },
+  },
+};
+const HIGH_L2_GAS_TX_DETAILS_LEGACY_KEYS = {
+  resourceBounds: {
+    l1_gas: {
+      max_amount: 0x2710n,
+      max_price_per_unit: 0x300000000000n,
+    },
+    l1_data_gas: {
+      max_amount: 0x800n,
+      max_price_per_unit: 0x2540be400n,
+    },
+    l2_gas: {
+      max_amount: 0xa00000n,
+      max_price_per_unit: 0x2540be400n,
+    },
+  },
+};
+const HIGH_L2_GAS_TX_DETAILS_LEGACY_KEYS_NO_DATA = {
+  resourceBounds: {
+    l1_gas: {
+      max_amount: 0x2710n,
+      max_price_per_unit: 0x300000000000n,
+    },
+    l2_gas: {
+      max_amount: 0xa00000n,
+      max_price_per_unit: 0x2540be400n,
+    },
+  },
+};
 const JOBS_DB_PATH = process.env.SEALED_RELAY_JOBS_FILE || path.join(REPO_ROOT, '.sealed-relayer-jobs.json');
 const ZK_VERBOSE = String(process.env.SEALED_RELAY_ZK_VERBOSE || 'true').toLowerCase() !== 'false';
 const MAX_REVEAL_RETRIES = Number(process.env.SEALED_RELAY_MAX_REVEAL_RETRIES || 4);
@@ -38,6 +99,9 @@ const MAX_REFUND_RETRIES = Number(process.env.SEALED_RELAY_MAX_REFUND_RETRIES ||
 const REVEAL_RETRY_SECONDS = Number(process.env.SEALED_RELAY_REVEAL_RETRY_SECONDS || 15);
 const FINALIZE_RETRY_SECONDS = Number(process.env.SEALED_RELAY_FINALIZE_RETRY_SECONDS || 15);
 const REFUND_RETRY_SECONDS = Number(process.env.SEALED_RELAY_REFUND_RETRY_SECONDS || 15);
+const TX_WAIT_TIMEOUT_MS = Number(process.env.SEALED_RELAY_TX_WAIT_TIMEOUT_MS || 45000);
+const EXECUTE_TIMEOUT_MS = Number(process.env.SEALED_RELAY_EXECUTE_TIMEOUT_MS || 12000);
+const FINALIZE_NOW_HTTP_TIMEOUT_MS = Number(process.env.SEALED_RELAY_FINALIZE_NOW_HTTP_TIMEOUT_MS || 15000);
 const MEDIA_PROVIDER = String(process.env.SEALED_RELAY_MEDIA_PROVIDER || 'none').toLowerCase();
 const MEDIA_MAX_BYTES = Number(process.env.SEALED_RELAY_MEDIA_MAX_BYTES || 1_500_000);
 const MEDIA_PUBLIC_BASE_URL = String(process.env.SEALED_RELAY_PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
@@ -55,7 +119,13 @@ let finalizeWorkerBusy = false;
 let refundWorkerBusy = false;
 let persistQueued = false;
 let relayerTxQueue = Promise.resolve();
+let proofGenQueue = Promise.resolve();
 const slotLocks = new Set();
+
+async function ensureJobsStorageDir() {
+  const dirPath = path.dirname(JOBS_DB_PATH);
+  await fs.mkdir(dirPath, { recursive: true });
+}
 
 function validateConfig() {
   if (!ACTIONS_CONTRACT || !ACTIONS_CONTRACT.startsWith('0x')) {
@@ -71,13 +141,17 @@ function validateConfig() {
 
 function getRelayerAccount() {
   const provider = new RpcProvider({ nodeUrl: RPC_URL });
-  // starknet.js v8 expects an options object constructor.
-  return new Account({
-    provider,
-    address: RELAYER_ACCOUNT_ADDRESS,
-    signer: RELAYER_PRIVATE_KEY,
-    cairoVersion: '1',
-  });
+  // Support modern starknet.js constructor while keeping backward compatibility.
+  try {
+    return new Account({
+      provider,
+      address: RELAYER_ACCOUNT_ADDRESS,
+      signer: RELAYER_PRIVATE_KEY,
+      cairoVersion: '1',
+    });
+  } catch {
+    return new Account(provider, RELAYER_ACCOUNT_ADDRESS, RELAYER_PRIVATE_KEY, '1');
+  }
 }
 
 function enqueueRelayerTx(task) {
@@ -86,17 +160,114 @@ function enqueueRelayerTx(task) {
   return run;
 }
 
+function enqueueProofGeneration(task) {
+  const run = proofGenQueue.then(task, task);
+  proofGenQueue = run.catch(() => {});
+  return run;
+}
+
 async function executeWithFreshNonce(account, call) {
   let nonce = undefined;
-  try {
-    nonce = await account.getNonce('pending');
-  } catch {
+  const nonceCandidates = [
+    () => account.provider.getNonceForAddress(account.address),
+    () => account.provider.getNonceForAddress(account.address, 'latest'),
+    () => account.provider.getNonceForAddress(account.address, 'pending'),
+    () => account.getNonce(),
+    () => account.getNonce('latest'),
+    () => account.getNonce('pending'),
+  ];
+  for (const readNonce of nonceCandidates) {
     try {
-      nonce = await account.getNonce();
+      const value = await readNonce();
+      if (value !== undefined && value !== null) {
+        nonce = value;
+        break;
+      }
     } catch {}
   }
-  const details = nonce !== undefined ? { nonce } : undefined;
-  return account.execute(call, undefined, details);
+  if (nonce === undefined) {
+    throw new Error('Could not resolve account nonce from RPC');
+  }
+  let nonceValue = nonce;
+  if (typeof nonceValue !== 'bigint') {
+    try {
+      nonceValue = BigInt(nonceValue);
+    } catch {
+      // Keep original nonce if BigInt conversion fails for any edge RPC type.
+    }
+  }
+  const withTimeout = async (promise, label) =>
+    Promise.race([
+      promise,
+      new Promise((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`Timed out while ${label} after ${EXECUTE_TIMEOUT_MS}ms`)),
+          EXECUTE_TIMEOUT_MS,
+        ),
+      ),
+    ]);
+
+  const executeWithDetailsCompat = async (details) => {
+    try {
+      return await withTimeout(account.execute(call, details), 'sending transaction');
+    } catch (firstError) {
+      try {
+        return await withTimeout(account.execute(call, undefined, details), 'sending transaction');
+      } catch {
+        throw firstError;
+      }
+    }
+  };
+
+  const candidates = [];
+  if (TX_VERSION) {
+    candidates.push(
+      {
+        nonce: nonceValue,
+        version: TX_VERSION,
+        tip: 0n,
+        paymasterData: [],
+        accountDeploymentData: [],
+        nonceDataAvailabilityMode: 'L1',
+        feeDataAvailabilityMode: 'L1',
+        ...HIGH_L2_GAS_TX_DETAILS_LEGACY_KEYS,
+      },
+      {
+        nonce: nonceValue,
+        version: TX_VERSION,
+        tip: 0n,
+        paymasterData: [],
+        accountDeploymentData: [],
+        nonceDataAvailabilityMode: 'L1',
+        feeDataAvailabilityMode: 'L1',
+        ...HIGH_L2_GAS_TX_DETAILS_LEGACY_KEYS,
+        maxFee: BigInt(TX_MAX_FEE),
+      },
+    );
+  } else {
+    // Legacy fallback path for environments that still rely on auto versioning.
+    candidates.push(
+      { nonce: nonceValue },
+      { nonce: nonceValue, ...HIGH_L2_GAS_TX_DETAILS },
+      { nonce: nonceValue, ...HIGH_L2_GAS_TX_DETAILS_NO_DATA },
+      { nonce: nonceValue, ...HIGH_L2_GAS_TX_DETAILS_LEGACY_KEYS },
+      { nonce: nonceValue, ...HIGH_L2_GAS_TX_DETAILS_LEGACY_KEYS_NO_DATA },
+      { nonce: nonceValue, ...HIGH_L2_GAS_TX_DETAILS, maxFee: BigInt(TX_MAX_FEE) },
+      { nonce: nonceValue, ...HIGH_L2_GAS_TX_DETAILS_NO_DATA, maxFee: BigInt(TX_MAX_FEE) },
+      { nonce: nonceValue, ...HIGH_L2_GAS_TX_DETAILS_LEGACY_KEYS, maxFee: BigInt(TX_MAX_FEE) },
+      { nonce: nonceValue, ...HIGH_L2_GAS_TX_DETAILS_LEGACY_KEYS_NO_DATA, maxFee: BigInt(TX_MAX_FEE) },
+    );
+  }
+
+  let lastError = null;
+  for (const details of candidates) {
+    try {
+      return await executeWithDetailsCompat(details);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error('Unable to execute relayer transaction');
 }
 
 function isExecutionReverted(receipt) {
@@ -109,8 +280,28 @@ function readRevertReason(receipt) {
 }
 
 async function waitForSuccessfulTx(account, txHash, label = 'transaction') {
-  await account.waitForTransaction(txHash);
-  const receipt = await account.provider.getTransactionReceipt(txHash);
+  const timeoutPromise = new Promise((resolve) => {
+    setTimeout(() => resolve('timeout'), TX_WAIT_TIMEOUT_MS);
+  });
+  const waitResult = await Promise.race([account.waitForTransaction(txHash), timeoutPromise]);
+  if (waitResult === 'timeout') {
+    console.warn(`[sealed-relayer] tx wait timeout (${label})`, {
+      txHash: String(txHash),
+      waitMs: TX_WAIT_TIMEOUT_MS,
+    });
+    return;
+  }
+  const getReceipt = account?.provider?.getTransactionReceipt
+    ? account.provider.getTransactionReceipt.bind(account.provider)
+    : account?.getTransactionReceipt
+      ? account.getTransactionReceipt.bind(account)
+      : account?.channel?.node?.getTransactionReceipt
+        ? account.channel.node.getTransactionReceipt.bind(account.channel.node)
+        : null;
+  if (!getReceipt) {
+    throw new Error('Relayer account/provider cannot fetch transaction receipt');
+  }
+  const receipt = await getReceipt(txHash);
   if (isExecutionReverted(receipt)) {
     throw new Error(`${label} reverted: ${readRevertReason(receipt)}`);
   }
@@ -122,6 +313,21 @@ function normalizeHexAddress(address) {
   const hex = raw.startsWith('0x') ? raw.slice(2) : raw;
   const normalized = hex.replace(/^0+/, '');
   return `0x${normalized || '0'}`;
+}
+
+function toHexFelt(value) {
+  const n = BigInt(value);
+  return `0x${n.toString(16)}`;
+}
+
+function getPublicJobView(job) {
+  if (!job || typeof job !== 'object') return job;
+  const publicJob = { ...job };
+  publicJob.hasProofCalldata = Array.isArray(job.proofCalldata) && job.proofCalldata.length > 0;
+  // Never expose secret salt or full proof calldata via public API.
+  delete publicJob.salt;
+  delete publicJob.proofCalldata;
+  return publicJob;
 }
 
 function lockSlot(slotPostId) {
@@ -180,9 +386,23 @@ async function hashFile(filePath) {
   }
 }
 
+async function resolveExistingPath(candidates = []) {
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      await fs.access(candidate);
+      return candidate;
+    } catch {}
+  }
+  throw new Error(`Expected artifact not found. Tried: ${candidates.join(', ')}`);
+}
+
 async function persistJobs() {
+  await ensureJobsStorageDir();
   const serializable = jobs.map((j) => ({ ...j }));
-  await fs.writeFile(JOBS_DB_PATH, JSON.stringify(serializable, null, 2), 'utf8');
+  const tmpPath = `${JOBS_DB_PATH}.tmp`;
+  await fs.writeFile(tmpPath, JSON.stringify(serializable, null, 2), 'utf8');
+  await fs.rename(tmpPath, JOBS_DB_PATH);
 }
 
 function queuePersistJobs() {
@@ -199,6 +419,7 @@ function queuePersistJobs() {
 }
 
 async function restoreJobs() {
+  await ensureJobsStorageDir();
   try {
     const raw = await fs.readFile(JOBS_DB_PATH, 'utf8');
     const parsed = JSON.parse(raw);
@@ -231,108 +452,146 @@ async function runCommand(command, args, cwd) {
 }
 
 async function generateProofCalldata(job) {
-  if (ZK_VERBOSE) {
-    console.log('[sealed-relayer][zk:job-input]', {
-      id: job.id,
-      slotPostId: job.slotPostId,
-      groupId: job.groupId,
-      bidder: job.bidder,
-      bidAmount: job.bidAmount,
-      saltHash: sha256Hex(String(job.salt || '')),
-    });
-  }
+  return enqueueProofGeneration(async () => {
+    if (ZK_VERBOSE) {
+      console.log('[sealed-relayer][zk:job-input]', {
+        id: job.id,
+        slotPostId: job.slotPostId,
+        groupId: job.groupId,
+        bidder: job.bidder,
+        bidAmount: job.bidAmount,
+        saltHash: sha256Hex(String(job.salt || '')),
+      });
+    }
 
-  await fs.writeFile(PROVER_TOML_PATH, toProverToml(job), 'utf8');
-  await runCommand(NARGO_BIN, ['execute', 'witness'], NOIR_DIR);
-  await runCommand(
-    BB_BIN,
-    ['prove', '-s', 'ultra_honk', '--oracle_hash', 'keccak', '-b', 'target/noir_sealed_bid.json', '-w', 'target/witness.gz', '-o', 'target/honk-keccak', '--write_vk'],
-    NOIR_DIR,
-  );
+    await fs.writeFile(PROVER_TOML_PATH, toProverToml(job), 'utf8');
+    await runCommand(NARGO_BIN, ['execute', 'witness'], NOIR_DIR);
+    const honkDir = path.join(TARGET_DIR, 'honk-keccak');
+    // bb native writes nested proof outputs; clear stale file-vs-dir conflicts from previous toolchains.
+    await fs.rm(honkDir, { recursive: true, force: true });
+    await fs.mkdir(honkDir, { recursive: true });
+    await runCommand(
+      BB_BIN,
+      [
+        'write_vk',
+        '-b',
+        'target/noir_sealed_bid.json',
+        '-o',
+        'target/honk-keccak',
+        '--oracle_hash',
+        'keccak',
+      ],
+      NOIR_DIR,
+    );
+    await runCommand(
+      BB_BIN,
+      [
+        'prove',
+        '-b',
+        'target/noir_sealed_bid.json',
+        '-w',
+        'target/witness.gz',
+        '-o',
+        'target/honk-keccak/proof',
+        '-k',
+        'target/honk-keccak/vk',
+        '--oracle_hash',
+        'keccak',
+      ],
+      NOIR_DIR,
+    );
 
-  const witnessPath = path.join(NOIR_DIR, 'target', 'witness.gz');
-  const proofPath = path.join(TARGET_DIR, 'honk-keccak', 'proof');
-  const vkPath = path.join(TARGET_DIR, 'honk-keccak', 'vk');
-  const publicInputsPath = path.join(TARGET_DIR, 'honk-keccak', 'public_inputs');
-
-  const [witnessHash, proofHash, vkHash, publicInputsHash] = await Promise.all([
-    hashFile(witnessPath),
-    hashFile(proofPath),
-    hashFile(vkPath),
-    hashFile(publicInputsPath),
-  ]);
-  if (job && typeof job === 'object') {
-    job.zkTrace = {
-      witnessHash,
-      proofHash,
-      vkHash,
-      publicInputsHash,
-      generatedAt: Date.now(),
-    };
-    queuePersistJobs();
-  }
-
-  if (ZK_VERBOSE) {
-    console.log('[sealed-relayer][zk:artifacts]', {
-      id: job.id,
-      witnessPath,
-      witnessHash,
-      proofPath,
-      proofHash,
-      vkPath,
-      vkHash,
-      publicInputsPath,
-      publicInputsHash,
-    });
-  }
-
-  const raw = await runCommand(
-    GARAGA_BIN,
-    [
-      'calldata',
-      '--system',
-      'ultra_keccak_zk_honk',
-      '--vk',
-      path.join(TARGET_DIR, 'honk-keccak', 'vk'),
-      '--proof',
+    const witnessPath = path.join(NOIR_DIR, 'target', 'witness.gz');
+    const vkPath = path.join(TARGET_DIR, 'honk-keccak', 'vk');
+    const proofPath = await resolveExistingPath([
+      path.join(TARGET_DIR, 'honk-keccak', 'proof', 'proof'),
       path.join(TARGET_DIR, 'honk-keccak', 'proof'),
-      '--public-inputs',
+    ]);
+    const publicInputsPath = await resolveExistingPath([
+      path.join(TARGET_DIR, 'honk-keccak', 'proof', 'public_inputs'),
       path.join(TARGET_DIR, 'honk-keccak', 'public_inputs'),
-      '--format',
-      'array',
-    ],
-    NOIR_DIR,
-  );
+    ]);
 
-  const tokens = String(raw || '')
-    .trim()
-    .match(/0x[0-9a-fA-F]+|[0-9]+/g) || [];
-  if (tokens.length === 0) {
-    throw new Error('Garaga calldata generation returned empty array');
-  }
-  const normalized = tokens.map((token) => {
-    const normalized = token.startsWith('0x') ? BigInt(token) : BigInt(token);
-    return normalized.toString(10);
-  });
-  const calldataHash = sha256Hex(normalized.join(','));
-  if (job && typeof job === 'object') {
-    job.zkTrace = {
-      ...(job.zkTrace || {}),
-      proofCalldataHash: calldataHash,
-      proofFelts: normalized.length,
-      calldataPreview: previewArray(normalized, 8),
-    };
-    queuePersistJobs();
-  }
-  if (ZK_VERBOSE) {
-    console.log('[sealed-relayer][zk:garaga-calldata]', {
-      id: job.id,
-      totalFelts: normalized.length,
-      calldataHash,
-      preview: previewArray(normalized, 8),
+    const [witnessHash, proofHash, vkHash, publicInputsHash] = await Promise.all([
+      hashFile(witnessPath),
+      hashFile(proofPath),
+      hashFile(vkPath),
+      hashFile(publicInputsPath),
+    ]);
+    if (job && typeof job === 'object') {
+      job.zkTrace = {
+        witnessHash,
+        proofHash,
+        vkHash,
+        publicInputsHash,
+        generatedAt: Date.now(),
+      };
+      queuePersistJobs();
+    }
+
+    if (ZK_VERBOSE) {
+      console.log('[sealed-relayer][zk:artifacts]', {
+        id: job.id,
+        witnessPath,
+        witnessHash,
+        proofPath,
+        proofHash,
+        vkPath,
+        vkHash,
+        publicInputsPath,
+        publicInputsHash,
+      });
+    }
+
+    const raw = await runCommand(
+      GARAGA_BIN,
+      [
+        'calldata',
+        '--system',
+        'ultra_keccak_zk_honk',
+        '--vk',
+        path.join(TARGET_DIR, 'honk-keccak', 'vk'),
+        '--proof',
+        path.join(TARGET_DIR, 'honk-keccak', 'proof'),
+        '--public-inputs',
+        path.join(TARGET_DIR, 'honk-keccak', 'public_inputs'),
+        '--format',
+        'array',
+      ],
+      NOIR_DIR,
+    );
+
+    const tokens = String(raw || '')
+      .trim()
+      .match(/0x[0-9a-fA-F]+|[0-9]+/g) || [];
+    if (tokens.length === 0) {
+      throw new Error('Garaga calldata generation returned empty array');
+    }
+    const normalized = tokens.map((token) => {
+      const normalized = token.startsWith('0x') ? BigInt(token) : BigInt(token);
+      return normalized.toString(10);
     });
-  }
-  return normalized;
+    const calldataHash = sha256Hex(normalized.join(','));
+    if (job && typeof job === 'object') {
+      job.zkTrace = {
+        ...(job.zkTrace || {}),
+        proofCalldataHash: calldataHash,
+        proofFelts: normalized.length,
+        calldataPreview: previewArray(normalized, 8),
+      };
+      job.proofCalldata = normalized;
+      queuePersistJobs();
+    }
+    if (ZK_VERBOSE) {
+      console.log('[sealed-relayer][zk:garaga-calldata]', {
+        id: job.id,
+        totalFelts: normalized.length,
+        calldataHash,
+        preview: previewArray(normalized, 8),
+      });
+    }
+    return normalized;
+  });
 }
 
 async function executeReveal(job, proofCalldata) {
@@ -405,6 +664,7 @@ async function executeClaimRefund(slotPostId, bidder) {
 function isPermanentRevealError(message = '') {
   const normalized = String(message || '').toLowerCase();
   return (
+    normalized.includes('runtimeerror: unreachable') ||
     normalized.includes('input too long for arguments') ||
     normalized.includes('invalid reveal proof') ||
     normalized.includes('commitment mismatch') ||
@@ -416,6 +676,12 @@ function isPermanentRevealError(message = '') {
 
 function classifyRelayError(message = '', stage = 'reveal') {
   const normalized = String(message || '').toLowerCase();
+  if (normalized.includes('runtimeerror: unreachable')) {
+    return {
+      code: 'proof_engine_unreachable',
+      hint: 'Proof engine failed unexpectedly; continuing with on-chain settlement fallback.',
+    };
+  }
   if (normalized.includes('already finalized')) {
     return { code: 'already_finalized', hint: 'Slot already finalized; treated as idempotent success.' };
   }
@@ -453,6 +719,87 @@ async function runImmediateReveal(payload) {
   return { txHash, proofLength: proofCalldata.length, bidder: job.bidder, slotPostId: job.slotPostId };
 }
 
+async function runImmediateReverify(payload) {
+  const slotPostId = Number(payload?.slotPostId || 0);
+  if (!Number.isFinite(slotPostId) || slotPostId <= 0) throw new Error('Invalid slotPostId');
+
+  const normalizedBidder = payload?.bidder ? normalizeHexAddress(payload.bidder) : '';
+  const explicitJobId = String(payload?.jobId || '').trim();
+  const verifierAddress = normalizeHexAddress(payload?.verifierAddress || VERIFIER_CONTRACT);
+  if (!verifierAddress || verifierAddress === '0x0') {
+    throw new Error('Missing verifier address (SEALED_RELAY_VERIFIER_ADDRESS)');
+  }
+
+  const matches = jobs
+    .filter((j) => Number(j?.slotPostId || 0) === slotPostId)
+    .filter((j) => !explicitJobId || String(j?.id || '') === explicitJobId)
+    .filter((j) => !normalizedBidder || normalizeHexAddress(j?.bidder) === normalizedBidder)
+    .filter((j) => Array.isArray(j?.proofCalldata) && j.proofCalldata.length > 0)
+    .sort((a, b) => Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0));
+  const job = matches[0] || null;
+  if (!job) {
+    throw new Error('No stored proof calldata for this slot. Re-verify requires preserved relay trace.');
+  }
+
+  const bidder = normalizeHexAddress(job.bidder);
+  const bidAmount = Number(job.bidAmount || 0);
+  if (!bidder || bidder === '0x0') throw new Error('Stored job has invalid bidder');
+  if (!Number.isFinite(bidAmount) || bidAmount <= 0) throw new Error('Stored job has invalid bid amount');
+  const slotFelt = toHexFelt(slotPostId);
+  const groupFelt = toHexFelt(Number(job.groupId || 0));
+  const bidAmountFelt = toHexFelt(bidAmount);
+  const saltFelt = String(job.salt || '').trim();
+  if (!saltFelt) throw new Error('Stored job is missing salt');
+  const commitment = hash.computePoseidonHashOnElements([
+    slotFelt,
+    groupFelt,
+    bidder,
+    bidAmountFelt,
+    saltFelt,
+  ]);
+  const proof = job.proofCalldata.map((v) => String(v));
+  const calldata = [
+    slotFelt,
+    groupFelt,
+    bidder,
+    bidAmountFelt,
+    saltFelt,
+    String(commitment),
+    toHexFelt(proof.length),
+    ...proof,
+  ];
+  const provider = new RpcProvider({ nodeUrl: RPC_URL });
+  let result;
+  try {
+    result = await provider.callContract({
+      contractAddress: verifierAddress,
+      entrypoint: 'verify_sealed_bid',
+      calldata,
+    }, 'latest');
+  } catch {
+    result = await provider.callContract({
+      contractAddress: verifierAddress,
+      entrypoint: 'verify_sealed_bid',
+      calldata,
+    });
+  }
+  const output = Array.isArray(result) ? result : (result?.result || []);
+  const raw = String(output?.[0] ?? '0');
+  const asBigInt = raw.startsWith('0x') ? BigInt(raw) : BigInt(raw || '0');
+  const valid = asBigInt !== 0n;
+
+  return {
+    slotPostId,
+    jobId: String(job.id || ''),
+    bidder,
+    verifierAddress,
+    valid,
+    output,
+    proofFelts: proof.length,
+    proofCalldataHash: String(job?.zkTrace?.proofCalldataHash || ''),
+  };
+}
+
 async function runImmediateFinalize(payload) {
   const slotPostId = Number(payload?.slotPostId);
   if (!Number.isFinite(slotPostId) || slotPostId <= 0) throw new Error('Invalid slotPostId');
@@ -467,6 +814,18 @@ async function runImmediateFinalize(payload) {
     }
     throw error;
   }
+}
+
+async function runImmediateFinalizeWithHttpTimeout(payload) {
+  const timeoutPromise = new Promise((resolve) => {
+    setTimeout(() => resolve({ timedOut: true }), FINALIZE_NOW_HTTP_TIMEOUT_MS);
+  });
+  const executePromise = runImmediateFinalize(payload)
+    .then((result) => ({ timedOut: false, result }))
+    .catch((error) => {
+      throw error;
+    });
+  return Promise.race([executePromise, timeoutPromise]);
 }
 
 async function runImmediateRefund(payload) {
@@ -518,7 +877,19 @@ async function processNextJob() {
         const message = String(error?.stack || error?.message || error || 'Unknown relayer error');
         const classified = classifyRelayError(message, 'reveal');
         const normalized = message.toLowerCase();
-        if (normalized.includes('reveal phase closed')) {
+        if (normalized.includes('runtimeerror: unreachable')) {
+          // Proof engine issue: do not spam retries, continue with settle/refund fallback.
+          candidate.status = 'skipped';
+          candidate.error = message;
+          candidate.errorCode = classified.code;
+          candidate.errorHint = classified.hint;
+          if (candidate.finalizeStatus === 'scheduled' && candidate.finalizeAfterUnix <= 0) {
+            candidate.finalizeAfterUnix = Math.floor(Date.now() / 1000);
+          }
+          if (candidate.refundStatus === 'scheduled' && candidate.refundAfterUnix <= 0) {
+            candidate.refundAfterUnix = Math.floor(Date.now() / 1000) + 10;
+          }
+        } else if (normalized.includes('reveal phase closed')) {
           candidate.status = 'skipped';
           candidate.error = message;
           candidate.errorCode = classified.code;
@@ -916,7 +1287,7 @@ const server = createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && req.url?.startsWith('/sealed/jobs')) {
-    json(res, 200, { ok: true, jobs });
+    json(res, 200, { ok: true, jobs: jobs.map(getPublicJobView) });
     return;
   }
 
@@ -1032,7 +1403,16 @@ const server = createServer(async (req, res) => {
   if (req.method === 'POST' && req.url === '/sealed/finalize-now') {
     try {
       const payload = await parseBody(req);
-      const result = await runImmediateFinalize(payload);
+      const finalizeOutcome = await runImmediateFinalizeWithHttpTimeout(payload);
+      if (finalizeOutcome?.timedOut) {
+        json(res, 202, {
+          ok: true,
+          status: 'processing',
+          hint: 'Finalize is still processing in background; poll slot state and relay jobs.',
+        });
+        return;
+      }
+      const result = finalizeOutcome.result;
       json(res, 200, {
         ok: true,
         status: result.alreadyFinalized ? 'already_finalized' : 'submitted',
@@ -1042,6 +1422,22 @@ const server = createServer(async (req, res) => {
       return;
     } catch (error) {
       json(res, 400, { ok: false, error: String(error?.stack || error?.message || 'Finalize now failed') });
+      return;
+    }
+  }
+
+  if (req.method === 'POST' && req.url === '/sealed/reverify-now') {
+    try {
+      const payload = await parseBody(req);
+      const result = await runImmediateReverify(payload);
+      json(res, 200, {
+        ok: true,
+        status: result.valid ? 'valid' : 'invalid',
+        ...result,
+      });
+      return;
+    } catch (error) {
+      json(res, 400, { ok: false, error: String(error?.message || 'Reverify failed') });
       return;
     }
   }
@@ -1075,8 +1471,8 @@ async function start() {
     void processNextFinalizeJob();
     void processNextRefundJob();
   }, 5000);
-  server.listen(PORT, () => {
-    console.log(`[sealed-relayer] listening on http://localhost:${PORT}`);
+  server.listen(PORT, HOST, () => {
+    console.log(`[sealed-relayer] listening on http://${HOST}:${PORT}`);
     console.log(`[sealed-relayer] actions=${ACTIONS_CONTRACT}`);
     console.log('[sealed-relayer] POST /sealed/schedule to enqueue auto-reveal jobs');
   });

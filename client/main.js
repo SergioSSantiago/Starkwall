@@ -1119,6 +1119,8 @@ const autoRevealingSlots = new Set()
 const autoClaimingRefundSlots = new Set()
 // Prevent noisy repeated toasts/logs when sealed finalize is blocked by unrevealed commits.
 const autoFinalizeBlockedSealedSlots = new Set()
+// Tracks slots known as finalized on-chain to avoid repeated finalize prompts while indexer catches up.
+const autoFinalizeConfirmedSlots = new Set()
 const ZK_DEBUG_LOGS = Boolean(import.meta.env?.DEV) || ['localhost', '127.0.0.1', '::1'].includes(String(globalThis?.location?.hostname || '').toLowerCase())
 
 function zkConsole(event, payload = {}) {
@@ -1268,20 +1270,12 @@ async function tryAutoFinalizeAuctionSlot(post, source = 'auto') {
   if (!ended) return false
 
   const slotId = Number(post.id)
-  if (!Number.isFinite(slotId) || autoFinalizingSlots.has(slotId)) return false
+  if (!Number.isFinite(slotId) || autoFinalizingSlots.has(slotId) || autoFinalizeConfirmedSlots.has(slotId)) return false
 
   autoFinalizingSlots.add(slotId)
   try {
     console.log(`⏱️ Auto-finalizing slot ${slotId} (source: ${source})`)
     if (sealedCfg?.sealed_mode) {
-      if (!hasRelayAvailable()) {
-        zkConsole('finalize:sealed-relay-missing-skip', { slotId, source })
-        if (!autoFinalizeBlockedSealedSlots.has(slotId)) {
-          autoFinalizeBlockedSealedSlots.add(slotId)
-          showToast('Sealed auto-finalize skipped: relay not configured.')
-        }
-        return false
-      }
       const commits = Array.isArray(post?.auction_commits) ? post.auction_commits : []
       const hasCommits = commits.length > 0
       const hasRevealedCommit = commits.some((c) => Boolean(c?.revealed))
@@ -1309,7 +1303,17 @@ async function tryAutoFinalizeAuctionSlot(post, source = 'auto') {
         return false
       }
       autoFinalizeBlockedSealedSlots.delete(slotId)
-      await requestSealedImmediateFinalize({ slotPostId: slotId })
+      if (hasRelayAvailable()) {
+        try {
+          await requestSealedImmediateFinalize({ slotPostId: slotId })
+        } catch (relayFinalizeError) {
+          console.warn('Relay finalize failed; skipping direct wallet finalize to avoid unsolicited transaction prompts:', relayFinalizeError?.message || relayFinalizeError)
+          return false
+        }
+      } else {
+        // Avoid opening wallet review prompts automatically.
+        return false
+      }
     } else {
       autoFinalizeBlockedSealedSlots.delete(slotId)
       await dojoManager.finalizeAuctionSlot(slotId)
@@ -1323,6 +1327,7 @@ async function tryAutoFinalizeAuctionSlot(post, source = 'auto') {
   } catch (error) {
     if (isAlreadyFinalizedError(error)) {
       zkConsole('finalize:already-finalized', { slotId, source })
+      autoFinalizeConfirmedSlots.add(slotId)
       return true
     }
     console.warn(`Auto-finalize skipped for slot ${slotId}:`, error?.message || error)
@@ -1653,6 +1658,41 @@ async function requestSealedImmediateFinalize({ slotPostId }) {
   }
 }
 
+async function requestSealedImmediateReverify({ slotPostId, jobId = '', bidder = '' }) {
+  if (!hasRelayAvailable()) return { ok: false, reason: 'relay-disabled' }
+  const payload = {
+    slotPostId: Number(slotPostId),
+    jobId: String(jobId || ''),
+    bidder: String(bidder || ''),
+    verifierAddress: String(SEALED_BID_VERIFIER_ADDRESS || ''),
+  }
+  zkConsole('reverify-now:request', {
+    slotPostId: payload.slotPostId,
+    jobId: payload.jobId,
+    bidder: payload.bidder || '',
+    verifierAddress: payload.verifierAddress,
+  })
+  const { response, body } = await fetchRelayJsonWithFallback('/sealed/reverify-now', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  zkConsole('reverify-now:response', {
+    ok: response.ok && Boolean(body?.ok),
+    status: response.status,
+    relayStatus: body?.status || '',
+    valid: body?.valid,
+  })
+  return {
+    ok: true,
+    status: String(body.status || ''),
+    valid: Boolean(body.valid),
+    proofFelts: Number(body.proofFelts || 0),
+    proofCalldataHash: String(body.proofCalldataHash || ''),
+    jobId: String(body.jobId || ''),
+  }
+}
+
 async function requestSealedImmediateRefund({ slotPostId, bidder }) {
   if (!hasRelayAvailable()) return { ok: false, reason: 'relay-disabled' }
   zkConsole('refund-now:request', { slotPostId: Number(slotPostId), bidder: String(bidder || '') })
@@ -1707,6 +1747,14 @@ function relayStageLabel(status, kind = 'reveal') {
   return 'N/A'
 }
 
+function relayRevealDisplayStatus(job) {
+  const status = String(job?.status || '')
+  const revealError = String(job?.error || '').toLowerCase()
+  // bb.js may crash with a wasm "unreachable"; treat it as skipped fallback, not hard user failure.
+  if (status === 'failed' && revealError.includes('runtimeerror: unreachable')) return 'skipped'
+  return status
+}
+
 function relayErrorHint(job, kind = 'reveal') {
   if (!job || typeof job !== 'object') return ''
   if (kind === 'reveal') return String(job?.errorHint || '')
@@ -1723,9 +1771,17 @@ function formatRelayUnix(unix) {
   return `${d.toLocaleString()} (${utc})`
 }
 
-function summarizeRelayPipelineForSlot(jobs, slotId, bidder) {
+function summarizeRelayPipelineForSlot(jobs, slotId, bidder, post = null) {
   const slotJobs = (Array.isArray(jobs) ? jobs : []).filter((j) => Number(j?.slotPostId || 0) === Number(slotId || 0))
-  if (!slotJobs.length) return `<br/><strong>ZK pipeline:</strong> Waiting for first sealed commit`
+  const slot = post?.auction_slot || null
+  const hasWinnerOnchain = Boolean(slot?.has_bid)
+  const isFinalizedOnchain = Boolean(slot?.finalized)
+  if (!slotJobs.length) {
+    if (hasWinnerOnchain || isFinalizedOnchain) {
+      return '<br/><strong>ZK pipeline:</strong> No relayer job found for this slot (history missing or cleaned).'
+    }
+    return '<br/><strong>ZK pipeline:</strong> Waiting for first sealed commit'
+  }
   const bidderNorm = normalizeSocialAddress(bidder || '')
   const myJobs = slotJobs
     .filter((j) => normalizeSocialAddress(j?.bidder || '') === bidderNorm)
@@ -1733,9 +1789,18 @@ function summarizeRelayPipelineForSlot(jobs, slotId, bidder) {
   const sorted = [...slotJobs].sort((a, b) => Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0))
   const chosen = myJobs[0] || sorted[0]
   const isMine = Boolean(myJobs[0])
+  const chosenHasEvidence = Boolean(
+    chosen?.zkTrace ||
+    chosen?.revealTxHash ||
+    chosen?.finalizeTxHash ||
+    chosen?.refundTxHash
+  )
+  if ((isFinalizedOnchain || hasWinnerOnchain) && !chosenHasEvidence) {
+    return '<br/><strong>ZK pipeline:</strong> On-chain state confirmed (relay trace unavailable).'
+  }
 
   const lines = [
-    `<br/><strong>ZK pipeline:</strong> ${relayStageLabel(chosen.status, 'reveal')}`,
+    `<br/><strong>ZK pipeline:</strong> ${relayStageLabel(relayRevealDisplayStatus(chosen), 'reveal')}`,
   ]
 
   // If this wallet has no commit in this slot, keep status generic and privacy-safe.
@@ -1778,16 +1843,36 @@ function summarizeRelayPipelineForSlot(jobs, slotId, bidder) {
 function getRelayJobForSlot(jobs, slotId, bidder) {
   const filtered = (Array.isArray(jobs) ? jobs : []).filter((j) => Number(j?.slotPostId || 0) === Number(slotId || 0))
   if (!filtered.length) return null
+  const scoreJob = (j) => {
+    const hasTrace = Boolean(j?.zkTrace && typeof j.zkTrace === 'object' && Object.keys(j.zkTrace).length > 0)
+    const hasTx = Boolean(j?.revealTxHash || j?.finalizeTxHash || j?.refundTxHash)
+    const reveal = String(j?.status || '')
+    const finalize = String(j?.finalizeStatus || '')
+    const refund = String(j?.refundStatus || '')
+    const active = [reveal, finalize, refund].some((s) => s === 'submitted' || s === 'running')
+    const terminal = [reveal, finalize, refund].some((s) => s === 'failed' || s === 'skipped')
+    return (hasTrace ? 100 : 0) + (hasTx ? 40 : 0) + (active ? 15 : 0) + (terminal ? 5 : 0)
+  }
+  const byBest = (a, b) => {
+    const scoreDiff = scoreJob(b) - scoreJob(a)
+    if (scoreDiff !== 0) return scoreDiff
+    return Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0)
+  }
   const bidderNorm = normalizeSocialAddress(bidder || '')
   const mine = filtered
     .filter((j) => normalizeSocialAddress(j?.bidder || '') === bidderNorm)
-    .sort((a, b) => Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0))
-  const sorted = filtered.sort((a, b) => Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0))
+    .sort(byBest)
+  const sorted = filtered.sort(byBest)
   return mine[0] || sorted[0] || null
 }
 
-function shouldShowVerifyProofButton(job) {
-  if (!job || typeof job !== 'object') return false
+function shouldShowVerifyProofButton(job, post = null) {
+  if (!job || typeof job !== 'object') {
+    const slot = post?.auction_slot || null
+    const hasWinnerOnchain = Boolean(slot?.has_bid)
+    const isFinalizedOnchain = Boolean(slot?.finalized)
+    return hasWinnerOnchain || isFinalizedOnchain
+  }
   if (job.zkTrace) return true
   if (job.revealTxHash || job.finalizeTxHash || job.refundTxHash) return true
   const reveal = String(job.status || '')
@@ -1800,8 +1885,15 @@ function shouldShowVerifyProofButton(job) {
   )
 }
 
-function explainVerifyProofVisibility(job) {
-  if (!job || typeof job !== 'object') return 'no_job'
+function explainVerifyProofVisibility(job, post = null) {
+  if (!job || typeof job !== 'object') {
+    const slot = post?.auction_slot || null
+    const hasWinnerOnchain = Boolean(slot?.has_bid)
+    const isFinalizedOnchain = Boolean(slot?.finalized)
+    if (isFinalizedOnchain) return 'onchain_finalized_without_job'
+    if (hasWinnerOnchain) return 'onchain_winner_without_job'
+    return 'no_job'
+  }
   if (job.zkTrace) return 'has_zk_trace'
   if (job.revealTxHash || job.finalizeTxHash || job.refundTxHash) return 'has_tx_hash'
   const reveal = String(job.status || '')
@@ -1814,16 +1906,16 @@ function explainVerifyProofVisibility(job) {
 }
 
 async function enrichSealedProofStatus(post, postAuctionInfo, expectedPostId, verifyProofBtn = null) {
-  if (!post || !postAuctionInfo || !hasRelayAvailable()) return
+  if (!post || !postAuctionInfo) return
   try {
-    const jobs = await fetchSealedRelayJobs()
+    const jobs = hasRelayAvailable() ? await fetchSealedRelayJobs() : []
     const modal = document.getElementById('postDetailsModal')
     if (!modal || String(modal?.dataset?.postId || '') !== String(expectedPostId || '')) return
     const job = getRelayJobForSlot(jobs, Number(post?.id || 0), currentAccount?.address || '')
-    const snippet = summarizeRelayPipelineForSlot(jobs, Number(post?.id || 0), currentAccount?.address || '')
+    const snippet = summarizeRelayPipelineForSlot(jobs, Number(post?.id || 0), currentAccount?.address || '', post)
     if (verifyProofBtn) {
-      const visible = shouldShowVerifyProofButton(job)
-      const reason = explainVerifyProofVisibility(job)
+      const visible = shouldShowVerifyProofButton(job, post)
+      const reason = explainVerifyProofVisibility(job, post)
       verifyProofBtn.textContent = '🧪 Verify Sealed Result'
       verifyProofBtn.style.display = visible ? 'inline-block' : 'none'
       zkConsole('verify-proof-visibility', {
@@ -3192,6 +3284,10 @@ function setupUIHandlers() {
 
 function setupPostDetailsHandlers() {
   const postDetailsModal = document.getElementById('postDetailsModal')
+  const sealedVerifyModal = document.getElementById('sealedVerifyModal')
+  const sealedVerifyContent = document.getElementById('sealedVerifyContent')
+  const reverifySealedBtn = document.getElementById('reverifySealedBtn')
+  const closeSealedVerifyBtn = document.getElementById('closeSealedVerifyBtn')
   const closePostDetailsBtn = document.getElementById('closePostDetails')
   const openInOwnerFeedBtn = document.getElementById('openInOwnerFeedBtn')
   const locateOnCanvasBtn = document.getElementById('locateOnCanvasBtn')
@@ -3227,6 +3323,164 @@ function setupPostDetailsHandlers() {
   let currentPost = null
   let wonSlotImageDataUrl = ''
   let wonSlotWebcamStream = null
+  let currentSealedVerifyContext = null
+
+  const explorerBase = IS_SEPOLIA ? 'https://sepolia.voyager.online' : 'https://voyager.online'
+  const canonicalHexAddress = (value) => {
+    const raw = String(value || '').trim().toLowerCase()
+    if (!raw.startsWith('0x')) return raw
+    try {
+      return `0x${BigInt(raw).toString(16)}`
+    } catch {
+      return raw
+    }
+  }
+  const toExplorerTxUrl = (hash) => {
+    const tx = canonicalHexAddress(hash)
+    return tx ? `${explorerBase}/tx/${tx}` : ''
+  }
+  const toExplorerContractUrl = (address) => {
+    const value = canonicalHexAddress(address)
+    return value ? `${explorerBase}/contract/${value}` : ''
+  }
+  const formatReceiptSummary = (receipt) => {
+    const finality = String(receipt?.finality_status || receipt?.finalityStatus || 'UNKNOWN')
+    const execution = String(receipt?.execution_status || receipt?.executionStatus || 'UNKNOWN')
+    return `${finality} / ${execution}`
+  }
+  const getReceiptMeta = async (txHash) => {
+    const hash = String(txHash || '').trim()
+    if (!hash) return { state: 'missing', label: 'n/a' }
+    const provider = dojoManager?.account?.provider || dojoManager?.balanceProvider || null
+    if (!provider) return { state: 'unknown', label: 'provider unavailable' }
+    try {
+      const timeoutMs = 9000
+      const receipt = await Promise.race([
+        provider.getTransactionReceipt(hash),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Receipt lookup timeout')), timeoutMs)),
+      ])
+      const label = formatReceiptSummary(receipt)
+      const execution = String(receipt?.execution_status || receipt?.executionStatus || '').toUpperCase()
+      const finality = String(receipt?.finality_status || receipt?.finalityStatus || '').toUpperCase()
+      if (execution.includes('REVERTED') || execution.includes('REJECTED')) return { state: 'failed', label }
+      if (finality.includes('REJECTED')) return { state: 'failed', label }
+      if (execution.includes('SUCCEEDED') && (finality.includes('ACCEPTED') || finality.includes('PRE_CONFIRMED'))) {
+        return { state: 'verified', label }
+      }
+      return { state: 'pending', label }
+    } catch (error) {
+      const msg = String(error?.message || error || 'unavailable')
+      return { state: 'unknown', label: msg }
+    }
+  }
+  const finalizedProbeCache = new Map()
+  const probeSlotFinalizedOnchain = async (slotId) => {
+    const id = Number(slotId || 0)
+    if (!Number.isFinite(id) || id <= 0) return false
+    const now = Date.now()
+    const cached = finalizedProbeCache.get(id)
+    if (cached && (now - Number(cached.at || 0)) < 20000) {
+      return Boolean(cached.finalized)
+    }
+    const provider = dojoManager?.account?.provider || dojoManager?.balanceProvider || null
+    const actionsAddress = String(dojoManager?.actionsContract?.address || '')
+    if (!provider || !actionsAddress) return false
+    const call = {
+      contractAddress: actionsAddress,
+      entrypoint: 'finalize_auction_slot',
+      calldata: [id],
+    }
+    try {
+      await Promise.race([
+        provider.callContract(call, 'latest'),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Finalize probe timeout')), 9000)),
+      ])
+      finalizedProbeCache.set(id, { finalized: false, at: now })
+      return false
+    } catch (error) {
+      const msg = String(error?.message || error || '').toLowerCase()
+      const finalized = msg.includes('already finalized')
+      finalizedProbeCache.set(id, { finalized, at: now })
+      return finalized
+    }
+  }
+  const computeOnchainVerdict = (items) => {
+    const states = (items || []).map((x) => x?.state)
+    if (!states.length) return { state: 'unknown', label: 'No transaction hash available yet' }
+    if (states.includes('failed')) return { state: 'failed', label: 'On-chain verification failed' }
+    if (states.every((s) => s === 'verified')) return { state: 'verified', label: 'Verified on-chain' }
+    if (states.includes('pending') || states.includes('unknown')) return { state: 'pending', label: 'Pending on-chain confirmation' }
+    return { state: 'unknown', label: 'On-chain status unknown' }
+  }
+  const closeSealedVerifyModal = () => {
+    currentSealedVerifyContext = null
+    if (sealedVerifyModal) sealedVerifyModal.classList.remove('active')
+  }
+  const renderSealedVerifyModal = ({ slotId, job, txRows, verdict }) => {
+    if (!sealedVerifyContent || !sealedVerifyModal) return
+    const actionContractAddr = String(dojoManager?.actionsContract?.address || '')
+    const verifierAddr = String(SEALED_BID_VERIFIER_ADDRESS || '')
+    const z = job?.zkTrace || {}
+    const isOnchainOnly = String(job?.id || '') === 'onchain-only'
+    const hasProofCalldata = Boolean(job?.hasProofCalldata)
+    currentSealedVerifyContext = {
+      slotId: Number(slotId || 0),
+      jobId: String(job?.id || ''),
+      bidder: String(job?.bidder || ''),
+      hasProofCalldata,
+    }
+    if (reverifySealedBtn) {
+      const hasRelayJob = currentSealedVerifyContext.jobId && currentSealedVerifyContext.jobId !== 'onchain-only'
+      const canReverify = Boolean(hasRelayJob && hasProofCalldata && hasRelayAvailable())
+      reverifySealedBtn.disabled = !canReverify
+      reverifySealedBtn.textContent = canReverify ? 'Re-verify On-chain Now' : 'Re-verify Unavailable'
+      reverifySealedBtn.title = canReverify
+        ? ''
+        : 'Re-verify requires a preserved relay job with proof calldata.'
+    }
+    const verdictColor = verdict.state === 'verified'
+      ? '#4CAF50'
+      : verdict.state === 'failed'
+        ? '#f44336'
+        : '#9ecbff'
+    const txRowsHtml = txRows.map((row) => {
+      const txUrl = row.hash ? toExplorerTxUrl(row.hash) : ''
+      const txLink = txUrl
+        ? `<a href="${escapeHtml(txUrl)}" target="_blank" rel="noreferrer">${escapeHtml(shortTxHash(row.hash))}</a>`
+        : 'n/a'
+      return `<li><strong>${escapeHtml(row.name)}:</strong> ${txLink} · <em>${escapeHtml(row.receiptLabel)}</em></li>`
+    }).join('')
+    const contractLinks = [
+      actionContractAddr
+        ? `<a href="${escapeHtml(toExplorerContractUrl(actionContractAddr))}" target="_blank" rel="noreferrer">Actions Contract (Voyager)</a>`
+        : '',
+      verifierAddr
+        ? `<a href="${escapeHtml(toExplorerContractUrl(verifierAddr))}" target="_blank" rel="noreferrer">Noir Verifier Contract (Voyager)</a>`
+        : '',
+    ].filter(Boolean).join(' · ')
+
+    sealedVerifyContent.innerHTML = `
+      <p><strong>Slot:</strong> ${escapeHtml(String(slotId))}</p>
+      <p><strong>Job:</strong> ${escapeHtml(String(job?.id || 'n/a'))}</p>
+      <p><strong>Verdict:</strong> <span style="color:${verdictColor}; font-weight: 600;">${escapeHtml(verdict.label)}</span></p>
+      <p><strong>Stages:</strong> reveal=${escapeHtml(relayStageLabel(relayRevealDisplayStatus(job), 'reveal'))} · finalize=${escapeHtml(relayStageLabel(job?.finalizeStatus, 'finalize'))} · refund=${escapeHtml(relayStageLabel(job?.refundStatus, 'refund'))}</p>
+      <p><strong>Sepolia links:</strong> ${contractLinks || 'n/a'}</p>
+      <p><strong>Transactions:</strong></p>
+      <ul>${txRowsHtml || '<li>n/a</li>'}</ul>
+      <p><strong>ZK trace:</strong></p>
+      <ul>
+        <li>proofFelts: ${escapeHtml(String(Number(z?.proofFelts || 0) || 'n/a'))}</li>
+        <li>calldataHash: ${escapeHtml(String(z?.proofCalldataHash || 'n/a'))}</li>
+        <li>witnessHash: ${escapeHtml(String(z?.witnessHash || 'n/a'))}</li>
+        <li>proofHash: ${escapeHtml(String(z?.proofHash || 'n/a'))}</li>
+        <li>vkHash: ${escapeHtml(String(z?.vkHash || 'n/a'))}</li>
+        <li>publicInputsHash: ${escapeHtml(String(z?.publicInputsHash || 'n/a'))}</li>
+      </ul>
+      ${isOnchainOnly || !hasProofCalldata ? '<p><em>Re-verify is unavailable for this slot because relay proof calldata was not preserved.</em></p>' : ''}
+      <p id="sealedReverifyStatus" style="margin-top:8px;color:#9ecbff;"></p>
+    `
+    sealedVerifyModal.classList.add('active')
+  }
 
   function closeWonSlotWebcam() {
     if (wonSlotWebcamStream) {
@@ -3714,10 +3968,17 @@ function setupPostDetailsHandlers() {
   })
 
   if (claimCommitRefundBtn) claimCommitRefundBtn.addEventListener('click', async () => {
-    if (!currentPost || !dojoManager) return
+    if (!currentPost || !dojoManager || !currentAccount) return
     try {
       postDetailsModal.classList.remove('active')
-      await dojoManager.claimAuctionCommitRefund(currentPost.id)
+      if (hasRelayAvailable()) {
+        await requestSealedImmediateRefund({
+          slotPostId: Number(currentPost.id || 0),
+          bidder: currentAccount.address,
+        })
+      } else {
+        await dojoManager.claimAuctionCommitRefund(currentPost.id)
+      }
       await new Promise((resolve) => setTimeout(resolve, 5000))
       await postManager.loadPosts()
       await postManager.loadImages()
@@ -3726,7 +3987,14 @@ function setupPostDetailsHandlers() {
       showToast('Commit refund claimed')
     } catch (error) {
       console.error('Error claiming commit refund:', error)
-      alert('Failed to claim refund: ' + (error.message || 'Unknown error'))
+      const msg = String(error?.message || error || 'Unknown error').toLowerCase()
+      if (msg.includes('already finalized') || msg.includes('already refunded')) {
+        showToast('Refund already settled for this slot.')
+      } else if (msg.includes('highest bidder cannot refund')) {
+        showToast('Winner cannot claim loser refund.')
+      } else {
+        alert('Failed to claim refund: ' + (error.message || 'Unknown error'))
+      }
       postDetailsModal.classList.remove('active')
     }
   })
@@ -3735,47 +4003,112 @@ function setupPostDetailsHandlers() {
     if (!currentPost) return
     const slotId = Number(currentPost?.id || 0)
     if (!Number.isFinite(slotId) || slotId <= 0) return
-    if (!hasRelayAvailable()) {
-      alert('ZK proof verification viewer requires relay URL configuration.')
-      return
-    }
     try {
-      const jobs = await fetchSealedRelayJobs(true)
+      const jobs = hasRelayAvailable() ? await fetchSealedRelayJobs(true) : []
       const job = getRelayJobForSlot(jobs, slotId, currentAccount?.address || '')
-      if (!job) {
-        alert('No relay proof job found yet for this slot.')
+      const slot = currentPost?.auction_slot || null
+      const hasWinnerOnchain = Boolean(slot?.has_bid)
+      const isFinalizedOnchain = Boolean(slot?.finalized)
+      const hasRelayEvidence = Boolean(
+        job?.zkTrace ||
+        job?.revealTxHash ||
+        job?.finalizeTxHash ||
+        job?.refundTxHash,
+      )
+      if (!job || !hasRelayEvidence) {
+        if (!(hasWinnerOnchain || isFinalizedOnchain)) {
+          alert('No relay proof job found yet for this slot.')
+          return
+        }
+        renderSealedVerifyModal({
+          slotId,
+          job: {
+            id: 'onchain-only',
+            status: hasWinnerOnchain ? 'submitted' : 'scheduled',
+            finalizeStatus: isFinalizedOnchain ? 'submitted' : 'scheduled',
+            refundStatus: 'scheduled',
+            bidder: String(slot?.highest_bidder || ''),
+            zkTrace: null,
+          },
+          txRows: [],
+          verdict: {
+            state: isFinalizedOnchain ? 'verified' : 'pending',
+            label: isFinalizedOnchain
+              ? 'Finalized on-chain (relay trace unavailable)'
+              : 'Winner selected on-chain (relay trace unavailable)',
+          },
+        })
         return
       }
-      const z = job?.zkTrace || {}
-      const lines = [
-        `Job: ${job.id || 'n/a'}`,
-        `Reveal stage: ${relayStageLabel(job.status, 'reveal')}`,
-        `Reveal detail: ${relayErrorHint(job, 'reveal') || 'n/a'}`,
-        `Proof scheduled after: ${formatRelayUnix(job?.revealAfterUnix)}`,
-        `Finalize scheduled after: ${formatRelayUnix(job?.finalizeAfterUnix)}`,
-        `Finalize stage: ${relayStageLabel(job?.finalizeStatus, 'finalize')}`,
-        `Finalize detail: ${relayErrorHint(job, 'finalize') || 'n/a'}`,
-        `Refund stage: ${relayStageLabel(job?.refundStatus, 'refund')}`,
-        `Refund detail: ${relayErrorHint(job, 'refund') || 'n/a'}`,
-        `Proof felts: ${Number(z?.proofFelts || 0) || 'n/a'}`,
-        `Calldata hash: ${z?.proofCalldataHash || 'n/a'}`,
-        `Witness hash: ${z?.witnessHash || 'n/a'}`,
-        `Proof hash: ${z?.proofHash || 'n/a'}`,
-        `VK hash: ${z?.vkHash || 'n/a'}`,
-        `Public inputs hash: ${z?.publicInputsHash || 'n/a'}`,
-        `Reveal tx: ${job?.revealTxHash || 'n/a'}`,
-        `Finalize tx: ${job?.finalizeTxHash || 'n/a'}`,
-        `Refund tx: ${job?.refundTxHash || 'n/a'}`,
+      const txRowsRaw = [
+        { name: 'Reveal tx', hash: String(job?.revealTxHash || '').trim() },
+        { name: 'Finalize tx', hash: String(job?.finalizeTxHash || '').trim() },
+        { name: 'Refund tx', hash: String(job?.refundTxHash || '').trim() },
       ]
-      if (job?.status === 'scheduled' && !job?.zkTrace) {
-        lines.push('')
-        lines.push('Expected state: proof artifacts are generated after commit phase ends.')
-      }
-      alert(`Sealed Result Verification\n\n${lines.join('\n')}`)
+      const txRows = await Promise.all(txRowsRaw.map(async (row) => {
+        const receiptMeta = await getReceiptMeta(row.hash)
+        return {
+          ...row,
+          state: receiptMeta.state,
+          receiptLabel: receiptMeta.label,
+        }
+      }))
+      const verdict = computeOnchainVerdict(txRows.filter((row) => row.hash))
+      renderSealedVerifyModal({
+        slotId,
+        job,
+        txRows,
+        verdict,
+      })
     } catch (error) {
       console.error('Verify proof error:', error)
       alert('Could not verify proof details: ' + (error?.message || 'Unknown error'))
     }
+  })
+
+  if (closeSealedVerifyBtn) closeSealedVerifyBtn.addEventListener('click', () => {
+    closeSealedVerifyModal()
+  })
+  if (reverifySealedBtn) reverifySealedBtn.addEventListener('click', async () => {
+    const ctx = currentSealedVerifyContext || null
+    if (!ctx?.slotId) return
+    const statusEl = document.getElementById('sealedReverifyStatus')
+    const setStatus = (text, color = '#9ecbff') => {
+      if (!statusEl) return
+      statusEl.textContent = text
+      statusEl.style.color = color
+    }
+    if (!hasRelayAvailable()) {
+      setStatus('Relay not configured for re-verify.', '#f44336')
+      return
+    }
+    if (!ctx?.hasProofCalldata) {
+      setStatus('Re-verify unavailable: proof calldata not preserved for this slot.', '#f44336')
+      return
+    }
+    reverifySealedBtn.disabled = true
+    const prevLabel = reverifySealedBtn.textContent
+    reverifySealedBtn.textContent = 'Re-verifying...'
+    try {
+      const result = await requestSealedImmediateReverify({
+        slotPostId: ctx.slotId,
+        jobId: ctx.jobId,
+        bidder: ctx.bidder,
+      })
+      const okColor = result.valid ? '#4CAF50' : '#f44336'
+      const label = result.valid ? 'VALID' : 'INVALID'
+      setStatus(`Re-verify ${label} · felts=${result.proofFelts || 'n/a'} · calldataHash=${result.proofCalldataHash || 'n/a'}`, okColor)
+      showToast(result.valid ? 'ZK proof re-verified on-chain' : 'ZK proof re-verify failed')
+    } catch (error) {
+      const msg = String(error?.message || error || 'Unknown re-verify error')
+      setStatus(`Re-verify failed: ${msg}`, '#f44336')
+    } finally {
+      reverifySealedBtn.disabled = false
+      reverifySealedBtn.textContent = prevLabel || 'Re-verify On-chain Now'
+    }
+  })
+  if (sealedVerifyModal) sealedVerifyModal.addEventListener('click', (e) => {
+    if (e.target === sealedVerifyModal) closeSealedVerifyModal()
   })
 
   if (initializeSlotContentBtn) initializeSlotContentBtn.addEventListener('click', () => {
@@ -4098,6 +4431,20 @@ function showPostDetails(post, source = 'canvas') {
           postSaleInfo.textContent = 'Sealed auction ended. Settling reveals and finalizing automatically...'
           postSaleInfo.style.color = '#9ecbff'
           void tryAutoFinalizeAuctionSlot(post, 'post-details')
+          void (async () => {
+            const inferredFinalized = await probeSlotFinalizedOnchain(Number(post?.id || 0))
+            if (!inferredFinalized) return
+            if (String(postDetailsModal?.dataset?.postId || '') !== String(post?.id || '')) return
+            slot.finalized = true
+            postSaleInfo.textContent = 'Waiting for winner to publish final slot content.'
+            postSaleInfo.style.color = '#666'
+            if (postAuctionInfo) {
+              postAuctionInfo.innerHTML = postAuctionInfo.innerHTML.replace('<br/>Finalized: No', '<br/>Finalized: Yes')
+            }
+            if (isSealed && postAuctionInfo) {
+              void enrichSealedProofStatus(post, postAuctionInfo, post?.id, verifyProofBtn)
+            }
+          })()
         }
       }
     } else {
