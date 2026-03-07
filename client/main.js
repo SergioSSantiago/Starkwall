@@ -1676,18 +1676,22 @@ async function requestSealedImmediateFinalize({ slotPostId }) {
   }
 }
 
-async function requestSealedImmediateReverify({ slotPostId, jobId = '', bidder = '' }) {
+async function requestSealedImmediateReverify({ slotPostId, jobId = '', bidder = '', groupId = 0, revealTxHash = '' }) {
   if (!hasRelayAvailable()) return { ok: false, reason: 'relay-disabled' }
   const payload = {
     slotPostId: Number(slotPostId),
     jobId: String(jobId || ''),
     bidder: String(bidder || ''),
+    groupId: Number(groupId || 0),
+    revealTxHash: String(revealTxHash || ''),
     verifierAddress: String(SEALED_BID_VERIFIER_ADDRESS || ''),
   }
   zkConsole('reverify-now:request', {
     slotPostId: payload.slotPostId,
     jobId: payload.jobId,
     bidder: payload.bidder || '',
+    groupId: payload.groupId || 0,
+    revealTxHash: payload.revealTxHash ? shortTxHash(payload.revealTxHash) : '',
     verifierAddress: payload.verifierAddress,
   })
   const { response, body } = await fetchRelayJsonWithFallback('/sealed/reverify-now', {
@@ -3441,20 +3445,28 @@ function setupPostDetailsHandlers() {
     const z = job?.zkTrace || {}
     const isOnchainOnly = String(job?.id || '') === 'onchain-only'
     const hasProofCalldata = Boolean(job?.hasProofCalldata)
+    const canRecoverFromTx = Boolean(String(job?.revealTxHash || '') && Number(job?.groupId || 0) > 0)
     currentSealedVerifyContext = {
       slotId: Number(slotId || 0),
       jobId: String(job?.id || ''),
       bidder: String(job?.bidder || ''),
+      groupId: Number(job?.groupId || 0),
+      revealTxHash: String(job?.revealTxHash || ''),
       hasProofCalldata,
     }
     if (reverifySealedBtn) {
       const hasRelayJob = currentSealedVerifyContext.jobId && currentSealedVerifyContext.jobId !== 'onchain-only'
-      const canReverify = Boolean(hasRelayJob && hasProofCalldata && hasRelayAvailable())
+      const canRecoverFromTx = Boolean(
+        currentSealedVerifyContext.revealTxHash &&
+        currentSealedVerifyContext.groupId > 0 &&
+        hasRelayAvailable(),
+      )
+      const canReverify = Boolean((hasRelayJob && hasProofCalldata && hasRelayAvailable()) || canRecoverFromTx)
       reverifySealedBtn.disabled = !canReverify
       reverifySealedBtn.textContent = canReverify ? 'Re-verify On-chain Now' : 'Re-verify Unavailable'
       reverifySealedBtn.title = canReverify
         ? ''
-        : 'Re-verify requires a preserved relay job with proof calldata.'
+        : 'Re-verify requires preserved proof calldata or a recoverable reveal tx hash.'
     }
     const verdictColor = verdict.state === 'verified'
       ? '#4CAF50'
@@ -3494,7 +3506,7 @@ function setupPostDetailsHandlers() {
         <li>vkHash: ${escapeHtml(String(z?.vkHash || 'n/a'))}</li>
         <li>publicInputsHash: ${escapeHtml(String(z?.publicInputsHash || 'n/a'))}</li>
       </ul>
-      ${isOnchainOnly || !hasProofCalldata ? '<p><em>Re-verify is unavailable for this slot because relay proof calldata was not preserved.</em></p>' : ''}
+      ${(isOnchainOnly || !hasProofCalldata) && !canRecoverFromTx ? '<p><em>Re-verify is unavailable for this slot because relay proof calldata was not preserved.</em></p>' : ''}
       <p id="sealedReverifyStatus" style="margin-top:8px;color:#9ecbff;"></p>
     `
     sealedVerifyModal.classList.add('active')
@@ -4100,8 +4112,9 @@ function setupPostDetailsHandlers() {
       setStatus('Relay not configured for re-verify.', '#f44336')
       return
     }
-    if (!ctx?.hasProofCalldata) {
-      setStatus('Re-verify unavailable: proof calldata not preserved for this slot.', '#f44336')
+    const canRecoverFromTx = Boolean(ctx?.revealTxHash && Number(ctx?.groupId || 0) > 0)
+    if (!ctx?.hasProofCalldata && !canRecoverFromTx) {
+      setStatus('Re-verify unavailable: proof calldata not preserved and no reveal tx hash to recover from.', '#f44336')
       return
     }
     reverifySealedBtn.disabled = true
@@ -4112,6 +4125,8 @@ function setupPostDetailsHandlers() {
         slotPostId: ctx.slotId,
         jobId: ctx.jobId,
         bidder: ctx.bidder,
+        groupId: ctx.groupId,
+        revealTxHash: ctx.revealTxHash,
       })
       const okColor = result.valid ? '#4CAF50' : '#f44336'
       const label = result.valid ? 'VALID' : 'INVALID'

@@ -92,6 +92,7 @@ const HIGH_L2_GAS_TX_DETAILS_LEGACY_KEYS_NO_DATA = {
   },
 };
 const JOBS_DB_PATH = process.env.SEALED_RELAY_JOBS_FILE || path.join(REPO_ROOT, '.sealed-relayer-jobs.json');
+const TRACES_DB_PATH = process.env.SEALED_RELAY_TRACES_FILE || path.join(REPO_ROOT, '.sealed-relayer-traces.json');
 const ZK_VERBOSE = String(process.env.SEALED_RELAY_ZK_VERBOSE || 'true').toLowerCase() !== 'false';
 const MAX_REVEAL_RETRIES = Number(process.env.SEALED_RELAY_MAX_REVEAL_RETRIES || 4);
 const MAX_FINALIZE_RETRIES = Number(process.env.SEALED_RELAY_MAX_FINALIZE_RETRIES || 8);
@@ -114,10 +115,12 @@ const IPFS_GATEWAY_BASE_URL = String(
 ).trim().replace(/\/+$/, '');
 
 const jobs = [];
+const tracesByKey = new Map();
 let workerBusy = false;
 let finalizeWorkerBusy = false;
 let refundWorkerBusy = false;
 let persistQueued = false;
+let tracesPersistQueued = false;
 let relayerTxQueue = Promise.resolve();
 let proofGenQueue = Promise.resolve();
 const slotLocks = new Set();
@@ -320,6 +323,86 @@ function toHexFelt(value) {
   return `0x${n.toString(16)}`;
 }
 
+function toBigIntSafe(value, fallback = 0n) {
+  try {
+    if (typeof value === 'bigint') return value;
+    const raw = String(value ?? '').trim();
+    if (!raw) return fallback;
+    return BigInt(raw);
+  } catch {
+    return fallback;
+  }
+}
+
+function toHexNormalized(value) {
+  const n = toBigIntSafe(value, 0n);
+  return `0x${n.toString(16)}`;
+}
+
+function decodeAccountCallArray(calldata = []) {
+  const felts = (Array.isArray(calldata) ? calldata : []).map((v) => toBigIntSafe(v, 0n));
+  if (felts.length < 2) return [];
+  const callCount = Number(felts[0] || 0n);
+  if (!Number.isFinite(callCount) || callCount <= 0) return [];
+  const headerStart = 1;
+  const headerWidth = 4;
+  const headersEnd = headerStart + (callCount * headerWidth);
+  if (felts.length <= headersEnd) return [];
+  const dataLen = Number(felts[headersEnd] || 0n);
+  if (!Number.isFinite(dataLen) || dataLen < 0) return [];
+  const dataStart = headersEnd + 1;
+  const sharedData = felts.slice(dataStart, dataStart + dataLen);
+  const calls = [];
+  for (let i = 0; i < callCount; i += 1) {
+    const base = headerStart + (i * headerWidth);
+    const to = felts[base];
+    const selector = felts[base + 1];
+    const offset = Number(felts[base + 2] || 0n);
+    const length = Number(felts[base + 3] || 0n);
+    if (!Number.isFinite(offset) || !Number.isFinite(length) || offset < 0 || length < 0) continue;
+    const data = sharedData.slice(offset, offset + length);
+    calls.push({
+      to,
+      selector,
+      calldata: data.map((v) => v.toString(10)),
+    });
+  }
+  return calls;
+}
+
+function extractRevealPayloadFromAccountCalldata(calldata = [], actionsAddress = ACTIONS_CONTRACT) {
+  const calls = decodeAccountCallArray(calldata);
+  if (!calls.length) return null;
+  const revealSelector = toBigIntSafe(hash.getSelectorFromName('reveal_bid'), 0n);
+  const actionsNorm = normalizeHexAddress(actionsAddress);
+  for (const call of calls) {
+    const toNorm = normalizeHexAddress(toHexNormalized(call.to));
+    if (toNorm !== actionsNorm) continue;
+    if (toBigIntSafe(call.selector, -1n) !== revealSelector) continue;
+    const data = Array.isArray(call.calldata) ? call.calldata : [];
+    if (data.length < 6) return null;
+    const slotPostId = Number(toBigIntSafe(data[0], 0n));
+    const bidder = normalizeHexAddress(toHexNormalized(data[1]));
+    const bidAmount = Number(toBigIntSafe(data[2], 0n));
+    const salt = toHexNormalized(data[3]);
+    const proofLen = Number(toBigIntSafe(data[4], 0n));
+    if (!Number.isFinite(proofLen) || proofLen <= 0) return null;
+    const proofCalldata = data.slice(5, 5 + proofLen).map((v) => toBigIntSafe(v, 0n).toString(10));
+    if (proofCalldata.length !== proofLen) return null;
+    if (!Number.isFinite(slotPostId) || slotPostId <= 0) return null;
+    if (!Number.isFinite(bidAmount) || bidAmount <= 0) return null;
+    if (!bidder || bidder === '0x0') return null;
+    return {
+      slotPostId,
+      bidder,
+      bidAmount,
+      salt,
+      proofCalldata,
+    };
+  }
+  return null;
+}
+
 function getPublicJobView(job) {
   if (!job || typeof job !== 'object') return job;
   const publicJob = { ...job };
@@ -328,6 +411,90 @@ function getPublicJobView(job) {
   delete publicJob.salt;
   delete publicJob.proofCalldata;
   return publicJob;
+}
+
+function makeTraceKey(slotPostId, bidder) {
+  return `${Number(slotPostId || 0)}:${normalizeHexAddress(bidder || '')}`;
+}
+
+function makeTraceId(slotPostId, bidder) {
+  const normalized = normalizeHexAddress(bidder || '').replace(/^0x/, '');
+  const shortBidder = normalized ? `${normalized.slice(0, 8)}${normalized.slice(-6)}` : 'unknown';
+  return `trace_${Number(slotPostId || 0)}_${shortBidder}`;
+}
+
+function upsertTraceFromJobLike(jobLike) {
+  if (!jobLike || typeof jobLike !== 'object') return null;
+  const slotPostId = Number(jobLike.slotPostId || 0);
+  const bidder = normalizeHexAddress(jobLike.bidder || '');
+  if (!Number.isFinite(slotPostId) || slotPostId <= 0 || !bidder || bidder === '0x0') return null;
+  const key = makeTraceKey(slotPostId, bidder);
+  const current = tracesByKey.get(key) || {};
+  const next = {
+    id: String(jobLike.id || current.id || makeTraceId(slotPostId, bidder)),
+    source: 'trace',
+    slotPostId,
+    groupId: Number(jobLike.groupId || current.groupId || 0),
+    bidder,
+    bidAmount: Number(jobLike.bidAmount || current.bidAmount || 0),
+    // Private fields required for deterministic reverify.
+    salt: String(jobLike.salt || current.salt || ''),
+    proofCalldata: Array.isArray(jobLike.proofCalldata)
+      ? jobLike.proofCalldata.map((v) => String(v))
+      : (Array.isArray(current.proofCalldata) ? current.proofCalldata.map((v) => String(v)) : []),
+    zkTrace: {
+      ...(current.zkTrace && typeof current.zkTrace === 'object' ? current.zkTrace : {}),
+      ...(jobLike.zkTrace && typeof jobLike.zkTrace === 'object' ? jobLike.zkTrace : {}),
+    },
+    status: String(jobLike.status || current.status || ''),
+    finalizeStatus: String(jobLike.finalizeStatus || current.finalizeStatus || ''),
+    refundStatus: String(jobLike.refundStatus || current.refundStatus || ''),
+    revealTxHash: String(jobLike.revealTxHash || current.revealTxHash || ''),
+    finalizeTxHash: String(jobLike.finalizeTxHash || current.finalizeTxHash || ''),
+    refundTxHash: String(jobLike.refundTxHash || current.refundTxHash || ''),
+    error: String(jobLike.error || current.error || ''),
+    errorCode: String(jobLike.errorCode || current.errorCode || ''),
+    errorHint: String(jobLike.errorHint || current.errorHint || ''),
+    finalizeError: String(jobLike.finalizeError || current.finalizeError || ''),
+    finalizeErrorCode: String(jobLike.finalizeErrorCode || current.finalizeErrorCode || ''),
+    finalizeErrorHint: String(jobLike.finalizeErrorHint || current.finalizeErrorHint || ''),
+    refundError: String(jobLike.refundError || current.refundError || ''),
+    refundErrorCode: String(jobLike.refundErrorCode || current.refundErrorCode || ''),
+    refundErrorHint: String(jobLike.refundErrorHint || current.refundErrorHint || ''),
+    revealAfterUnix: Number(jobLike.revealAfterUnix || current.revealAfterUnix || 0),
+    finalizeAfterUnix: Number(jobLike.finalizeAfterUnix || current.finalizeAfterUnix || 0),
+    refundAfterUnix: Number(jobLike.refundAfterUnix || current.refundAfterUnix || 0),
+    revealAttempts: Number(jobLike.revealAttempts || current.revealAttempts || 0),
+    finalizeAttempts: Number(jobLike.finalizeAttempts || current.finalizeAttempts || 0),
+    refundAttempts: Number(jobLike.refundAttempts || current.refundAttempts || 0),
+    createdAt: Number(jobLike.createdAt || current.createdAt || Date.now()),
+    updatedAt: Number(jobLike.updatedAt || Date.now()),
+  };
+  tracesByKey.set(key, next);
+  return next;
+}
+
+function mirrorJobsIntoTraceStore() {
+  for (const job of jobs) upsertTraceFromJobLike(job);
+}
+
+function collectPublicJobsWithTraceFallback() {
+  const live = jobs.map(getPublicJobView);
+  const liveByKey = new Set(jobs.map((j) => makeTraceKey(j?.slotPostId, j?.bidder)));
+  for (const trace of tracesByKey.values()) {
+    const key = makeTraceKey(trace?.slotPostId, trace?.bidder);
+    if (liveByKey.has(key)) continue;
+    const fallbackJob = {
+      ...trace,
+      id: String(trace?.id || makeTraceId(trace?.slotPostId, trace?.bidder)),
+      status: String(trace?.status || 'archived'),
+      finalizeStatus: String(trace?.finalizeStatus || (trace?.finalizeTxHash ? 'submitted' : 'scheduled')),
+      refundStatus: String(trace?.refundStatus || (trace?.refundTxHash ? 'submitted' : 'scheduled')),
+      source: 'trace-fallback',
+    };
+    live.push(getPublicJobView(fallbackJob));
+  }
+  return live;
 }
 
 function lockSlot(slotPostId) {
@@ -405,15 +572,38 @@ async function persistJobs() {
   await fs.rename(tmpPath, JOBS_DB_PATH);
 }
 
+async function persistTraces() {
+  await ensureJobsStorageDir();
+  const serializable = Array.from(tracesByKey.values()).map((t) => ({ ...t }));
+  const tmpPath = `${TRACES_DB_PATH}.tmp`;
+  await fs.writeFile(tmpPath, JSON.stringify(serializable, null, 2), 'utf8');
+  await fs.rename(tmpPath, TRACES_DB_PATH);
+}
+
 function queuePersistJobs() {
   if (persistQueued) return;
   persistQueued = true;
   setTimeout(async () => {
     persistQueued = false;
     try {
+      mirrorJobsIntoTraceStore();
       await persistJobs();
+      await persistTraces();
     } catch (error) {
       console.error('[sealed-relayer] failed to persist jobs:', error?.message || error);
+    }
+  }, 50);
+}
+
+function queuePersistTraces() {
+  if (tracesPersistQueued) return;
+  tracesPersistQueued = true;
+  setTimeout(async () => {
+    tracesPersistQueued = false;
+    try {
+      await persistTraces();
+    } catch (error) {
+      console.error('[sealed-relayer] failed to persist traces:', error?.message || error);
     }
   }, 50);
 }
@@ -429,6 +619,24 @@ async function restoreJobs() {
   } catch (error) {
     if (String(error?.code || '') !== 'ENOENT') {
       console.warn('[sealed-relayer] could not restore jobs:', error?.message || error);
+    }
+  }
+}
+
+async function restoreTraces() {
+  await ensureJobsStorageDir();
+  try {
+    const raw = await fs.readFile(TRACES_DB_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return;
+    tracesByKey.clear();
+    for (const item of parsed) {
+      upsertTraceFromJobLike(item);
+    }
+    console.log(`[sealed-relayer] restored ${tracesByKey.size} traces from disk`);
+  } catch (error) {
+    if (String(error?.code || '') !== 'ENOENT') {
+      console.warn('[sealed-relayer] could not restore traces:', error?.message || error);
     }
   }
 }
@@ -527,6 +735,8 @@ async function generateProofCalldata(job) {
         generatedAt: Date.now(),
       };
       queuePersistJobs();
+      upsertTraceFromJobLike(job);
+      queuePersistTraces();
     }
 
     if (ZK_VERBOSE) {
@@ -581,6 +791,8 @@ async function generateProofCalldata(job) {
       };
       job.proofCalldata = normalized;
       queuePersistJobs();
+      upsertTraceFromJobLike(job);
+      queuePersistTraces();
     }
     if (ZK_VERBOSE) {
       console.log('[sealed-relayer][zk:garaga-calldata]', {
@@ -716,7 +928,91 @@ async function runImmediateReveal(payload) {
   const job = createJob(payload);
   const proofCalldata = await generateProofCalldata(job);
   const txHash = await executeReveal(job, proofCalldata);
+  job.status = 'submitted';
+  job.revealTxHash = txHash;
+  job.updatedAt = Date.now();
+  upsertTraceFromJobLike(job);
+  queuePersistTraces();
   return { txHash, proofLength: proofCalldata.length, bidder: job.bidder, slotPostId: job.slotPostId };
+}
+
+function inferGroupIdForTrace(slotPostId, bidder, explicitGroupId = 0) {
+  const groupId = Number(explicitGroupId || 0);
+  if (Number.isFinite(groupId) && groupId > 0) return groupId;
+  const key = makeTraceKey(slotPostId, bidder);
+  const trace = tracesByKey.get(key);
+  const traceGroupId = Number(trace?.groupId || 0);
+  if (Number.isFinite(traceGroupId) && traceGroupId > 0) return traceGroupId;
+  const job = jobs.find((j) =>
+    Number(j?.slotPostId || 0) === Number(slotPostId || 0) &&
+    normalizeHexAddress(j?.bidder || '') === normalizeHexAddress(bidder || ''),
+  );
+  const jobGroupId = Number(job?.groupId || 0);
+  if (Number.isFinite(jobGroupId) && jobGroupId > 0) return jobGroupId;
+  return 0;
+}
+
+async function runRecoverRevealTx(payload) {
+  const txHash = String(payload?.revealTxHash || payload?.txHash || '').trim();
+  if (!txHash || !txHash.startsWith('0x')) throw new Error('Missing revealTxHash');
+  const provider = new RpcProvider({ nodeUrl: RPC_URL });
+  let tx = null;
+  try {
+    tx = await provider.getTransactionByHash(txHash);
+  } catch {
+    tx = await provider.getTransactionByHash(txHash);
+  }
+  const calldata = Array.isArray(tx?.calldata)
+    ? tx.calldata
+    : (Array.isArray(tx?.transaction?.calldata) ? tx.transaction.calldata : []);
+  const parsed = extractRevealPayloadFromAccountCalldata(calldata, ACTIONS_CONTRACT);
+  if (!parsed) {
+    throw new Error('Could not decode reveal_bid payload from transaction calldata');
+  }
+  const slotFromPayload = Number(payload?.slotPostId || 0);
+  if (slotFromPayload > 0 && slotFromPayload !== parsed.slotPostId) {
+    throw new Error(`Recovered slot mismatch (tx=${parsed.slotPostId}, payload=${slotFromPayload})`);
+  }
+  const bidderFromPayload = normalizeHexAddress(payload?.bidder || '');
+  if (bidderFromPayload && bidderFromPayload !== '0x0' && bidderFromPayload !== parsed.bidder) {
+    throw new Error(`Recovered bidder mismatch (tx=${parsed.bidder}, payload=${bidderFromPayload})`);
+  }
+  const groupId = inferGroupIdForTrace(parsed.slotPostId, parsed.bidder, payload?.groupId);
+  if (!Number.isFinite(groupId) || groupId <= 0) {
+    throw new Error('Missing groupId. Provide groupId to recover trace from tx.');
+  }
+  const proofCalldataHash = sha256Hex(parsed.proofCalldata.join(','));
+  const trace = upsertTraceFromJobLike({
+    id: `recovered_${txHash.slice(2, 14)}`,
+    source: 'sepolia-recovered',
+    slotPostId: parsed.slotPostId,
+    groupId,
+    bidder: parsed.bidder,
+    bidAmount: parsed.bidAmount,
+    salt: parsed.salt,
+    status: 'submitted',
+    revealTxHash: txHash,
+    proofCalldata: parsed.proofCalldata,
+    zkTrace: {
+      recoveredFromTx: txHash,
+      recoveredAt: Date.now(),
+      proofCalldataHash,
+      proofFelts: parsed.proofCalldata.length,
+      calldataPreview: previewArray(parsed.proofCalldata, 8),
+    },
+    updatedAt: Date.now(),
+  });
+  queuePersistTraces();
+  return {
+    ok: true,
+    txHash,
+    slotPostId: trace?.slotPostId || parsed.slotPostId,
+    groupId,
+    bidder: trace?.bidder || parsed.bidder,
+    bidAmount: trace?.bidAmount || parsed.bidAmount,
+    proofFelts: Array.isArray(trace?.proofCalldata) ? trace.proofCalldata.length : parsed.proofCalldata.length,
+    proofCalldataHash,
+  };
 }
 
 async function runImmediateReverify(payload) {
@@ -730,13 +1026,23 @@ async function runImmediateReverify(payload) {
     throw new Error('Missing verifier address (SEALED_RELAY_VERIFIER_ADDRESS)');
   }
 
+  const traceCandidates = Array.from(tracesByKey.values())
+    .filter((j) => Number(j?.slotPostId || 0) === slotPostId)
+    .filter((j) => !explicitJobId || String(j?.id || '') === explicitJobId)
+    .filter((j) => !normalizedBidder || normalizeHexAddress(j?.bidder) === normalizedBidder)
+    .filter((j) => Array.isArray(j?.proofCalldata) && j.proofCalldata.length > 0);
   const matches = jobs
     .filter((j) => Number(j?.slotPostId || 0) === slotPostId)
     .filter((j) => !explicitJobId || String(j?.id || '') === explicitJobId)
     .filter((j) => !normalizedBidder || normalizeHexAddress(j?.bidder) === normalizedBidder)
     .filter((j) => Array.isArray(j?.proofCalldata) && j.proofCalldata.length > 0)
+    .concat(traceCandidates)
     .sort((a, b) => Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0));
   const job = matches[0] || null;
+  if (!job && payload?.revealTxHash) {
+    await runRecoverRevealTx(payload);
+    return runImmediateReverify({ ...payload, revealTxHash: '' });
+  }
   if (!job) {
     throw new Error('No stored proof calldata for this slot. Re-verify requires preserved relay trace.');
   }
@@ -1250,7 +1556,7 @@ function createJob(payload) {
   if (!salt) throw new Error('Missing salt');
 
   const id = `job_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
-  return {
+  const job = {
     id,
     slotPostId,
     groupId,
@@ -1269,6 +1575,9 @@ function createJob(payload) {
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
+  upsertTraceFromJobLike(job);
+  queuePersistTraces();
+  return job;
 }
 
 const server = createServer(async (req, res) => {
@@ -1287,7 +1596,7 @@ const server = createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && req.url?.startsWith('/sealed/jobs')) {
-    json(res, 200, { ok: true, jobs: jobs.map(getPublicJobView) });
+    json(res, 200, { ok: true, jobs: collectPublicJobsWithTraceFallback() });
     return;
   }
 
@@ -1442,6 +1751,22 @@ const server = createServer(async (req, res) => {
     }
   }
 
+  if (req.method === 'POST' && req.url === '/sealed/recover-from-tx') {
+    try {
+      const payload = await parseBody(req);
+      const result = await runRecoverRevealTx(payload);
+      json(res, 200, {
+        ok: true,
+        status: 'recovered',
+        ...result,
+      });
+      return;
+    } catch (error) {
+      json(res, 400, { ok: false, error: String(error?.message || 'Recover from tx failed') });
+      return;
+    }
+  }
+
   if (req.method === 'POST' && req.url === '/sealed/refund-now') {
     try {
       const payload = await parseBody(req);
@@ -1465,7 +1790,10 @@ const server = createServer(async (req, res) => {
 
 async function start() {
   validateConfig();
+  await restoreTraces();
   await restoreJobs();
+  mirrorJobsIntoTraceStore();
+  queuePersistTraces();
   setInterval(() => {
     void processNextJob();
     void processNextFinalizeJob();
@@ -1478,7 +1806,21 @@ async function start() {
   });
 }
 
-start().catch((error) => {
-  console.error('[sealed-relayer] startup failed:', error?.message || error);
-  process.exit(1);
-});
+export const __test__ = {
+  jobs,
+  tracesByKey,
+  makeTraceKey,
+  makeTraceId,
+  upsertTraceFromJobLike,
+  collectPublicJobsWithTraceFallback,
+  decodeAccountCallArray,
+  extractRevealPayloadFromAccountCalldata,
+  createJob,
+};
+
+if (process.env.SEALED_RELAY_DISABLE_AUTOSTART !== '1') {
+  start().catch((error) => {
+    console.error('[sealed-relayer] startup failed:', error?.message || error);
+    process.exit(1);
+  });
+}
