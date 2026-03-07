@@ -2440,8 +2440,9 @@ pub mod actions {
     mod tests {
         use super::{
             YIELD_POOL_BTC_ID, YIELD_POOL_STRK_ID, assert_supported_pool, min_u128, paid_post_price,
-            pool_id_from_mode, ratio_amount
+            payment_token, pool_id_from_mode, ratio_amount
         };
+        use starknet::ContractAddress;
 
         #[test]
         fn test_ratio_amount_handles_zero_values() {
@@ -2490,6 +2491,15 @@ pub mod actions {
         #[should_panic]
         fn test_assert_supported_pool_rejects_invalid_id() {
             assert_supported_pool(9);
+        }
+
+        #[test]
+        fn test_btc_pool_uses_wbtc_payment_token() {
+            let expected: ContractAddress =
+                0x00452bd5c0512a61df7c7be8cfea5e4f893cb40e126bdc40aee6054db955129e
+                    .try_into()
+                    .unwrap();
+            assert(payment_token(YIELD_POOL_BTC_ID) == expected, 'btc pool token address');
         }
     }
 }
