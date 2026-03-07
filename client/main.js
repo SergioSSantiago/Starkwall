@@ -126,6 +126,22 @@ function applyFallbackFollow(follower, following, shouldFollow) {
   return true
 }
 
+function setSocialFollowInState(follower, following, shouldFollow) {
+  const f = normalizeSocialAddress(follower)
+  const t = normalizeSocialAddress(following)
+  if (!f || !t || f === t) return false
+  if (!socialState.followingByUser.has(f)) socialState.followingByUser.set(f, new Set())
+  if (!socialState.followersByUser.has(t)) socialState.followersByUser.set(t, new Set())
+  if (shouldFollow) {
+    socialState.followingByUser.get(f).add(t)
+    socialState.followersByUser.get(t).add(f)
+  } else {
+    socialState.followingByUser.get(f).delete(t)
+    socialState.followersByUser.get(t).delete(f)
+  }
+  return true
+}
+
 function mergeFallbackIntoSocialState() {
   const store = readSocialFallback()
   for (const [follower, list] of Object.entries(store)) {
@@ -278,9 +294,9 @@ async function followUserLocally(targetAddress) {
   const target = normalizeSocialAddress(targetAddress)
   if (!me || !target || me === target) return false
 
-  // Update UI immediately for snappy UX, then reconcile in background.
+  // Update UI immediately for snappy UX, then reconcile with indexer state.
+  setSocialFollowInState(me, target, true)
   applyFallbackFollow(me, target, true)
-  scheduleSocialRevalidation(600)
 
   if (!socialOnchainAvailable) {
     if (!socialOnchainWarned) {
@@ -292,7 +308,7 @@ async function followUserLocally(targetAddress) {
 
   dojoManager.followUser(target)
     .then(() => {
-      scheduleSocialRevalidation(900)
+      scheduleSocialRevalidation(300)
     })
     .catch((error) => {
       console.warn('follow on-chain failed, reverting optimistic state:', error?.message || error)
@@ -300,6 +316,7 @@ async function followUserLocally(targetAddress) {
       if (errMsg.includes('ENTRYPOINT_NOT_FOUND')) {
         socialOnchainAvailable = false
       }
+      setSocialFollowInState(me, target, false)
       applyFallbackFollow(me, target, false)
       scheduleSocialRevalidation(200)
       showToast('Follow failed on-chain')
@@ -313,9 +330,9 @@ async function unfollowUserLocally(targetAddress) {
   const target = normalizeSocialAddress(targetAddress)
   if (!me || !target || me === target) return false
 
-  // Update UI immediately for snappy UX, then reconcile in background.
+  // Update UI immediately for snappy UX, then reconcile with indexer state.
+  setSocialFollowInState(me, target, false)
   applyFallbackFollow(me, target, false)
-  scheduleSocialRevalidation(600)
 
   if (!socialOnchainAvailable) {
     if (!socialOnchainWarned) {
@@ -327,7 +344,7 @@ async function unfollowUserLocally(targetAddress) {
 
   dojoManager.unfollowUser(target)
     .then(() => {
-      scheduleSocialRevalidation(900)
+      scheduleSocialRevalidation(300)
     })
     .catch((error) => {
       console.warn('unfollow on-chain failed, reverting optimistic state:', error?.message || error)
@@ -335,6 +352,7 @@ async function unfollowUserLocally(targetAddress) {
       if (errMsg.includes('ENTRYPOINT_NOT_FOUND')) {
         socialOnchainAvailable = false
       }
+      setSocialFollowInState(me, target, true)
       applyFallbackFollow(me, target, true)
       scheduleSocialRevalidation(200)
       showToast('Unfollow failed on-chain')
@@ -4225,6 +4243,40 @@ function showPostDetails(post, source = 'canvas') {
 
   if (postCurrentOwner) postCurrentOwner.textContent = ownerDisplay
 
+  const creatorAddr = normalizeSocialAddress(post?.created_by || '')
+  const ownerAddr = normalizeSocialAddress(ownerRaw || '')
+  const creatorDisplay = String(post?.creator_username || '').trim() || (creatorAddr ? `${creatorAddr.slice(0, 8)}...${creatorAddr.slice(-6)}` : 'Unknown')
+  const ownerDisplayName = String(ownerDisplay || '').trim() || (ownerAddr ? `${ownerAddr.slice(0, 8)}...${ownerAddr.slice(-6)}` : 'Unknown')
+
+  const openProfileFromDetails = (targetAddress, displayName) => {
+    if (!targetAddress || targetAddress === '0x0') return
+    postDetailsModal.classList.remove('active')
+    delete postDetailsModal.dataset.postId
+    delete postDetailsModal.dataset.ownerAddress
+    renderOwnerFeed(targetAddress, displayName)
+  }
+
+  const bindProfileOpen = ({ targetAddress, displayName, openBtn }) => {
+      const normalizedTarget = normalizeSocialAddress(targetAddress)
+      const validTarget = Boolean(normalizedTarget && normalizedTarget !== '0x0')
+      if (openBtn) {
+        openBtn.style.display = 'inline-block'
+        openBtn.disabled = !validTarget
+        openBtn.onclick = () => openProfileFromDetails(normalizedTarget, displayName)
+      }
+    }
+
+  bindProfileOpen({
+      targetAddress: creatorAddr,
+      displayName: creatorDisplay,
+      openBtn: postCreator,
+    })
+  bindProfileOpen({
+      targetAddress: ownerAddr,
+      displayName: ownerDisplayName,
+      openBtn: postCurrentOwner,
+    })
+
   // Normalize addresses for comparison (convert to lowercase hex strings and remove leading zeros)
   const normalizeAddress = (addr) => {
     if (!addr) return ''
@@ -4823,6 +4875,7 @@ function renderOwnerFeed(ownerAddress, ownerUsername = '', focusPostId = '', foc
   const feedList = document.getElementById('ownerFeedList')
   const titleEl = document.getElementById('ownerFeedTitle')
   const subtitleEl = document.getElementById('ownerFeedSubtitle')
+  const followBtn = document.getElementById('ownerFeedFollowBtn')
   if (!feedView || !feedList) return
 
   const normalizedOwner = normalizeSocialAddress(ownerAddress)
@@ -4850,6 +4903,42 @@ function renderOwnerFeed(ownerAddress, ownerUsername = '', focusPostId = '', foc
   if (titleEl) titleEl.textContent = displayName
   if (subtitleEl) {
     subtitleEl.textContent = `${ownerPosts.length} posts · ${following.length} following · ${followers.length} followers`
+  }
+  if (followBtn) {
+    const me = normalizeSocialAddress(currentAccount?.address)
+    const isSelf = Boolean(me && me === normalizedOwner)
+    if (isSelf || !me) {
+      followBtn.style.display = 'none'
+      followBtn.onclick = null
+    } else {
+      const iFollow = getSocialFollowersFollowing(me).following.includes(normalizedOwner)
+      followBtn.style.display = 'inline-block'
+      followBtn.textContent = iFollow ? 'Unfollow' : 'Follow'
+      followBtn.onclick = async () => {
+        const wasFollowing = getSocialFollowersFollowing(me).following.includes(normalizedOwner)
+        const prevLabel = followBtn.textContent
+        followBtn.textContent = wasFollowing ? 'Unfollowing...' : 'Following...'
+        followBtn.disabled = true
+        try {
+          const ok = wasFollowing
+            ? await unfollowUserLocally(normalizedOwner)
+            : await followUserLocally(normalizedOwner)
+          if (!ok) {
+            showToast(`Cannot ${wasFollowing ? 'unfollow' : 'follow'} this user`)
+            followBtn.textContent = prevLabel
+            return
+          }
+          showToast(wasFollowing ? 'Unfollowed user' : 'Now following user')
+          await updateWalletInfo()
+          renderOwnerFeed(normalizedOwner, displayName, focusPostId, focusPost)
+        } catch (error) {
+          alert(`Failed to ${wasFollowing ? 'unfollow' : 'follow'}: ` + (error?.message || 'Unknown error'))
+          followBtn.textContent = prevLabel
+        } finally {
+          followBtn.disabled = false
+        }
+      }
+    }
   }
   feedView.classList.add('active')
 
@@ -5384,6 +5473,19 @@ async function updateWalletInfo() {
     const btcUnpoolingLabel = (hasWbtcMemberInfo || wbtcPosition) && wbtcUnpoolRaw > 0n
       ? `${unitsToTokenNumber(wbtcUnpoolRaw, 8, 8).toFixed(8)} ${btcSymbol}`
       : ''
+    const renderYieldLine = (staked, rewards, unpooling = '', exitAt = '') => {
+      const extra = [
+        unpooling ? `<span class="wallet-yield-item"><span class="wallet-yield-icon">⏳</span><span class="wallet-yield-label">Unpooling ${unpooling}</span></span>` : '',
+        exitAt ? `<span class="wallet-yield-item"><span class="wallet-yield-icon">🕒</span><span class="wallet-yield-label">Exit at ${exitAt}</span></span>` : '',
+      ].filter(Boolean).join('<span class="wallet-yield-sep">·</span>')
+      return `<span class="wallet-yield-line">
+        <span class="wallet-yield-item"><span class="wallet-yield-icon">🔒</span><span class="wallet-yield-label">Staked ${staked}</span></span>
+        <span class="wallet-yield-sep">·</span>
+        <span class="wallet-yield-item"><span class="wallet-yield-icon">✨</span><span class="wallet-yield-label">Rewards ${rewards}</span></span>
+        ${extra ? `<span class="wallet-yield-sep">·</span>${extra}` : ''}
+      </span>`
+    }
+
     walletInfo.innerHTML = `
       <div class="wallet-box">
         <div class="wallet-top-row">
@@ -5398,8 +5500,8 @@ async function updateWalletInfo() {
             </div>
             <span class="wallet-balance">💰 ${balanceStr} STRK</span>
             ${hasYieldInManifest ? `<span class="wallet-balance">₿ ${btcWalletBalance.toFixed(8)} ${btcSymbol}</span>` : ''}
-            ${hasYieldInManifest ? `<span class="wallet-yield-line">🔒 Staked ${stakedLabel} · ✨ Rewards ${rewardsLabel}${unpoolingLabel ? ` · ⏳ Unpooling ${unpoolingLabel}` : ''}${unpoolAtLabel ? ` · Exit at ${unpoolAtLabel}` : ''}</span>` : ''}
-            ${hasYieldInManifest ? `<span class="wallet-yield-line">🔒 Staked ${btcStakedLabel} · ✨ Rewards ${btcRewardsLabel}${btcUnpoolingLabel ? ` · ⏳ Unpooling ${btcUnpoolingLabel}` : ''}${wbtcUnpoolAtLabel ? ` · Exit at ${wbtcUnpoolAtLabel}` : ''}</span>` : ''}
+            ${hasYieldInManifest ? renderYieldLine(stakedLabel, rewardsLabel, unpoolingLabel, unpoolAtLabel) : ''}
+            ${hasYieldInManifest ? renderYieldLine(btcStakedLabel, btcRewardsLabel, btcUnpoolingLabel, wbtcUnpoolAtLabel) : ''}
           </div>
         </div>
         ${hasYieldInManifest ? `<div class="wallet-yield-actions">

@@ -60,6 +60,34 @@
 #wallet-info .wallet-yield-line {
   color: #9ecbff;
   font-size: 11px;
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 4px;
+}
+
+#wallet-info .wallet-yield-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+#wallet-info .wallet-yield-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+#wallet-info .wallet-yield-label {
+  line-height: 1.2;
+}
+
+#wallet-info .wallet-yield-sep {
+  opacity: 0.7;
+  line-height: 1;
 }
 
 #wallet-info .wallet-yield-actions {
@@ -335,6 +363,16 @@
   background: rgba(15, 15, 15, 0.95);
 }
 
+.owner-feed-meta {
+  min-width: 0;
+}
+
+.owner-feed-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+}
+
 .owner-feed-header h2 {
   margin: 0;
   font-size: 18px;
@@ -344,6 +382,14 @@
   margin: 2px 0 0;
   font-size: 12px;
   color: #8fa2b6;
+}
+
+.owner-feed-follow-btn {
+  min-height: 0;
+  margin-top: 0;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-radius: 8px;
 }
 
 #closeOwnerFeedBtn {
@@ -1065,6 +1111,99 @@
   color: #9ecbff;
   font-size: 12px;
   text-decoration: underline;
+}
+
+.post-user-link-btn {
+  border: none;
+  background: transparent;
+  color: #9ecbff;
+  font-size: 13px;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.post-user-link-btn:hover {
+  color: #c6e2ff;
+}
+
+@media (max-width: 640px) {
+  #postDetailsButtons {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 8px;
+    justify-content: stretch;
+  }
+
+  #postDetailsButtons button {
+    width: 100%;
+    min-height: 38px;
+    text-align: left;
+    white-space: normal;
+    font-size: 13px;
+    line-height: 1.2;
+  }
+
+  #wallet-info .wallet-top-row {
+    align-items: flex-start;
+  }
+
+  #wallet-info .wallet-stats {
+    order: -1;
+    width: 100%;
+    flex-wrap: wrap;
+    margin-top: -2px;
+    margin-bottom: 4px;
+  }
+
+  #wallet-info .wallet-main {
+    width: 100%;
+    align-items: flex-end;
+  }
+
+  #wallet-info .wallet-user-row {
+    width: 100%;
+    justify-content: flex-end;
+    text-align: right;
+  }
+
+  #wallet-info .wallet-balance,
+  #wallet-info .wallet-yield-line {
+    display: block;
+    width: 100%;
+    text-align: right;
+    line-height: 1.35;
+    white-space: normal;
+    word-break: break-word;
+  }
+
+  #wallet-info .wallet-yield-line {
+    justify-content: flex-end;
+    row-gap: 2px;
+  }
+
+  #wallet-info .wallet-yield-actions {
+    width: 100%;
+    justify-content: stretch;
+    gap: 4px;
+  }
+
+  #wallet-info .wallet-yield-actions .wallet-stat-btn {
+    flex: 1 1 0;
+    display: inline-flex;
+    justify-content: center;
+    align-items: center;
+    white-space: nowrap;
+  }
+
+  .owner-feed-header {
+    align-items: flex-start;
+  }
+
+  .owner-feed-actions {
+    align-self: center;
+  }
 }
 
 .yield-check {

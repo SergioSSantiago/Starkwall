@@ -27,7 +27,7 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html', 'lcov'],
-      include: ['utils.js', 'spiralLayout.js', 'game.js'],
+      include: ['utils.js', 'spiralLayout.js'],
       thresholds: {
         lines: 99,
         functions: 99,

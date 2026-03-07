@@ -462,16 +462,26 @@ export class DojoManager {
   }
 
   async querySocialData() {
+    const getAllSocialEntities = async (buildQuery, pageLimit = 200, maxPages = 100) => {
+      const items = []
+      let cursor = null
+      for (let page = 0; page < maxPages; page += 1) {
+        let query = buildQuery().withLimit(pageLimit)
+        if (cursor) query = query.withCursor(String(cursor))
+        const resp = await this.toriiClient.getEntities({ query }).catch(() => ({ items: [] }))
+        const pageItems = Array.isArray(resp?.items) ? resp.items : []
+        items.push(...pageItems)
+        const nextCursor = resp?.nextCursor ?? resp?.next_cursor ?? null
+        if (!nextCursor || nextCursor === cursor || pageItems.length === 0) break
+        cursor = nextCursor
+      }
+      return { items }
+    }
+
     const [profilesResp, relationsResp, statsResp] = await Promise.all([
-      this.toriiClient.getEntities({
-        query: new ToriiQueryBuilder().withClause(KeysClause(['di-UserProfile'], [], 'VariableLen').build()),
-      }).catch(() => ({ items: [] })),
-      this.toriiClient.getEntities({
-        query: new ToriiQueryBuilder().withClause(KeysClause(['di-FollowRelation'], [], 'VariableLen').build()),
-      }).catch(() => ({ items: [] })),
-      this.toriiClient.getEntities({
-        query: new ToriiQueryBuilder().withClause(KeysClause(['di-FollowStats'], [], 'VariableLen').build()),
-      }).catch(() => ({ items: [] })),
+      getAllSocialEntities(() => new ToriiQueryBuilder().withClause(KeysClause(['di-UserProfile'], [], 'VariableLen').build())),
+      getAllSocialEntities(() => new ToriiQueryBuilder().withClause(KeysClause(['di-FollowRelation'], [], 'VariableLen').build())),
+      getAllSocialEntities(() => new ToriiQueryBuilder().withClause(KeysClause(['di-FollowStats'], [], 'VariableLen').build())),
     ])
 
     const profiles = []

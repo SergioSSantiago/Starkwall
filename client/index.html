@@ -45,9 +45,12 @@
     <div id="ownerFeedView" class="owner-feed-view">
       <div class="owner-feed-header">
         <button type="button" id="closeOwnerFeedBtn">← Back</button>
-        <div>
+        <div class="owner-feed-meta">
           <h2 id="ownerFeedTitle">User Posts</h2>
           <p id="ownerFeedSubtitle"></p>
+        </div>
+        <div class="owner-feed-actions">
+          <button type="button" id="ownerFeedFollowBtn" class="owner-feed-follow-btn" style="display:none;">Follow</button>
         </div>
       </div>
       <div id="ownerFeedList" class="owner-feed-list"></div>
@@ -243,8 +246,8 @@
       <div class="modal-content">
         <h2>Post Details</h2>
         <div id="postDetailsContent">
-          <p><strong>Creator:</strong> <span id="postCreator"></span></p>
-          <p><strong>Current owner:</strong> <span id="postCurrentOwner"></span></p>
+          <p><strong>Creator:</strong> <button type="button" id="postCreator" class="post-user-link-btn"></button></p>
+          <p><strong>Current owner:</strong> <button type="button" id="postCurrentOwner" class="post-user-link-btn"></button></p>
           <p><strong>Caption:</strong> <span id="postCaption"></span></p>
           <p><strong>On-chain ref:</strong> <span id="postOnchainRef"></span></p>
           <div class="post-ref-actions">
