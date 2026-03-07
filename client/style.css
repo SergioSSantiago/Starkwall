@@ -177,6 +177,13 @@
     gap: 4px;
   }
 
+#wallet-info .wallet-yield-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
 #wallet-info .wallet-user-row {
   display: flex;
   align-items: center;
@@ -1038,11 +1045,17 @@
   }
 
   #wallet-info .wallet-top-row {
-    align-items: center;
-    gap: 6px;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    grid-template-areas:
+      "stats main"
+      "yield main";
+    align-items: start;
+    gap: 4px 8px;
   }
 
   #wallet-info .wallet-main {
+    grid-area: main;
     align-items: flex-end;
     gap: 1px;
   }
@@ -1060,9 +1073,16 @@
   }
 
   #wallet-info .wallet-stats {
+    grid-area: stats;
     flex-direction: row;
     align-items: center;
     gap: 4px;
+  }
+
+  #wallet-info .wallet-yield-stack {
+    grid-area: yield;
+    align-items: flex-start;
+    width: 100%;
   }
 
   #controls .wallet-stat-btn {
@@ -1179,8 +1199,11 @@
   }
 
   #wallet-info .wallet-yield-line {
-    justify-content: flex-end;
+    justify-content: flex-start;
     row-gap: 2px;
+    text-align: left;
+    width: auto;
+    max-width: 100%;
   }
 
   #wallet-info .wallet-yield-actions {

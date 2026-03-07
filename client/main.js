@@ -5493,6 +5493,10 @@ async function updateWalletInfo() {
             <button id="following-count-btn" class="wallet-stat-btn" type="button">Following ${following.length}</button>
             <button id="followers-count-btn" class="wallet-stat-btn" type="button">Followers ${followers.length}</button>
           </div>
+          ${hasYieldInManifest ? `<div class="wallet-yield-stack">
+            ${renderYieldLine(stakedLabel, rewardsLabel, unpoolingLabel, unpoolAtLabel)}
+            ${renderYieldLine(btcStakedLabel, btcRewardsLabel, btcUnpoolingLabel, wbtcUnpoolAtLabel)}
+          </div>` : ''}
           <div class="wallet-main">
             <div class="wallet-user-row">
               <button id="wallet-user-btn" class="wallet-user-btn" type="button" title="Open my feed">● ${currentUsername || shortAddr}</button>
@@ -5500,8 +5504,6 @@ async function updateWalletInfo() {
             </div>
             <span class="wallet-balance">💰 ${balanceStr} STRK</span>
             ${hasYieldInManifest ? `<span class="wallet-balance">₿ ${btcWalletBalance.toFixed(8)} ${btcSymbol}</span>` : ''}
-            ${hasYieldInManifest ? renderYieldLine(stakedLabel, rewardsLabel, unpoolingLabel, unpoolAtLabel) : ''}
-            ${hasYieldInManifest ? renderYieldLine(btcStakedLabel, btcRewardsLabel, btcUnpoolingLabel, wbtcUnpoolAtLabel) : ''}
           </div>
         </div>
         ${hasYieldInManifest ? `<div class="wallet-yield-actions">
