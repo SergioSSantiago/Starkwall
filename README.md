@@ -23,9 +23,9 @@ Starkwall runs on Starknet Sepolia and combines:
 
 Source of truth: `contracts/manifest_sepolia.json`
 
-- World address: `0x1fdf743008029a33c60d69b4bd3bc21a8f9ac282bdc6108e3066f6d1e6da151`
+- World address: `0x1fdf743008029a33c60d69b4bd3bc21a8f9ac282bdc6108e3066f6d1e6da151` [View on Voyager](https://sepolia.voyager.online/contract/0x1fdf743008029a33c60d69b4bd3bc21a8f9ac282bdc6108e3066f6d1e6da151)
 - World class hash: `0x57994b6a75fad550ca18b41ee82e2110e158c59028c4478109a67965a0e5b1e`
-- `di-actions` contract address: `0x9b693df0de1b9217493ea72b159beaea15c4299130a1a31279fd7a64adcb8d`
+- `di-actions` contract address: `0x9b693df0de1b9217493ea72b159beaea15c4299130a1a31279fd7a64adcb8d` [View on Voyager](https://sepolia.voyager.online/contract/0x9b693df0de1b9217493ea72b159beaea15c4299130a1a31279fd7a64adcb8d)
 - `di-actions` class hash: `0x38dcfd60ea9946ddb696aac88b08e87d998e680313c939f349c4cd8176f25c4`
 
 Important: in Sepolia manifest there is one deployed app contract in `contracts[]` (`di-actions`).  
@@ -35,17 +35,56 @@ The other `di-*` entries are model class hashes (schema), not extra deployed app
 
 Source of truth: `client/config.js` and `contracts/src/systems/actions.cairo`
 
-- STRK token (Sepolia): `0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d`
-- WBTC token (staking pool token): `0x00452bd5c0512a61df7c7be8cfea5e4f893cb40e126bdc40aee6054db955129e`
-- WBTC swap route token (AVNU swaps): `0x020d208b9e57a7f92bfa9f61135446e0961afc340378be97dbd317453c0950ae`
-- ETH token constant (Sepolia): `0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7`
-- Sealed-bid verifier default: `0x03a3af693e4aa3dab8c38ea47b2757443837d5d5fcb6f23263cad63964611624`
+- STRK token (Sepolia): `0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d` [View on Voyager](https://sepolia.voyager.online/contract/0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d)
+- WBTC token (staking pool token): `0x00452bd5c0512a61df7c7be8cfea5e4f893cb40e126bdc40aee6054db955129e` [View on Voyager](https://sepolia.voyager.online/contract/0x00452bd5c0512a61df7c7be8cfea5e4f893cb40e126bdc40aee6054db955129e)
+- WBTC swap route token (AVNU swaps): `0x020d208b9e57a7f92bfa9f61135446e0961afc340378be97dbd317453c0950ae` [View on Voyager](https://sepolia.voyager.online/contract/0x020d208b9e57a7f92bfa9f61135446e0961afc340378be97dbd317453c0950ae)
+- ETH token constant (Sepolia): `0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7` [View on Voyager](https://sepolia.voyager.online/contract/0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7)
+- Sealed-bid verifier default: `0x03a3af693e4aa3dab8c38ea47b2757443837d5d5fcb6f23263cad63964611624` [View on Voyager](https://sepolia.voyager.online/contract/0x03a3af693e4aa3dab8c38ea47b2757443837d5d5fcb6f23263cad63964611624)
 
 ### C) Service endpoints used by the app
 
 - RPC default: `https://api.cartridge.gg/x/starknet/sepolia`
 - Torii default: `https://starkwall-torii.fly.dev`
 - AVNU official Sepolia API: `https://sepolia.api.avnu.fi`
+
+## App Features (What Starkwall Actually Does)
+
+### Post types
+
+- Free post: regular onchain post creation.
+- Paid post: paid creation flow with size-based pricing and onchain ownership.
+- Auction post (3x3): center post + 8 auction slots.
+- Sealed auction mode: commit/reveal/finalize pipeline with verifier-backed proofs.
+
+### Social + ownership
+
+- User profile usernames (onchain index).
+- Follow / unfollow and social counters.
+- Post sale listing and buying (`set_post_price` / `buy_post`).
+- Owner feed navigation and profile interactions.
+
+### Wallet actions
+
+- STRK transfer helper UI.
+- STRK <-> WBTC swaps via AVNU.
+- Staking for STRK and WBTC paths with stake/unstake/claim UX.
+
+### Sealed verification UX
+
+- Per-slot verification modal.
+- Relay pipeline stage status.
+- Onchain verification links to Sepolia Voyager.
+- Re-verify action when relay proof calldata exists.
+
+## Where Images Are Stored
+
+- The contract stores `image_url` as a `ByteArray` (a URL or data string reference), not raw image binary blobs.
+- Recommended production path: upload image off-chain and store only URL onchain.
+- Current upload options supported by relay backend:
+  - IPFS via Pinata (`SEALED_RELAY_MEDIA_PROVIDER=ipfs_pinata`)
+  - Cloudflare Images (`SEALED_RELAY_MEDIA_PROVIDER=cloudflare_images`)
+  - Local file storage for dev (`SEALED_RELAY_MEDIA_PROVIDER=local`)
+- Frontend can send media to `VITE_MEDIA_UPLOAD_URL` (or `${VITE_SEALED_RELAY_URL}/media/upload`) and then write returned URL to onchain post data.
 
 ## Stake / Unstake / Claim / Swap: Who Does What
 
