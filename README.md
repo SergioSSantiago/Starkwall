@@ -2,7 +2,7 @@
   <img src="./client/logo-wall.svg" alt="Starkwall logo" width="88" />
 </p>
 
-<h1 align="center">STARKWALL - ZK Social Canvas on Starknet</h1>
+<h1 align="center">Starkwall - Starknet Social Network with Sealed Bids and BTC Integration</h1>
 
 Starkwall runs on Starknet Sepolia and combines:
 - Dojo world contracts (`di-actions`)
