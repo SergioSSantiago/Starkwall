@@ -17,6 +17,12 @@ Starkwall runs on Starknet Sepolia and combines:
 - App: `https://www.starkwall.com`
 - Network: Starknet Sepolia
 
+## Demo
+
+- YouTube demo: [Watch Starkwall Demo](https://www.youtube.com/watch?v=Hny_KlpooGY)
+
+[![Starkwall Demo Video](https://img.youtube.com/vi/Hny_KlpooGY/maxresdefault.jpg)](https://www.youtube.com/watch?v=Hny_KlpooGY)
+
 ## Addresses and Endpoints (Real and Current)
 
 ### A) Contracts deployed by this project (your deployment)
