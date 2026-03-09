@@ -1,6 +1,6 @@
 {
   "world": {
-    "class_hash": "0x57994b6a75fad550ca18b41ee82e2110e158c59028c4478109a67965a0e5b1e",
+    "class_hash": "0x1f60fa0f5c18ec38bed135ddf9311ca82bfee9bd50155fce356e309344cb72a",
     "address": "0x1fdf743008029a33c60d69b4bd3bc21a8f9ac282bdc6108e3066f6d1e6da151",
     "seed": "starkwall_sep_reset_260228",
     "name": "Dojo intro",
@@ -34,7 +34,7 @@
   "contracts": [
     {
       "address": "0x9b693df0de1b9217493ea72b159beaea15c4299130a1a31279fd7a64adcb8d",
-      "class_hash": "0x38dcfd60ea9946ddb696aac88b08e87d998e680313c939f349c4cd8176f25c4",
+      "class_hash": "0x1c9d9c7c667bfcb60c2f8f8ff556934c79c1d5e718823a9c34b08eb233cdbd9",
       "init_calldata": [],
       "tag": "di-actions",
       "selector": "0x4c09d12108e978b8c073f8d7186ed1aa144777a0aad9d1334532b5813038897",
@@ -119,9 +119,31 @@
           "key": false
         }
       ],
-      "class_hash": "0x6e9be33730525709d05d745225d3073297a6e9ce1d87e8fb049588cc53870aa",
+      "class_hash": "0x63f040fcab2429a81c10cbfc26ebbe33494e42b32e169265de968aade71bff1",
       "tag": "di-AuctionCommit",
       "selector": "0x2af5c2caf12803dbe9c5837df1db7333e2127601bc70081e07d2825b5c40ca9"
+    },
+    {
+      "members": [
+        {
+          "name": "slot_post_id",
+          "type": "core::integer::u64",
+          "key": true
+        },
+        {
+          "name": "bidder",
+          "type": "core::starknet::contract_address::ContractAddress",
+          "key": true
+        },
+        {
+          "name": "reveal_tx_hash",
+          "type": "core::felt252",
+          "key": false
+        }
+      ],
+      "class_hash": "0x17943d4371ef6b4b727c5c895bb0e391a9b534934a14bd07094d8d41831c3f6",
+      "tag": "di-AuctionCommitProofMeta",
+      "selector": "0x184f2deb5fb0684e66a7b12a1b7c112ed0a4bdd3bfdd94ea911cae5c0d49de5"
     },
     {
       "members": [
@@ -151,7 +173,7 @@
           "key": false
         }
       ],
-      "class_hash": "0x13ecabdcb302fa6635e70a19a63a8973bec4c37cc08b4f917c698c037d9126f",
+      "class_hash": "0x73ab2f9b78ec83c45d77fc252ab8380e152c5c847ae4522fedc374ff17e8716",
       "tag": "di-AuctionGroup",
       "selector": "0x30109b641351f67626e9aebc68b4cf5788e59019fa98607901650b915b936cd"
     },
@@ -168,7 +190,7 @@
           "key": false
         }
       ],
-      "class_hash": "0xe29b8a516bbfb398d60e6bfbffd75644c9268c22dbea147f568b38611b3745",
+      "class_hash": "0x14d769fe13a73a8ce6ba9d96ae54271e1bddea032de26c6209ab931d4a9a331",
       "tag": "di-AuctionRevealNullifier",
       "selector": "0x2b314e8481370f2c047e0d698e555c6ec06c6e5ddbed4b168f1bc871901086b"
     },
@@ -200,7 +222,7 @@
           "key": false
         }
       ],
-      "class_hash": "0x3c985fa8eef669d4071a13e4037bb745b6ab8991af3a2c2f6094d81d7d95934",
+      "class_hash": "0x6ec6e19fb1231ebc1ff55ce13b0b598e329ba8054fddbf0139e8f53e8c4ff30",
       "tag": "di-AuctionSealedConfig",
       "selector": "0xcb6ccaf1cb35149d4d9b1679b491939cd279eff59d667c758adcb2f09ab6ac"
     },
@@ -242,7 +264,7 @@
           "key": false
         }
       ],
-      "class_hash": "0x7cb88259a03a1589f5f2f6f4db70cead36c22dfedcc4fafb6766c24f2ee4a86",
+      "class_hash": "0x145c196253276c3af4b6772b43765e5fc39d78c5d40c7f695032ea5df4e4523",
       "tag": "di-AuctionSlot",
       "selector": "0xdd51aa69a31da119e331a5e75956de9bdbea5921a3cc703363059a7bbe496a"
     },
@@ -259,7 +281,7 @@
           "key": false
         }
       ],
-      "class_hash": "0x1a9126427d3c0c351b58976e8a9b3f60a5307704540a4b2c5efe062fc6de141",
+      "class_hash": "0x721b8ffd08f02bc49b751bb7cd59dece44996c1f982c615080d9adbb765fdeb",
       "tag": "di-AuctionSlotPricing",
       "selector": "0x3d798c80d5c349693e193cf86487171d3a9ed9b1050da935ee34b024df2a6e0"
     },
@@ -286,7 +308,7 @@
           "key": false
         }
       ],
-      "class_hash": "0x557e8f98c980bfe22892466948cbdc2e6b2d0c4cad9e36493167130f3fcdbc9",
+      "class_hash": "0x1ca3d14698b8d92eb021c17439847ef0a67d0866350ce8b0973db499b7ee09f",
       "tag": "di-FollowRelation",
       "selector": "0x295751d3340efa0e2745f522efd167d474dc5a31f892159c6538b40822da46f"
     },
@@ -313,7 +335,7 @@
           "key": false
         }
       ],
-      "class_hash": "0x3524feb12689c1392efb97ebaed71c64c9838ce8065a5f4d31db2540c56e7d3",
+      "class_hash": "0x7c5dc724886baaaca90b904ff98f42029c787f3441ae0f78dbf06458ae3996",
       "tag": "di-FollowStats",
       "selector": "0x2e86e53a9b9647e4e5e6d3a6b81347f6a1322805b64a1ee5a7b64f9416ce26"
     },
@@ -330,7 +352,7 @@
           "key": false
         }
       ],
-      "class_hash": "0x707342a8dcb74fe4179c6a6e93075f93e7c0ebfe9d1d84a37f433767964ca0f",
+      "class_hash": "0x42348a2a5bfeb8aa40a6546d4aa5eab104919a725bd3c0442ada8e33dd298b6",
       "tag": "di-OccupancySyncState",
       "selector": "0x31ba3e0a2a3b0177707acda6092cd8f199520d2ff6a86188f6e22302b25cdf4"
     },
@@ -352,7 +374,7 @@
           "key": false
         }
       ],
-      "class_hash": "0x60cb2b0a206e3913f598f0b6e123b023b6349f66f4075974478624adb3a0d",
+      "class_hash": "0x6aa710d2f53b81e307c85e2aa057081b4881b214010ef9e74553260605fe5b1",
       "tag": "di-OccupiedCell",
       "selector": "0x42d9bba1b5f9624a25826aff48a0c2d5ac5ada2d8a6fefd02dcf47736a54a84"
     },
@@ -434,7 +456,7 @@
           "key": false
         }
       ],
-      "class_hash": "0x6d61d5479f6009b2fb616f8727c9dd19749c1304f2a13a87f5856b539f2add7",
+      "class_hash": "0x45e5b838e29488dad9c279b56e11520a10850b712b2fe3ae0ee1e24112a3747",
       "tag": "di-Post",
       "selector": "0xee9e4c3c087faa03648870ae556985c80c12a4c9ce32fe7c2e9cea457b78e"
     },
@@ -451,7 +473,7 @@
           "key": false
         }
       ],
-      "class_hash": "0x1bcfa8315938a059f6d4ef9ab085c90872da6c87d060df199ef4189bf9af5c8",
+      "class_hash": "0x386d750f57a70931397b18808b0c0d2932024b082cfc9d87ee238ebeadaec77",
       "tag": "di-PostCounter",
       "selector": "0x71b1b8cf65527b80df295d973ff9bd00324d121b4ac82000ea4d7ba1e424106"
     },
@@ -478,7 +500,7 @@
           "key": false
         }
       ],
-      "class_hash": "0x1b3f863ecd88667c14eee0807246e0dab7688314d159a3113b179f9b92ed81",
+      "class_hash": "0x3c3361bb758fb6ac2566310788231f799b9687372282a4d02eaa3a5d1027c7f",
       "tag": "di-UserProfile",
       "selector": "0x1d286fd6327f8de6fc4e5dd5cdbdfd12415ebfacd1dc9bda511d4a41bdf119d"
     },
@@ -500,7 +522,7 @@
           "key": false
         }
       ],
-      "class_hash": "0x208e98b7e972c0490dd877b9a388a4c22dda1fca23b6df0e843dfd8b40ce15c",
+      "class_hash": "0x418ac7e9f9c8f574313e1253f44e76624f785c634fcf96f0bcb2a60cb68b10a",
       "tag": "di-UsernameIndex",
       "selector": "0x4ce1cc75b25432bb691e394f726a22cf7e3e23b6b5dd975fc3f423e7295579"
     },
@@ -517,7 +539,7 @@
           "key": false
         }
       ],
-      "class_hash": "0x26f73cf11b35634d3f3029700467b4f4035030c78a1e24299826bc37c079d5f",
+      "class_hash": "0x5b34cf85bcd611cc16957841643b2a147e2707eb2658719a259077a9690b6d7",
       "tag": "di-YieldAdminState",
       "selector": "0x1a82c4ed5b217c6cb5ee0c7bfd965fa454690397b1d18fd7f5b65118cb9259"
     },
@@ -544,7 +566,7 @@
           "key": false
         }
       ],
-      "class_hash": "0x41a198ca5c200a36fa049ea21a35549a3f7e4aa50208081dc6fd129b88052f",
+      "class_hash": "0x5845444676cade997403a99483cc16b2610a8f11d40e40ae8c3b4e49817b7df",
       "tag": "di-YieldExitQueue",
       "selector": "0x7f472624726429f9b9520fbe5131a7046317de71eb7c603df969e4c37638fc"
     },
@@ -586,7 +608,7 @@
           "key": false
         }
       ],
-      "class_hash": "0x8e7956e86c9ce92781c3af4a9a35850e49955163971ef0568a0861c901edbd",
+      "class_hash": "0x5f388ff0c8b46d03c7dc2f0dccfc92aeaa1f994a663f3658375a6ca01af5cc8",
       "tag": "di-YieldPoolState",
       "selector": "0x21651cbc00b447fede5efb64a861f71bacace8e384f57e811f2614ff44cef12"
     },
@@ -623,7 +645,7 @@
           "key": false
         }
       ],
-      "class_hash": "0x731d410513689b5f83b757d1d70599ee07b4c61b391b234b22d6e80154e40d2",
+      "class_hash": "0x24046ea68bd674001bcb75e989ee91e9260b0eb52c791fc9bb2dd44fcebf50f",
       "tag": "di-YieldPosition",
       "selector": "0x2dbdab7f192a5d47c9de57993e8f65b9fe3f02a474944e0e6c48727c4facb46"
     },
@@ -670,7 +692,7 @@
           "key": false
         }
       ],
-      "class_hash": "0x1cbde04de201b197288147aa094f9788a2c35c691dec0cc0dcb017bac468e2b",
+      "class_hash": "0x2ff7ad69a1382df895c066bf60fd016cccfdcd1249848ad51f8699dc4d03cb8",
       "tag": "di-YieldRiskState",
       "selector": "0x1ce2d9b505507dba1927201462a7e13136fecc3bc5dcb8a617aa44403907d30"
     },
@@ -712,7 +734,7 @@
           "key": false
         }
       ],
-      "class_hash": "0x18e9b2f908f8372432a11738d636492698728211fe25494867600a66633ed9f",
+      "class_hash": "0x75d19038b1fa9b6de406e548e478ecc3da55eafce0e62d2a3f47cb36f0c3737",
       "tag": "di-YieldStrategyState",
       "selector": "0x8d81cdaeb107408384124ea0f714db35733b5e64d5ba3242831d55b0a27a50"
     }
@@ -843,7 +865,7 @@
         },
         {
           "name": "pending_word_len",
-          "type": "core::integer::u32"
+          "type": "core::internal::bounded_int::BoundedInt::<0, 30>"
         }
       ]
     },
@@ -2529,6 +2551,34 @@
     },
     {
       "type": "struct",
+      "name": "dojo_intro::models::AuctionCommitProofMeta",
+      "members": [
+        {
+          "name": "slot_post_id",
+          "type": "core::integer::u64"
+        },
+        {
+          "name": "bidder",
+          "type": "core::starknet::contract_address::ContractAddress"
+        },
+        {
+          "name": "reveal_tx_hash",
+          "type": "core::felt252"
+        }
+      ]
+    },
+    {
+      "type": "struct",
+      "name": "dojo_intro::models::AuctionCommitProofMetaValue",
+      "members": [
+        {
+          "name": "reveal_tx_hash",
+          "type": "core::felt252"
+        }
+      ]
+    },
+    {
+      "type": "struct",
       "name": "dojo_intro::models::AuctionCommitValue",
       "members": [
         {
@@ -3440,6 +3490,12 @@
     {
       "type": "event",
       "name": "dojo_intro::models::m_AuctionCommit::Event",
+      "kind": "enum",
+      "variants": []
+    },
+    {
+      "type": "event",
+      "name": "dojo_intro::models::m_AuctionCommitProofMeta::Event",
       "kind": "enum",
       "variants": []
     },

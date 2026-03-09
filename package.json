@@ -5,6 +5,7 @@
     "demo:record": "node scripts/record-demo-video.mjs"
   },
   "dependencies": {
+    "@taceo/proof-client-node": "^2.0.0",
     "starknet": "^9.2.1"
   },
   "devDependencies": {

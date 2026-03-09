@@ -9,6 +9,13 @@ primary_region = "cdg"
   SEALED_RELAY_RPC_URL = "https://api.cartridge.gg/x/starknet/sepolia"
   SEALED_RELAY_REPO_ROOT = "/app"
   SEALED_RELAY_JOBS_FILE = "/data/sealed-relayer-jobs.json"
+  SEALED_RELAY_TRACES_FILE = "/data/sealed-relayer-traces.json"
+  SEALED_RELAY_DRAND_PUBLIC_BASE_URL = "https://api.drand.sh/public/latest"
+  SEALED_RELAY_TIMELOCK_DECRYPT_CMD = "python3 /app/scripts/sealed-workers/timelock_decrypt_worker.py"
+  SEALED_RELAY_MPC_ATTEST_CMD = "python3 /app/scripts/sealed-workers/mpc_attest_worker.py"
+  SEALED_RELAY_MPC_PROVE_CMD = "node --experimental-specifier-resolution=node /app/scripts/sealed-workers/taceo_mpc_prove_worker.mjs"
+  SEALED_RELAY_TACEO_MODE = "off"
+  SEALED_RELAY_MPC_ATTEST_SUBMIT_ONCHAIN = "true"
 
 [http_service]
   internal_port = 3002

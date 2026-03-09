@@ -30,9 +30,20 @@ RUN npm install -g source-map-support
 
 RUN curl -L https://raw.githubusercontent.com/noir-lang/noirup/main/install | bash
 RUN /root/.nargo/bin/noirup -v 1.0.0-beta.19
-RUN curl -fsSL https://raw.githubusercontent.com/AztecProtocol/aztec-packages/master/barretenberg/bbup/install | bash \
-  && /root/.bb/bbup -nv 1.0.0-beta.19 \
-  && /root/.bb/bb --version
+COPY scripts/sealed-workers/patch_bb_starknet_v404.py /tmp/patch_bb_starknet_v404.py
+ARG BB_TAG=v4.0.4
+RUN mkdir -p /root/.bb \
+  && git clone --depth 1 --branch ${BB_TAG} https://github.com/AztecProtocol/aztec-packages.git /tmp/aztec-packages \
+  && cd /tmp/aztec-packages/barretenberg/cpp/src/barretenberg/nodejs_module \
+  && npm install --no-audit --no-fund node-addon-api \
+  && python3 /tmp/patch_bb_starknet_v404.py \
+  && cd /tmp/aztec-packages/barretenberg/cpp \
+  && cmake --preset gcc -DAVM=OFF -DCMAKE_CXX_FLAGS="-DSTARKNET_GARAGA_FLAVORS=1 -Wno-missing-field-initializers" \
+  && cmake --build --preset gcc --target bb -- -j1 \
+  && install -m 0755 /tmp/aztec-packages/barretenberg/cpp/build-gcc/bin/bb /root/.bb/bb \
+  && /root/.bb/bb --version \
+  && /root/.bb/bb prove --help | sed -n '1,40p' \
+  && rm -rf /tmp/aztec-packages /tmp/patch_bb_starknet_v404.py
 
 RUN python3 -m venv /app/.venv-garaga \
   && /app/.venv-garaga/bin/pip install --no-cache-dir --upgrade pip setuptools wheel \
@@ -40,6 +51,9 @@ RUN python3 -m venv /app/.venv-garaga \
 
 COPY sealed-relayer-server.js ./
 COPY zk ./zk
+COPY scripts/sealed-workers ./scripts/sealed-workers
+RUN chmod +x ./scripts/sealed-workers/*.py
+RUN /app/.venv-garaga/bin/python /app/scripts/sealed-workers/patch_garaga_honk.py
 
 ENV PATH="/root/.bb:/root/.nargo/bin:${PATH}"
 ENV SEALED_RELAY_NARGO_BIN="nargo"

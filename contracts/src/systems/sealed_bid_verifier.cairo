@@ -10,6 +10,17 @@ pub trait ISealedBidVerifier<T> {
         commitment: felt252,
         full_proof_with_hints: Span<felt252>
     ) -> bool;
+
+    fn verify_winner_settlement(
+        self: @T,
+        slot_post_id: u64,
+        group_id: u64,
+        winner_bidder: starknet::ContractAddress,
+        winning_bid: u128,
+        clearing_price: u128,
+        commit_root: felt252,
+        full_proof_with_hints: Span<felt252>
+    ) -> bool;
 }
 
 #[starknet::interface]
@@ -62,6 +73,17 @@ pub mod sealed_bid_verifier {
         inputs.append(bid_amount.into());
         inputs.append(salt);
         poseidon_hash_span(inputs.span())
+    }
+
+    fn read_public_input_felt(public_inputs: Span<u256>, index: usize) -> felt252 {
+        if index >= public_inputs.len() {
+            return 0;
+        }
+        let item = *public_inputs.at(index);
+        if item.high != 0 {
+            return 0;
+        }
+        item.low.into()
     }
 
     #[constructor]
@@ -117,6 +139,46 @@ pub mod sealed_bid_verifier {
                     }
                     let public_commitment: felt252 = first.low.into();
                     public_commitment == commitment
+                },
+                Result::Err(_) => false,
+            }
+        }
+
+        fn verify_winner_settlement(
+            self: @ContractState,
+            slot_post_id: u64,
+            group_id: u64,
+            winner_bidder: starknet::ContractAddress,
+            winning_bid: u128,
+            clearing_price: u128,
+            commit_root: felt252,
+            full_proof_with_hints: Span<felt252>
+        ) -> bool {
+            if winning_bid == 0 || clearing_price == 0 || clearing_price > winning_bid {
+                return false;
+            }
+
+            let garaga_verifier = self.garaga_verifier.read();
+            if garaga_verifier == zero_address() {
+                return false;
+            }
+            let verifier = IUltraKeccakZKHonkVerifierDispatcher { contract_address: garaga_verifier };
+            let result = verifier.verify_ultra_keccak_zk_honk_proof(full_proof_with_hints);
+            match result {
+                Result::Ok(public_inputs) => {
+                    // settlement circuit public inputs convention (sealed_tree_v1):
+                    // [slot_post_id, group_id, winner_bidder, commit_root, ...]
+                    if public_inputs.len() < 4 {
+                        return false;
+                    }
+                    let pub_slot = read_public_input_felt(public_inputs, 0);
+                    let pub_group = read_public_input_felt(public_inputs, 1);
+                    let pub_winner = read_public_input_felt(public_inputs, 2);
+                    let pub_root = read_public_input_felt(public_inputs, 3);
+                    pub_slot == slot_post_id.into() &&
+                    pub_group == group_id.into() &&
+                    pub_winner == winner_bidder.into() &&
+                    pub_root == commit_root
                 },
                 Result::Err(_) => false,
             }

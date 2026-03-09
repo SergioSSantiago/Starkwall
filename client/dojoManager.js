@@ -23,6 +23,8 @@ const AUCTION_POST_CREATION_FEE_STRK = 10;
 const POST_KIND_NORMAL = 0;
 const POST_KIND_AUCTION_CENTER = 1;
 const POST_KIND_AUCTION_SLOT = 2;
+const SEALED_PROTOCOL_CLASSIC = 0;
+const SEALED_PROTOCOL_DRAND = 1;
 
 function getPaidPostPrice(size) {
   if (size < 2) return 0;
@@ -206,6 +208,7 @@ export class DojoManager {
     this.avnuUserStakingCache = new Map();
     this.lastAvnuRouteProbeErrors = [];
     this.sealedConfigureSupport = null;
+    this.sealedProtocolConfigureSupport = null;
   }
 
   async supportsConfigureSealedEntrypoint() {
@@ -226,6 +229,27 @@ export class DojoManager {
         msg.includes('entry point') && msg.includes('not found')
       )
       return this.sealedConfigureSupport
+    }
+  }
+
+  async supportsConfigureSealedProtocolEntrypoint() {
+    if (typeof this.sealedProtocolConfigureSupport === 'boolean') return this.sealedProtocolConfigureSupport
+    try {
+      // Strict capability check: only enable when deployed class ABI explicitly
+      // exposes the entrypoint. If RPC/ABI fetch fails, default to false to avoid
+      // prompting the wallet with an unsupported transaction.
+      const classAt = await this.balanceProvider.getClassAt(this.actionsContract.address)
+      const abi = Array.isArray(classAt?.abi) ? classAt.abi : []
+      const hasEntrypoint = abi.some((entry) =>
+        String(entry?.type || '').toLowerCase() === 'function' &&
+        String(entry?.name || '') === 'configure_auction_sealed_protocol'
+      )
+      this.sealedProtocolConfigureSupport = Boolean(hasEntrypoint)
+      return this.sealedProtocolConfigureSupport
+    } catch (error) {
+      this.sealedProtocolConfigureSupport = false
+      console.warn('Could not verify configure_auction_sealed_protocol support; skipping optional call:', error?.message || error)
+      return false
     }
   }
 
@@ -1421,11 +1445,20 @@ export class DojoManager {
         calldata: [this.actionsContract.address, low, high],
       })
       await waitOrThrow(this.account, approveTx, 'Approve transaction reverted')
-      tx = await executeWithL2GasFallback(this.account, {
-        contractAddress: this.actionsContract.address,
-        entrypoint: 'create_auction_post_3x3',
-        calldata,
-      })
+      try {
+        tx = await executeWithL2GasFallback(this.account, {
+          contractAddress: this.actionsContract.address,
+          entrypoint: 'create_auction_post_3x3',
+          calldata,
+        })
+      } catch (createError) {
+        const detail = String(createError?.message || createError || 'unknown error')
+        throw new Error(
+          `Create auction failed after approve. ` +
+          `Approve only sets allowance (no post fee transfer); only network gas was spent. ` +
+          `Detail: ${detail}`
+        )
+      }
     }
     await waitOrThrow(this.account, tx, 'Create auction transaction reverted')
 
@@ -1443,8 +1476,9 @@ export class DojoManager {
     verifierAddress,
   ) {
     const supportsSplitConfig = await this.supportsConfigureSealedEntrypoint().catch(() => false)
+    const expectedGroupId = Number(await this.getPostCounter().catch(() => 0)) + 1
+    const drandProtocol = await this.buildDefaultDrandProtocolConfig().catch(() => null)
     if (supportsSplitConfig) {
-      const expectedGroupId = Number(await this.getPostCounter().catch(() => 0)) + 1
       const createTx = await this.createAuctionPost3x3(
         imageUrl,
         caption,
@@ -1459,6 +1493,19 @@ export class DojoManager {
         Number(revealEndTimeUnix),
         verifierAddress,
       )
+      if (drandProtocol) {
+        await this.configureAuctionSealedProtocol(
+          expectedGroupId,
+          drandProtocol.mode,
+          drandProtocol.drandGenesisRound,
+          drandProtocol.drandPeriodSecs,
+          false,
+          0,
+          '0x0',
+        ).catch((error) => {
+          console.warn('Could not configure default drand protocol, keeping classic mode:', error?.message || error)
+        })
+      }
       return createTx
     }
 
@@ -1505,13 +1552,35 @@ export class DojoManager {
         calldata: [this.actionsContract.address, low, high],
       })
       await waitOrThrow(this.account, approveTx, 'Approve transaction reverted')
-      tx = await executeWithL2GasFallback(this.account, {
-        contractAddress: this.actionsContract.address,
-        entrypoint: 'create_auction_post_3x3_sealed',
-        calldata,
-      })
+      try {
+        tx = await executeWithL2GasFallback(this.account, {
+          contractAddress: this.actionsContract.address,
+          entrypoint: 'create_auction_post_3x3_sealed',
+          calldata,
+        })
+      } catch (createError) {
+        const detail = String(createError?.message || createError || 'unknown error')
+        throw new Error(
+          `Create sealed auction failed after approve. ` +
+          `Approve only sets allowance (no post fee transfer); only network gas was spent. ` +
+          `Detail: ${detail}`
+        )
+      }
     }
     await waitOrThrow(this.account, tx, 'Create sealed auction transaction reverted')
+    if (drandProtocol) {
+      await this.configureAuctionSealedProtocol(
+        expectedGroupId,
+        drandProtocol.mode,
+        drandProtocol.drandGenesisRound,
+        drandProtocol.drandPeriodSecs,
+        false,
+        0,
+        '0x0',
+      ).catch((error) => {
+        console.warn('Could not configure default drand protocol, keeping classic mode:', error?.message || error)
+      })
+    }
 
     return tx
   }
@@ -1531,6 +1600,80 @@ export class DojoManager {
     })
     await waitOrThrow(this.account, tx, 'Configure sealed auction transaction reverted')
     return tx
+  }
+
+  async configureAuctionSealedProtocol(
+    groupId,
+    mode = SEALED_PROTOCOL_CLASSIC,
+    drandGenesisRound = 0,
+    drandPeriodSecs = 0,
+    requireMpcAttestation = false,
+    mpcThreshold = 0,
+    mpcCommitteeRoot = '0x0',
+  ) {
+    const supported = await this.supportsConfigureSealedProtocolEntrypoint().catch(() => false)
+    if (!supported) {
+      const skipError = new Error('configure_auction_sealed_protocol unsupported by current actions contract')
+      skipError.code = 'entrypoint_not_found'
+      throw skipError
+    }
+    let tx
+    try {
+      tx = await this.account.execute({
+        contractAddress: this.actionsContract.address,
+        entrypoint: 'configure_auction_sealed_protocol',
+        calldata: [
+          Number(groupId),
+          Number(mode),
+          Number(drandGenesisRound),
+          Number(drandPeriodSecs),
+          Boolean(requireMpcAttestation) ? 1 : 0,
+          Number(mpcThreshold),
+          String(mpcCommitteeRoot || '0x0'),
+        ],
+      })
+    } catch (error) {
+      const msg = String(error?.message || error || '').toLowerCase()
+      if (
+        msg.includes('entrypoint_not_found') ||
+        (msg.includes('entry point') && msg.includes('not found'))
+      ) {
+        this.sealedProtocolConfigureSupport = false
+      }
+      throw error
+    }
+    try {
+      await waitOrThrow(this.account, tx, 'Configure sealed protocol transaction reverted')
+    } catch (error) {
+      const msg = String(error?.message || error || '').toLowerCase()
+      if (
+        msg.includes('entrypoint_not_found') ||
+        (msg.includes('entry point') && msg.includes('not found'))
+      ) {
+        this.sealedProtocolConfigureSupport = false
+      }
+      throw error
+    }
+    return tx
+  }
+
+  async fetchLatestDrandRound() {
+    const res = await fetch('https://api.drand.sh/public/latest')
+    if (!res.ok) throw new Error(`drand latest failed (${res.status})`)
+    const body = await res.json().catch(() => ({}))
+    const round = Number(body?.round || 0)
+    if (!Number.isFinite(round) || round <= 0) throw new Error('Invalid drand round')
+    return round
+  }
+
+  async buildDefaultDrandProtocolConfig() {
+    const latest = await this.fetchLatestDrandRound().catch(() => 0)
+    const genesisRound = latest > 0 ? (latest + 1) : 1
+    return {
+      mode: SEALED_PROTOCOL_DRAND,
+      drandGenesisRound: genesisRound,
+      drandPeriodSecs: 30,
+    }
   }
 
   async placeAuctionBid(slotPostId, bidAmountStrk) {
@@ -1629,6 +1772,79 @@ export class DojoManager {
       groupId,
       bidAmount: Math.floor(amount),
       escrowAmount: Math.floor(escrowAmount),
+    }
+  }
+
+  async commitAuctionBidTimelock(
+    slotPostId,
+    bidAmountStrk,
+    saltFelt,
+    drandRound,
+    timelockCiphertextHash,
+    escrowAmountStrk = bidAmountStrk,
+    timelockScheme = 1,
+  ) {
+    const amount = Number(bidAmountStrk)
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error('Invalid bid amount')
+    const escrowAmount = Number(escrowAmountStrk)
+    if (!Number.isFinite(escrowAmount) || escrowAmount <= 0) throw new Error('Invalid escrow amount')
+    if (escrowAmount < amount) throw new Error('Escrow must cover sealed bid amount')
+    const slotId = Number(slotPostId)
+    if (!Number.isFinite(slotId) || slotId <= 0) throw new Error('Invalid slot')
+    const round = Number(drandRound || 0)
+    if (!Number.isFinite(round) || round <= 0) throw new Error('Invalid drand round')
+    const ciphertextHash = String(timelockCiphertextHash || '').trim()
+    if (!ciphertextHash || !ciphertextHash.startsWith('0x')) throw new Error('Invalid timelock ciphertext hash')
+    const posts = await this.queryAllPosts().catch(() => [])
+    const safePosts = Array.isArray(posts) ? posts.filter(Boolean) : []
+    const slotPost = safePosts.find((p) => Number(p?.id ?? 0) === slotId)
+    const caller = this.normalizeAddress(this.account?.address || '')
+    const creator = this.normalizeAddress(slotPost?.auction_group?.creator || '')
+    const owner = this.normalizeAddress(slotPost?.current_owner || '')
+    if ((creator && caller === creator) || (owner && caller === owner)) {
+      throw new Error('Creator cannot bid in own auction')
+    }
+    const groupId = Number(slotPost?.auction_group_id || slotPost?.auction_slot?.group_id || 0)
+    if (!groupId) {
+      throw new Error('Cannot resolve auction group for slot (indexer not ready yet). Reopen slot and retry in a few seconds.')
+    }
+    const commitment = simpleCommitment(slotId, groupId, this.account.address, Math.floor(amount), saltFelt)
+
+    const amountWei = BigInt(Math.floor(escrowAmount)) * ONE_STRK
+    const { low, high } = feltToU256(amountWei)
+    const tx = await this.account.execute([
+      {
+        contractAddress: PAYMENT_TOKEN_ADDRESS,
+        entrypoint: 'approve',
+        calldata: [this.actionsContract.address, low, high],
+      },
+      {
+        contractAddress: this.actionsContract.address,
+        entrypoint: 'commit_bid_timelock',
+        calldata: [
+          slotId,
+          commitment,
+          Math.floor(escrowAmount),
+          round,
+          Number(timelockScheme || 1),
+          ciphertextHash,
+        ],
+      },
+    ])
+    const receipt = await this.account.waitForTransaction(tx.transaction_hash)
+    if (!isTxReceiptSuccessful(receipt)) {
+      const reason = receipt?.revert_reason || receipt?.revertReason || 'Commit timelock bid transaction reverted'
+      throw new Error(reason)
+    }
+    return {
+      tx,
+      commitment,
+      slotId,
+      groupId,
+      bidAmount: Math.floor(amount),
+      escrowAmount: Math.floor(escrowAmount),
+      drandRound: round,
+      timelockCiphertextHash: ciphertextHash,
     }
   }
 
@@ -1857,7 +2073,7 @@ export class DojoManager {
       }
 
       // Query auction models too; they are not guaranteed to be included in Post envelopes.
-      const [slotEntities, groupEntities, sealedCfgEntities, commitEntities] = await Promise.all([
+      const [slotEntities, groupEntities, sealedCfgEntities, sealedProtocolEntities, commitEntities, timelockEntities, mpcEntities, treeEntities, settlementEntities] = await Promise.all([
         getAllEntities(
           () => new ToriiQueryBuilder().withClause(KeysClause(['di-AuctionSlot'], [], 'VariableLen').build()),
           'AuctionSlot query',
@@ -1877,17 +2093,53 @@ export class DojoManager {
           'AuctionSealedConfig query',
         ).catch(() => ({ items: [] })),
         getAllEntities(
+          () => new ToriiQueryBuilder().withClause(KeysClause(['di-AuctionSealProtocolCfg'], [], 'VariableLen').build()),
+          'AuctionSealProtocolCfg query',
+        ).catch(() => ({ items: [] })),
+        getAllEntities(
           () => new ToriiQueryBuilder().withClause(KeysClause(['di-AuctionCommit'], [], 'VariableLen').build()),
           'AuctionCommit query',
+        ).catch(() => ({ items: [] })),
+        getAllEntities(
+          () => new ToriiQueryBuilder().withClause(KeysClause(['di-AuctionTimelockCommit'], [], 'VariableLen').build()),
+          'AuctionTimelockCommit query',
+        ).catch(() => ({ items: [] })),
+        getAllEntities(
+          () => new ToriiQueryBuilder().withClause(KeysClause(['di-AuctionMpcSettlement'], [], 'VariableLen').build()),
+          'AuctionMpcSettlement query',
+        ).catch(() => ({ items: [] })),
+        getAllEntities(
+          () => new ToriiQueryBuilder().withClause(KeysClause(['di-AuctionCommitTreeState'], [], 'VariableLen').build()),
+          'AuctionCommitTreeState query',
+        ).catch(() => ({ items: [] })),
+        getAllEntities(
+          () => new ToriiQueryBuilder().withClause(KeysClause(['di-AuctionSettlementProof'], [], 'VariableLen').build()),
+          'AuctionSettlementProof query',
         ).catch(() => ({ items: [] })),
       ]);
 
       const slotItems = slotEntities?.items || [];
       const groupItems = groupEntities?.items || [];
       const sealedCfgItems = sealedCfgEntities?.items || [];
+      const sealedProtocolItems = sealedProtocolEntities?.items || [];
       const commitItems = commitEntities?.items || [];
+      const timelockItems = timelockEntities?.items || [];
+      const mpcItems = mpcEntities?.items || [];
+      const treeItems = treeEntities?.items || [];
+      const settlementItems = settlementEntities?.items || [];
 
-      const mergedItems = [...entities.items, ...slotItems, ...groupItems, ...sealedCfgItems, ...commitItems];
+      const mergedItems = [
+        ...entities.items,
+        ...slotItems,
+        ...groupItems,
+        ...sealedCfgItems,
+        ...sealedProtocolItems,
+        ...commitItems,
+        ...timelockItems,
+        ...mpcItems,
+        ...treeItems,
+        ...settlementItems,
+      ];
       const sdkPosts = this.parseSDKEntities(mergedItems);
       let posts = sdkPosts;
 
@@ -2012,7 +2264,14 @@ export class DojoManager {
     const slotByPostId = new Map();
     const groupById = new Map();
     const sealedConfigByGroupId = new Map();
+    const sealedProtocolByGroupId = new Map();
     const commitsBySlotPostId = new Map();
+    const commitProofMetaByKey = new Map();
+    const timelockByCommitKey = new Map();
+    const mpcBySlotPostId = new Map();
+    const treeBySlotPostId = new Map();
+    const settlementBySlotPostId = new Map();
+    const commitMetaKey = (slotPostId, bidder) => `${Number(slotPostId || 0)}:${normalizeHexAddress(bidder || '')}`;
 
     // First pass: collect AuctionSlot and AuctionGroup models from entity envelopes.
     items.forEach((entity) => {
@@ -2060,6 +2319,78 @@ export class DojoManager {
         }
       }
 
+      const protocolCfg = entity.models?.di?.AuctionSealProtocolCfg || entity.models?.di?.AuctionSealedProtocolConfig;
+      if (protocolCfg) {
+        const groupId = Number(protocolCfg.group_id ?? protocolCfg.groupId ?? 0)
+        if (groupId > 0) {
+          sealedProtocolByGroupId.set(groupId, {
+            group_id: groupId,
+            mode: Number(protocolCfg.mode ?? 0),
+            drand_genesis_round: Number(protocolCfg.drand_genesis_round ?? 0),
+            drand_period_secs: Number(protocolCfg.drand_period_secs ?? 0),
+            require_mpc_attestation: Boolean(protocolCfg.require_mpc_attestation),
+            mpc_threshold: Number(protocolCfg.mpc_threshold ?? 0),
+            mpc_committee_root: String(protocolCfg.mpc_committee_root ?? '0x0'),
+          })
+        }
+      }
+
+      const timelockCommit = entity.models?.di?.AuctionTimelockCommit;
+      if (timelockCommit) {
+        const slotPostId = Number(timelockCommit.slot_post_id ?? timelockCommit.slotPostId ?? 0);
+        const bidder = normalizeHexAddress(timelockCommit.bidder);
+        if (slotPostId > 0 && bidder && bidder !== '0x0') {
+          timelockByCommitKey.set(commitMetaKey(slotPostId, bidder), {
+            drand_round: Number(timelockCommit.drand_round ?? timelockCommit.drandRound ?? 0),
+            timelock_scheme: Number(timelockCommit.timelock_scheme ?? timelockCommit.timelockScheme ?? 0),
+            ciphertext_hash: String(timelockCommit.ciphertext_hash ?? timelockCommit.ciphertextHash ?? '0x0'),
+          });
+        }
+      }
+
+      const mpcSettlement = entity.models?.di?.AuctionMpcSettlement;
+      if (mpcSettlement) {
+        const slotPostId = Number(mpcSettlement.slot_post_id ?? mpcSettlement.slotPostId ?? 0);
+        if (slotPostId > 0) {
+          mpcBySlotPostId.set(slotPostId, {
+            attested: Boolean(mpcSettlement.attested),
+            attested_at: Number(mpcSettlement.attested_at ?? mpcSettlement.attestedAt ?? 0),
+            transcript_hash: String(mpcSettlement.transcript_hash ?? mpcSettlement.transcriptHash ?? '0x0'),
+            attestation_root: String(mpcSettlement.attestation_root ?? mpcSettlement.attestationRoot ?? '0x0'),
+            signer_bitmap_hash: String(mpcSettlement.signer_bitmap_hash ?? mpcSettlement.signerBitmapHash ?? '0x0'),
+          });
+        }
+      }
+
+      const treeState = entity.models?.di?.AuctionCommitTreeState;
+      if (treeState) {
+        const slotPostId = Number(treeState.slot_post_id ?? treeState.slotPostId ?? 0);
+        if (slotPostId > 0) {
+          treeBySlotPostId.set(slotPostId, {
+            commit_root: String(treeState.commit_root ?? treeState.commitRoot ?? '0x0'),
+            leaf_count: Number(treeState.leaf_count ?? treeState.leafCount ?? 0),
+            version: Number(treeState.version ?? 0),
+          });
+        }
+      }
+
+      const settlement = entity.models?.di?.AuctionSettlementProof;
+      if (settlement) {
+        const slotPostId = Number(settlement.slot_post_id ?? settlement.slotPostId ?? 0);
+        if (slotPostId > 0) {
+          settlementBySlotPostId.set(slotPostId, {
+            verified: Boolean(settlement.verified),
+            settled_at: Number(settlement.settled_at ?? settlement.settledAt ?? 0),
+            winner_bidder: String(settlement.winner_bidder ?? settlement.winnerBidder ?? '0x0'),
+            winning_bid: Number(settlement.winning_bid ?? settlement.winningBid ?? 0),
+            clearing_price: Number(settlement.clearing_price ?? settlement.clearingPrice ?? 0),
+            commit_root: String(settlement.commit_root ?? settlement.commitRoot ?? '0x0'),
+            proof_hash: String(settlement.proof_hash ?? settlement.proofHash ?? '0x0'),
+            protocol_version: Number(settlement.protocol_version ?? settlement.protocolVersion ?? 0),
+          });
+        }
+      }
+
       const commit = entity.models?.di?.AuctionCommit;
       if (commit) {
         const slotPostId = Number(commit.slot_post_id ?? commit.slotPostId ?? 0);
@@ -2073,8 +2404,22 @@ export class DojoManager {
             committed_at: Number(commit.committed_at ?? 0),
             revealed: Boolean(commit.revealed),
             revealed_bid: Number(commit.revealed_bid ?? 0),
+            reveal_tx_hash: '0x0',
             refunded: Boolean(commit.refunded),
+            commit_index: Number(commit.commit_index ?? commit.commitIndex ?? 0),
           });
+        }
+      }
+
+      const proofMeta = entity.models?.di?.AuctionCommitProofMeta;
+      if (proofMeta) {
+        const slotPostId = Number(proofMeta.slot_post_id ?? proofMeta.slotPostId ?? 0);
+        const bidder = normalizeHexAddress(proofMeta.bidder);
+        if (slotPostId > 0 && bidder && bidder !== '0x0') {
+          commitProofMetaByKey.set(
+            commitMetaKey(slotPostId, bidder),
+            normalizeHexAddress(proofMeta.reveal_tx_hash ?? proofMeta.revealTxHash ?? '0x0'),
+          );
         }
       }
     });
@@ -2103,7 +2448,15 @@ export class DojoManager {
       const slot = slotByPostId.get(postId) || null;
       const group = auctionGroupId > 0 ? (groupById.get(auctionGroupId) || null) : null;
       const sealedConfig = auctionGroupId > 0 ? (sealedConfigByGroupId.get(auctionGroupId) || null) : null;
-      const slotCommits = commitsBySlotPostId.get(postId) || [];
+      const sealedProtocol = auctionGroupId > 0 ? (sealedProtocolByGroupId.get(auctionGroupId) || null) : null;
+      const slotCommits = (commitsBySlotPostId.get(postId) || []).map((commit) => {
+        const key = commitMetaKey(commit.slot_post_id, commit.bidder);
+        return {
+          ...commit,
+          reveal_tx_hash: commitProofMetaByKey.get(key) || '0x0',
+          timelock: timelockByCommitKey.get(key) || null,
+        };
+      });
 
       posts.push({
         id: postId,
@@ -2124,6 +2477,10 @@ export class DojoManager {
         auction_slot: slot,
         auction_group: group,
         auction_sealed_config: sealedConfig,
+        auction_sealed_protocol: sealedProtocol,
+        auction_mpc_settlement: mpcBySlotPostId.get(postId) || null,
+        auction_commit_tree_state: treeBySlotPostId.get(postId) || null,
+        auction_settlement_proof: settlementBySlotPostId.get(postId) || null,
         auction_commits: slotCommits,
       });
     });

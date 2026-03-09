@@ -275,30 +275,63 @@ export class PostManager {
           return
         }
 
-        if (this.imageCache.has(imageUrl)) {
-          post.imageElement = this.imageCache.get(imageUrl)
+        const candidates = this.getImageUrlCandidates(imageUrl)
+        const cachedUrl = candidates.find((url) => this.imageCache.has(url))
+        if (cachedUrl) {
+          post.imageElement = this.imageCache.get(cachedUrl)
+          this.imageCache.set(imageUrl, post.imageElement)
           resolve()
           return
         }
 
         const img = new Image()
         img.crossOrigin = 'anonymous'
-        img.onload = () => {
-          post.imageElement = img
-          this.imageCache.set(imageUrl, img)
-          this.canvas.render()
-          resolve()
+
+        const loadFromCandidate = (idx) => {
+          if (idx >= candidates.length) {
+            console.error('Failed to load image:', imageUrl)
+            post.imageElement = null
+            resolve()
+            return
+          }
+          const candidateUrl = candidates[idx]
+          img.onload = () => {
+            post.imageElement = img
+            this.imageCache.set(candidateUrl, img)
+            this.imageCache.set(imageUrl, img)
+            // Promote healthy fallback URL to reduce repeated 429/challenge misses.
+            if (candidateUrl !== imageUrl) post.image_url = candidateUrl
+            this.canvas.render()
+            resolve()
+          }
+          img.onerror = () => {
+            loadFromCandidate(idx + 1)
+          }
+          img.src = candidateUrl
         }
-        img.onerror = () => {
-          console.error('Failed to load image:', imageUrl)
-          post.imageElement = null
-          resolve()
-        }
-        img.src = imageUrl
+        loadFromCandidate(0)
       })
     })
 
     await Promise.all(imagePromises)
+  }
+
+  getImageUrlCandidates(imageUrl) {
+    const raw = String(imageUrl || '').trim()
+    if (!raw) return []
+    if (raw.startsWith('data:image/')) return [raw]
+
+    const candidates = [raw]
+    const cidMatch =
+      raw.match(/^https?:\/\/gateway\.pinata\.cloud\/ipfs\/([^/?#]+)/i) ||
+      raw.match(/^https?:\/\/[^/]+\/ipfs\/([^/?#]+)/i)
+    const cid = cidMatch?.[1] ? String(cidMatch[1]) : ''
+    if (!cid) return candidates
+
+    candidates.push(`https://ipfs.io/ipfs/${cid}`)
+    candidates.push(`https://${cid}.ipfs.dweb.link/`)
+    candidates.push(`https://cloudflare-ipfs.com/ipfs/${cid}`)
+    return [...new Set(candidates)]
   }
 
   /**

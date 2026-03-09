@@ -77,6 +77,19 @@ pub struct AuctionCommit {
     pub revealed: bool,
     pub revealed_bid: u128,
     pub refunded: bool,
+    // Monotonic per-slot index assigned on first commit.
+    // Used for deterministic tie-break (lower index wins).
+    pub commit_index: u64,
+}
+
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct AuctionCommitProofMeta {
+    #[key]
+    pub slot_post_id: u64,
+    #[key]
+    pub bidder: ContractAddress,
+    pub reveal_tx_hash: felt252,
 }
 
 #[derive(Copy, Drop, Serde)]
@@ -88,6 +101,75 @@ pub struct AuctionSealedConfig {
     pub commit_end_time: u64,
     pub reveal_end_time: u64,
     pub verifier: ContractAddress,
+}
+
+// Hybrid protocol configuration:
+// mode: 0=classic reveal, 1=drand timelock, 2=drand timelock + co-SNARK MPC attestation.
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct AuctionSealProtocolCfg {
+    #[key]
+    pub group_id: u64,
+    pub mode: u8,
+    pub drand_genesis_round: u64,
+    pub drand_period_secs: u32,
+    pub require_mpc_attestation: bool,
+    pub mpc_threshold: u8,
+    pub mpc_committee_root: felt252,
+}
+
+// Commit metadata for drand-timelock flow.
+// ciphertext is kept off-chain; this model anchors deterministic hashes on-chain.
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct AuctionTimelockCommit {
+    #[key]
+    pub slot_post_id: u64,
+    #[key]
+    pub bidder: ContractAddress,
+    pub drand_round: u64,
+    pub timelock_scheme: u8,
+    pub ciphertext_hash: felt252,
+}
+
+// Co-SNARK/MPC attestation for a finalized settlement batch (per slot).
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct AuctionMpcSettlement {
+    #[key]
+    pub slot_post_id: u64,
+    pub attested: bool,
+    pub attested_at: u64,
+    pub transcript_hash: felt252,
+    pub attestation_root: felt252,
+    pub signer_bitmap_hash: felt252,
+}
+
+// Incremental commitment tree anchor for sealed_tree_v1 groups.
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct AuctionCommitTreeState {
+    #[key]
+    pub slot_post_id: u64,
+    pub commit_root: felt252,
+    pub leaf_count: u64,
+    pub version: u8,
+}
+
+// Final settlement payload verified by proof for sealed_tree_v1.
+#[derive(Copy, Drop, Serde)]
+#[dojo::model]
+pub struct AuctionSettlementProof {
+    #[key]
+    pub slot_post_id: u64,
+    pub verified: bool,
+    pub settled_at: u64,
+    pub winner_bidder: ContractAddress,
+    pub winning_bid: u128,
+    pub clearing_price: u128,
+    pub commit_root: felt252,
+    pub proof_hash: felt252,
+    pub protocol_version: u8,
 }
 
 #[derive(Copy, Drop, Serde)]

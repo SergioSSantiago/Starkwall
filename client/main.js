@@ -93,6 +93,38 @@ let uiHandlersInitialized = false
 let lastSocialRevalidationKickAt = 0
 
 const SOCIAL_FALLBACK_KEY = 'starkwall_social_fallback_v1'
+const finalizedProbeCache = new Map()
+
+async function probeSlotFinalizedOnchainGlobal(slotId) {
+  const id = Number(slotId || 0)
+  if (!Number.isFinite(id) || id <= 0) return false
+  const now = Date.now()
+  const cached = finalizedProbeCache.get(id)
+  if (cached && (now - Number(cached.at || 0)) < 20000) {
+    return Boolean(cached.finalized)
+  }
+  const provider = dojoManager?.account?.provider || dojoManager?.balanceProvider || null
+  const actionsAddress = String(dojoManager?.actionsContract?.address || '')
+  if (!provider || !actionsAddress) return false
+  const call = {
+    contractAddress: actionsAddress,
+    entrypoint: 'finalize_auction_slot',
+    calldata: [id],
+  }
+  try {
+    await Promise.race([
+      provider.callContract(call, 'latest'),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Finalize probe timeout')), 9000)),
+    ])
+    finalizedProbeCache.set(id, { finalized: false, at: now })
+    return false
+  } catch (error) {
+    const msg = String(error?.message || error || '').toLowerCase()
+    const finalized = msg.includes('already finalized')
+    finalizedProbeCache.set(id, { finalized, at: now })
+    return finalized
+  }
+}
 
 function readSocialFallback() {
   try {
@@ -1139,7 +1171,20 @@ const autoClaimingRefundSlots = new Set()
 const autoFinalizeBlockedSealedSlots = new Set()
 // Tracks slots known as finalized on-chain to avoid repeated finalize prompts while indexer catches up.
 const autoFinalizeConfirmedSlots = new Set()
-const ZK_DEBUG_LOGS = Boolean(import.meta.env?.DEV) || ['localhost', '127.0.0.1', '::1'].includes(String(globalThis?.location?.hostname || '').toLowerCase())
+const ZK_DEBUG_LOGS = (() => {
+  const host = String(globalThis?.location?.hostname || '').toLowerCase()
+  if (Boolean(import.meta.env?.DEV) || ['localhost', '127.0.0.1', '::1'].includes(host)) return true
+  try {
+    const url = new URL(String(globalThis?.location?.href || ''))
+    if (url.searchParams.get('zkdebug') === '1') {
+      localStorage.setItem('starkwall_zk_debug', '1')
+      return true
+    }
+    return localStorage.getItem('starkwall_zk_debug') === '1'
+  } catch {
+    return false
+  }
+})()
 
 function zkConsole(event, payload = {}) {
   if (!ZK_DEBUG_LOGS) return
@@ -1152,6 +1197,7 @@ function redactSealedDebugPayload(payload = {}) {
   const safe = { ...(payload || {}) }
   if (Object.prototype.hasOwnProperty.call(safe, 'bidAmount')) safe.bidAmount = '[hidden]'
   if (Object.prototype.hasOwnProperty.call(safe, 'salt')) safe.salt = '[hidden]'
+  if (Object.prototype.hasOwnProperty.call(safe, 'timelockPayload')) safe.timelockPayload = '[hidden]'
   return safe
 }
 
@@ -1392,6 +1438,23 @@ function randomSaltFelt() {
   return `0x${((a << 53n) + b).toString(16)}`
 }
 
+async function sha256HexString(value) {
+  const text = String(value || '')
+  const bytes = new TextEncoder().encode(text)
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  const arr = new Uint8Array(digest)
+  return `0x${Array.from(arr).map((b) => b.toString(16).padStart(2, '0')).join('')}`
+}
+
+function buildTimelockPayloadBase64({ bidAmount, salt }) {
+  const payload = {
+    bidAmount: Number(bidAmount || 0),
+    salt: String(salt || ''),
+    v: 1,
+  }
+  return btoa(JSON.stringify(payload))
+}
+
 function readSaltMap() {
   try {
     const raw = localStorage.getItem(SEALED_BID_SALT_MAP_KEY)
@@ -1583,35 +1646,78 @@ function hasRelayAvailable() {
   return getRelayBaseCandidates().length > 0
 }
 
-async function fetchRelayJsonWithFallback(pathname, init) {
+async function fetchRelayJsonWithFallback(pathname, init, options = {}) {
+  const timeoutMs = Number(options?.timeoutMs || 0)
   const bases = getRelayBaseCandidates()
   if (!bases.length) throw new Error('Relay not configured')
   let lastError = null
   for (const base of bases) {
     const endpoint = `${base}${pathname}`
     try {
-      const response = await fetch(endpoint, init)
+      const controller = timeoutMs > 0 ? new AbortController() : null
+      let timeoutId = controller
+        ? setTimeout(() => controller.abort(new Error(`Relay request timeout after ${timeoutMs}ms`)), timeoutMs)
+        : null
+      const requestInit = controller
+        ? { ...(init || {}), signal: controller.signal }
+        : init
+      const response = await fetch(endpoint, requestInit)
+      if (timeoutId) {
+        clearTimeout(timeoutId)
+        timeoutId = null
+      }
       const body = await response.json().catch(() => ({}))
       if (response.ok && body?.ok) return { response, body, endpoint }
-      lastError = new Error(String(body?.error || `Relay request failed (${response.status})`))
-    } catch (error) {
+      const error = new Error(String(body?.error || `Relay request failed (${response.status})`))
+      error.relay = { endpoint, status: response.status, body }
       lastError = error
+    } catch (error) {
+      const isAbort = String(error?.name || '').toLowerCase() === 'aborterror'
+      if (isAbort) {
+        const timeoutError = new Error(`Relay request timeout after ${timeoutMs}ms`)
+        timeoutError.relay = { endpoint, status: 0, body: { error: timeoutError.message } }
+        lastError = timeoutError
+      } else {
+      lastError = error
+      }
     }
   }
   throw lastError || new Error('Relay request failed')
 }
 
-async function scheduleSealedAutoReveal({ slotPostId, groupId, bidder, bidAmount, salt, commitEndTime, revealEndTime }) {
+async function scheduleSealedAutoReveal({
+  slotPostId,
+  groupId,
+  bidder,
+  bidAmount,
+  salt,
+  commitEndTime,
+  revealEndTime,
+  protocolMode = 'classic',
+  drandRound = 0,
+  timelockCiphertextHash = '',
+  timelockPayload = '',
+}) {
   if (!hasRelayAvailable()) return { ok: false, reason: 'relay-disabled' }
   const payload = {
     slotPostId: Number(slotPostId),
     groupId: Number(groupId),
     bidder: String(bidder || ''),
-    bidAmount: Number(bidAmount),
-    salt: String(salt || ''),
+    protocolMode: String(protocolMode || 'classic'),
     revealAfterUnix: Number(commitEndTime || 0),
     finalizeAfterUnix: Number(revealEndTime || 0),
   }
+  const bidNum = Number(bidAmount || 0)
+  const saltHex = String(salt || '')
+  if (bidNum > 0 && saltHex) {
+    payload.bidAmount = bidNum
+    payload.salt = saltHex
+  }
+  const round = Number(drandRound || 0)
+  const cipherHash = String(timelockCiphertextHash || '')
+  if (round > 0) payload.drandRound = round
+  if (cipherHash && cipherHash.startsWith('0x')) payload.timelockCiphertextHash = cipherHash
+  if (timelockPayload) payload.timelockPayload = String(timelockPayload)
   zkConsole('schedule:request', redactSealedDebugPayload(payload))
   const { response, body } = await fetchRelayJsonWithFallback('/sealed/schedule', {
     method: 'POST',
@@ -1694,24 +1800,86 @@ async function requestSealedImmediateReverify({ slotPostId, jobId = '', bidder =
     revealTxHash: payload.revealTxHash ? shortTxHash(payload.revealTxHash) : '',
     verifierAddress: payload.verifierAddress,
   })
-  const { response, body } = await fetchRelayJsonWithFallback('/sealed/reverify-now', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
-  zkConsole('reverify-now:response', {
-    ok: response.ok && Boolean(body?.ok),
-    status: response.status,
-    relayStatus: body?.status || '',
-    valid: body?.valid,
-  })
+  try {
+    const { response, body, endpoint } = await fetchRelayJsonWithFallback('/sealed/reverify-now', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }, { timeoutMs: 130000 })
+    zkConsole('reverify-now:response', {
+      ok: response.ok && Boolean(body?.ok),
+      status: response.status,
+      relayStatus: body?.status || '',
+      valid: body?.valid,
+      endpoint,
+      debug: body?.debug || null,
+    })
+    return {
+      ok: true,
+      status: String(body.status || ''),
+      valid: body?.valid === null ? null : Boolean(body.valid),
+      proofFelts: Number(body.proofFelts || 0),
+      proofCalldataHash: String(body.proofCalldataHash || ''),
+      jobId: String(body.jobId || ''),
+      unavailableReason: String(body?.unavailableReason || ''),
+      attestedByOnchainSettlement: Boolean(body?.attestedByOnchainSettlement),
+      attestedReason: String(body?.attestedReason || ''),
+      debug: body?.debug || null,
+    }
+  } catch (error) {
+    const relayMeta = error?.relay || null
+    const relayDebug = relayMeta?.body?.debug || null
+    zkConsole('reverify-now:error', {
+      message: String(error?.message || error || 'unknown error'),
+      endpoint: relayMeta?.endpoint || '',
+      status: relayMeta?.status || 0,
+      debug: relayDebug,
+    })
+    if (error && typeof error === 'object') {
+      error.relayMeta = relayMeta
+      error.relayDebug = relayDebug
+    }
+    throw error
+  }
+}
+
+async function requestSealedProofBundle({ slotPostId, jobId = '', bidder = '' }) {
+  if (!hasRelayAvailable()) return { ok: false, reason: 'relay-disabled' }
+  const query = new URLSearchParams()
+  if (Number(slotPostId || 0) > 0) query.set('slotPostId', String(Number(slotPostId)))
+  if (String(jobId || '').trim()) query.set('jobId', String(jobId).trim())
+  if (String(bidder || '').trim()) query.set('bidder', String(bidder).trim())
+  const suffix = query.toString()
+  const { body } = await fetchRelayJsonWithFallback(`/sealed/proof-bundle${suffix ? `?${suffix}` : ''}`, {
+    method: 'GET',
+  }, { timeoutMs: 30000 })
   return {
     ok: true,
-    status: String(body.status || ''),
-    valid: Boolean(body.valid),
-    proofFelts: Number(body.proofFelts || 0),
-    proofCalldataHash: String(body.proofCalldataHash || ''),
-    jobId: String(body.jobId || ''),
+    bundle: body?.bundle || null,
+  }
+}
+
+async function requestSealedVerifyProofNow({ slotPostId, jobId = '', bidder = '' }) {
+  if (!hasRelayAvailable()) return { ok: false, reason: 'relay-disabled' }
+  const { body } = await fetchRelayJsonWithFallback('/sealed/verify-proof-now', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      slotPostId: Number(slotPostId || 0),
+      jobId: String(jobId || ''),
+      bidder: String(bidder || ''),
+      verifierAddress: String(SEALED_BID_VERIFIER_ADDRESS || ''),
+    }),
+  }, { timeoutMs: 30000 })
+  return {
+    ok: true,
+    valid: Boolean(body?.valid),
+    output: Array.isArray(body?.output) ? body.output : [],
+    proofFelts: Number(body?.proofFelts || 0),
+    proofCalldataHash: String(body?.proofCalldataHash || ''),
+    commitment: String(body?.commitment || ''),
+    verifierAddress: String(body?.verifierAddress || ''),
+    jobId: String(body?.jobId || ''),
   }
 }
 
@@ -1761,12 +1929,64 @@ async function fetchSealedRelayJobs(force = false) {
 
 function relayStageLabel(status, kind = 'reveal') {
   const s = String(status || '')
+  // If proof artifacts exist but status is still scheduled, surface that we are past commit wait.
+  if (kind === 'reveal' && s === 'scheduled') return 'Waiting for commit phase to end (queued)'
   if (s === 'running') return kind === 'reveal' ? 'Generating ZK proof (Garaga)...' : 'Submitting transaction...'
   if (s === 'submitted') return kind === 'reveal' ? 'Proof verified onchain' : 'Submitted onchain'
-  if (s === 'scheduled') return kind === 'reveal' ? 'Waiting for commit phase to end (queued)' : 'Queued'
+  if (s === 'scheduled') return 'Queued'
   if (s === 'skipped') return kind === 'reveal' ? 'Skipped (privacy or phase constraint)' : 'Skipped'
   if (s === 'failed') return 'Failed'
   return 'N/A'
+}
+
+function relayRevealStageLabelForJob(job = null) {
+  const status = relayRevealDisplayStatus(job)
+  const errorCode = String(job?.errorCode || '').toLowerCase()
+  if ((status === 'scheduled' || status === 'running') && errorCode === 'reveal_failed') {
+    const attempts = Number(job?.revealAttempts || 0)
+    return attempts > 0
+      ? `Retrying reveal after transient failure (attempt ${attempts})`
+      : 'Retrying reveal after transient failure'
+  }
+  if (
+    String(status) === 'failed' &&
+    !job?.revealTxHash &&
+    (String(job?.finalizeStatus || '') === 'submitted' || String(job?.finalizeStatus || '') === 'running')
+  ) {
+    return 'On-chain settlement confirmed'
+  }
+  if (String(status) === 'scheduled') {
+    const revealAfter = Number(job?.revealAfterUnix || 0)
+    const now = Math.floor(Date.now() / 1000)
+    const hasArtifacts = Boolean(
+      job?.zkTrace?.witnessHash ||
+      job?.zkTrace?.proofHash ||
+      job?.zkTrace?.proofFelts,
+    )
+    if (hasArtifacts) return 'Proof generated; waiting for relay submission'
+    if (revealAfter > 0 && now >= revealAfter) return 'Queued (ready to process)'
+  }
+  return relayStageLabel(status, 'reveal')
+}
+
+function relayFinalizeStageLabelForJob(job = null) {
+  const status = String(job?.finalizeStatus || '')
+  const errorCode = String(job?.finalizeErrorCode || '').toLowerCase()
+  if ((status === 'running' || status === 'scheduled') && errorCode === 'relayer_insufficient_balance') {
+    return 'Queued (awaiting relayer balance top-up)'
+  }
+  return relayStageLabel(status, 'finalize')
+}
+
+function relayRefundStageLabelForJob(job = null) {
+  const refundStatus = String(job?.refundStatus || '')
+  const finalizeStatus = String(job?.finalizeStatus || '')
+  const hasRefundTx = Boolean(job?.refundTxHash)
+  const settledOnchain = finalizeStatus === 'submitted' || finalizeStatus === 'running'
+  if (refundStatus === 'failed' && settledOnchain && !hasRefundTx) {
+    return 'Not required for settled slot'
+  }
+  return relayStageLabel(refundStatus, 'refund')
 }
 
 function relayRevealDisplayStatus(job) {
@@ -1798,7 +2018,19 @@ function summarizeRelayPipelineForSlot(jobs, slotId, bidder, post = null) {
   const slot = post?.auction_slot || null
   const hasWinnerOnchain = Boolean(slot?.has_bid)
   const isFinalizedOnchain = Boolean(slot?.finalized)
+  const sealedCfg = post?.auction_group_config?.sealed || null
+  const revealEndTs = Number(sealedCfg?.reveal_end_time || post?.auction_group_config?.end_time || 0)
+  const endedWithoutBids = Boolean(
+    Number(post?.auction_group_config?.auction_mode || 0) === 2 &&
+    revealEndTs > 0 &&
+    Math.floor(Date.now() / 1000) >= revealEndTs &&
+    !hasWinnerOnchain &&
+    !isFinalizedOnchain
+  )
   if (!slotJobs.length) {
+    if (endedWithoutBids) {
+      return '<br/><strong>ZK pipeline:</strong> No bids were committed for this slot. No winner to reveal/finalize.'
+    }
     if (hasWinnerOnchain || isFinalizedOnchain) {
       return '<br/><strong>ZK pipeline:</strong> No relayer job found for this slot (history missing or cleaned).'
     }
@@ -1817,12 +2049,15 @@ function summarizeRelayPipelineForSlot(jobs, slotId, bidder, post = null) {
     chosen?.finalizeTxHash ||
     chosen?.refundTxHash
   )
+  const hasAnyFinalizeSuccess = slotJobs.some((j) =>
+    String(j?.finalizeStatus || '') === 'submitted' || Boolean(j?.finalizeTxHash)
+  )
   if ((isFinalizedOnchain || hasWinnerOnchain) && !chosenHasEvidence) {
     return '<br/><strong>ZK pipeline:</strong> On-chain state confirmed (relay trace unavailable).'
   }
 
   const lines = [
-    `<br/><strong>ZK pipeline:</strong> ${relayStageLabel(relayRevealDisplayStatus(chosen), 'reveal')}`,
+    `<br/><strong>ZK pipeline:</strong> ${relayRevealStageLabelForJob(chosen)}`,
   ]
 
   // If this wallet has no commit in this slot, keep status generic and privacy-safe.
@@ -1837,22 +2072,35 @@ function summarizeRelayPipelineForSlot(jobs, slotId, bidder, post = null) {
 
   if (chosen?.revealTxHash) lines.push(`<br/>Reveal tx: ${shortTxHash(chosen.revealTxHash)}`)
   if (chosen?.finalizeStatus && chosen.finalizeStatus !== 'scheduled') {
-    lines.push(`<br/>Finalize: ${relayStageLabel(chosen.finalizeStatus, 'finalize')}`)
+    lines.push(`<br/>Finalize: ${relayFinalizeStageLabelForJob(chosen)}`)
     const hint = relayErrorHint(chosen, 'finalize')
     if (hint) lines.push(`<br/>Finalize detail: ${hint}`)
   }
   if (chosen?.finalizeTxHash) lines.push(`<br/>Finalize tx: ${shortTxHash(chosen.finalizeTxHash)}`)
   if (chosen?.refundStatus && chosen.refundStatus !== 'scheduled') {
-    lines.push(`<br/>Refund: ${relayStageLabel(chosen.refundStatus, 'refund')}`)
+    const refundLabel = relayRefundStageLabelForJob(chosen)
+    lines.push(`<br/>Refund: ${refundLabel}`)
     const hint = relayErrorHint(chosen, 'refund')
-    if (hint) lines.push(`<br/>Refund detail: ${hint}`)
+    if (hint && refundLabel !== 'Not required for settled slot') lines.push(`<br/>Refund detail: ${hint}`)
   }
   if (chosen?.refundTxHash) lines.push(`<br/>Refund tx: ${shortTxHash(chosen.refundTxHash)}`)
   if (chosen?.status === 'scheduled' && Number(chosen?.revealAfterUnix || 0) > 0) {
     const wait = Math.max(0, Number(chosen.revealAfterUnix) - Math.floor(Date.now() / 1000))
     lines.push(`<br/>Proof starts after: ${formatRelayUnix(chosen.revealAfterUnix)} (in ${formatRemaining(wait)})`)
   }
-  if (chosen?.status === 'failed') {
+  const revealFailedButSettled = Boolean(
+    chosen?.status === 'failed' &&
+    !chosen?.revealTxHash &&
+    (
+      String(chosen?.finalizeStatus || '') === 'submitted' ||
+      String(chosen?.finalizeStatus || '') === 'running' ||
+      isFinalizedOnchain ||
+      hasAnyFinalizeSuccess
+    ),
+  )
+  if (revealFailedButSettled) {
+    lines.push('<br/>Sealed settlement is confirmed on-chain for this slot.')
+  } else if (chosen?.status === 'failed') {
     const hint = relayErrorHint(chosen, 'reveal')
     lines.push(`<br/>Proof status: ${hint || 'Relayer reveal failed; automatic retries may continue.'}`)
   }
@@ -1886,6 +2134,38 @@ function getRelayJobForSlot(jobs, slotId, bidder) {
     .sort(byBest)
   const sorted = filtered.sort(byBest)
   return mine[0] || sorted[0] || null
+}
+
+function getRelayVerificationJobForSlot(jobs, post, bidder) {
+  const slotId = Number(post?.id || 0)
+  const filtered = (Array.isArray(jobs) ? jobs : []).filter((j) => Number(j?.slotPostId || 0) === slotId)
+  if (!filtered.length) return null
+  const winnerBidder = normalizeSocialAddress(String(post?.auction_slot?.highest_bidder || ''))
+  const bidderNorm = normalizeSocialAddress(bidder || '')
+  const score = (j) => {
+    const sameAsWinner = normalizeSocialAddress(j?.bidder || '') === winnerBidder
+    const sameAsMine = normalizeSocialAddress(j?.bidder || '') === bidderNorm
+    const hasProofCalldata = Boolean(j?.hasProofCalldata)
+    const hasRevealTx = Boolean(j?.revealTxHash)
+    const hasAnyTx = Boolean(j?.revealTxHash || j?.finalizeTxHash || j?.refundTxHash)
+    const hasZkTrace = Boolean(j?.zkTrace && typeof j.zkTrace === 'object' && Object.keys(j.zkTrace).length > 0)
+    const reveal = String(j?.status || '')
+    const activeReveal = reveal === 'submitted' || reveal === 'running'
+    return (
+      (sameAsWinner ? 200 : 0) +
+      (hasProofCalldata ? 170 : 0) +
+      (hasRevealTx ? 120 : 0) +
+      (activeReveal ? 80 : 0) +
+      (hasZkTrace ? 60 : 0) +
+      (hasAnyTx ? 25 : 0) +
+      (sameAsMine ? 5 : 0)
+    )
+  }
+  return [...filtered].sort((a, b) => {
+    const s = score(b) - score(a)
+    if (s !== 0) return s
+    return Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0)
+  })[0] || null
 }
 
 function shouldShowVerifyProofButton(job, post = null) {
@@ -1933,6 +2213,25 @@ async function enrichSealedProofStatus(post, postAuctionInfo, expectedPostId, ve
     const jobs = hasRelayAvailable() ? await fetchSealedRelayJobs() : []
     const modal = document.getElementById('postDetailsModal')
     if (!modal || String(modal?.dataset?.postId || '') !== String(expectedPostId || '')) return
+    const slotId = Number(post?.id || 0)
+    const slot = post?.auction_slot || null
+    // If relay already submitted finalize on-chain, treat slot as finalized in UI
+    // even when indexer/Torii is delayed.
+    if (slot && !slot.finalized && Number.isFinite(slotId) && slotId > 0) {
+      const hasRelayFinalizeSuccess = (Array.isArray(jobs) ? jobs : []).some((j) =>
+        Number(j?.slotPostId || 0) === slotId &&
+        (String(j?.finalizeStatus || '') === 'submitted' || Boolean(String(j?.finalizeTxHash || '').trim()))
+      )
+      if (hasRelayFinalizeSuccess) {
+        slot.finalized = true
+        if (currentPost && Number(currentPost?.id || 0) === slotId && currentPost?.auction_slot) {
+          currentPost.auction_slot.finalized = true
+        }
+        // Re-render details immediately so winner actions become available.
+        showPostDetails(post, 'post-details')
+        return
+      }
+    }
     const job = getRelayJobForSlot(jobs, Number(post?.id || 0), currentAccount?.address || '')
     const snippet = summarizeRelayPipelineForSlot(jobs, Number(post?.id || 0), currentAccount?.address || '', post)
     if (verifyProofBtn) {
@@ -2004,7 +2303,7 @@ async function uploadImageToMediaEndpoint(dataUrl, purpose = 'post') {
       })
       const body = await response.json().catch(() => ({}))
       if (response.ok && body?.ok && String(body?.url || '').startsWith('http')) {
-        return String(body.url)
+        return normalizePreferredMediaUrl(String(body.url))
       }
       lastError = new Error(String(body?.error || `Media upload failed (${response.status})`))
     } catch (error) {
@@ -2012,6 +2311,14 @@ async function uploadImageToMediaEndpoint(dataUrl, purpose = 'post') {
     }
   }
   throw lastError || new Error('Media upload failed')
+}
+
+function normalizePreferredMediaUrl(rawUrl) {
+  const url = String(rawUrl || '').trim()
+  if (!url) return url
+  const cidMatch = url.match(/^https?:\/\/gateway\.pinata\.cloud\/ipfs\/([^/?#]+)/i)
+  if (!cidMatch?.[1]) return url
+  return `https://ipfs.io/ipfs/${cidMatch[1]}`
 }
 
 function requiresOffchainMedia({ isAuction = false } = {}) {
@@ -3194,7 +3501,13 @@ function setupUIHandlers() {
         )
 
         try {
-          await createAuction(imageUrl)
+          const createdTx = await createAuction(imageUrl)
+          const createdTxHash = String(createdTx?.transaction_hash || createdTx?.transactionHash || '').trim()
+          showToast(
+            createdTxHash
+              ? `Auction created on-chain (${shortTxHash(createdTxHash)}). Indexer sync may take ~10-60s.`
+              : 'Auction created on-chain. Indexer sync may take ~10-60s.'
+          )
         } catch (auctionError) {
           if (!isInsufficientMaxL2GasError(auctionError)) {
             throw auctionError
@@ -3205,7 +3518,13 @@ function setupUIHandlers() {
             console.warn('Auction hit max L2Gas. Retrying with shorter caption...')
             showToast('Retrying auction with lighter metadata...')
             submitPostBtn.textContent = 'Retrying auction...'
-            await createAuction(imageUrl, '', username)
+            const createdTx = await createAuction(imageUrl, '', username)
+            const createdTxHash = String(createdTx?.transaction_hash || createdTx?.transactionHash || '').trim()
+            showToast(
+              createdTxHash
+                ? `Auction created on-chain (${shortTxHash(createdTxHash)}). Indexer sync may take ~10-60s.`
+                : 'Auction created on-chain. Indexer sync may take ~10-60s.'
+            )
             return
           } catch (retryTextError) {
             if (!isInsufficientMaxL2GasError(retryTextError)) throw retryTextError
@@ -3227,7 +3546,13 @@ function setupUIHandlers() {
             throw auctionError
           }
           setPhotoFromDataUrl(tinyImageUrl)
-          await createAuction(tinyImageUrl, '', username)
+          const createdTx = await createAuction(tinyImageUrl, '', username)
+          const createdTxHash = String(createdTx?.transaction_hash || createdTx?.transactionHash || '').trim()
+          showToast(
+            createdTxHash
+              ? `Auction created on-chain (${shortTxHash(createdTxHash)}). Indexer sync may take ~10-60s.`
+              : 'Auction created on-chain. Indexer sync may take ~10-60s.'
+          )
         }
       } else {
         await postManager.createPost(imageUrl, caption, username, size, isPaid, () => {
@@ -3308,6 +3633,7 @@ function setupPostDetailsHandlers() {
   const postDetailsModal = document.getElementById('postDetailsModal')
   const sealedVerifyModal = document.getElementById('sealedVerifyModal')
   const sealedVerifyContent = document.getElementById('sealedVerifyContent')
+  const viewSealedProofBtn = document.getElementById('viewSealedProofBtn')
   const reverifySealedBtn = document.getElementById('reverifySealedBtn')
   const closeSealedVerifyBtn = document.getElementById('closeSealedVerifyBtn')
   const closePostDetailsBtn = document.getElementById('closePostDetails')
@@ -3346,6 +3672,8 @@ function setupPostDetailsHandlers() {
   let wonSlotImageDataUrl = ''
   let wonSlotWebcamStream = null
   let currentSealedVerifyContext = null
+  let lastSealedProofBundle = null
+  let lastSealedReverifyDebug = null
 
   const explorerBase = IS_SEPOLIA ? 'https://sepolia.voyager.online' : 'https://voyager.online'
   const canonicalHexAddress = (value) => {
@@ -3395,37 +3723,6 @@ function setupPostDetailsHandlers() {
       return { state: 'unknown', label: msg }
     }
   }
-  const finalizedProbeCache = new Map()
-  const probeSlotFinalizedOnchain = async (slotId) => {
-    const id = Number(slotId || 0)
-    if (!Number.isFinite(id) || id <= 0) return false
-    const now = Date.now()
-    const cached = finalizedProbeCache.get(id)
-    if (cached && (now - Number(cached.at || 0)) < 20000) {
-      return Boolean(cached.finalized)
-    }
-    const provider = dojoManager?.account?.provider || dojoManager?.balanceProvider || null
-    const actionsAddress = String(dojoManager?.actionsContract?.address || '')
-    if (!provider || !actionsAddress) return false
-    const call = {
-      contractAddress: actionsAddress,
-      entrypoint: 'finalize_auction_slot',
-      calldata: [id],
-    }
-    try {
-      await Promise.race([
-        provider.callContract(call, 'latest'),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Finalize probe timeout')), 9000)),
-      ])
-      finalizedProbeCache.set(id, { finalized: false, at: now })
-      return false
-    } catch (error) {
-      const msg = String(error?.message || error || '').toLowerCase()
-      const finalized = msg.includes('already finalized')
-      finalizedProbeCache.set(id, { finalized, at: now })
-      return finalized
-    }
-  }
   const computeOnchainVerdict = (items) => {
     const states = (items || []).map((x) => x?.state)
     if (!states.length) return { state: 'unknown', label: 'No transaction hash available yet' }
@@ -3436,24 +3733,84 @@ function setupPostDetailsHandlers() {
   }
   const closeSealedVerifyModal = () => {
     currentSealedVerifyContext = null
+    lastSealedReverifyDebug = null
     if (sealedVerifyModal) sealedVerifyModal.classList.remove('active')
+  }
+  const renderSealedReverifyDebug = (debug) => {
+    const pre = document.getElementById('sealedReverifyDebugPre')
+    if (!pre) return
+    if (!debug || typeof debug !== 'object') {
+      pre.textContent = 'n/a'
+      return
+    }
+    try {
+      pre.textContent = JSON.stringify(debug, null, 2)
+    } catch {
+      pre.textContent = String(debug)
+    }
+  }
+  const renderSealedProofBundle = (bundle) => {
+    const pre = document.getElementById('sealedProofBundlePre')
+    if (!pre) return
+    if (!bundle || typeof bundle !== 'object') {
+      pre.textContent = 'Not loaded yet.'
+      return
+    }
+    const proof = Array.isArray(bundle?.proofCalldata) ? bundle.proofCalldata.map((v) => String(v)) : []
+  const artifacts = Array.isArray(bundle?.artifactBundles) ? bundle.artifactBundles : []
+    const preview = proof.length > 16
+      ? [...proof.slice(0, 8), `... (${proof.length - 16} more felts) ...`, ...proof.slice(-8)]
+      : proof
+    pre.textContent = JSON.stringify({
+      slotPostId: Number(bundle?.slotPostId || 0),
+      groupId: Number(bundle?.groupId || 0),
+      bidder: String(bundle?.bidder || ''),
+      jobId: String(bundle?.jobId || ''),
+      verifierAddress: String(bundle?.verifierAddress || ''),
+      proofFelts: Number(bundle?.proofFelts || 0),
+      proofCalldataHash: String(bundle?.proofCalldataHash || ''),
+      proofPreview: preview,
+      artifactBundles: artifacts,
+      zkTrace: bundle?.zkTrace || {},
+    }, null, 2)
   }
   const renderSealedVerifyModal = ({ slotId, job, txRows, verdict }) => {
     if (!sealedVerifyContent || !sealedVerifyModal) return
     const actionContractAddr = String(dojoManager?.actionsContract?.address || '')
     const verifierAddr = String(SEALED_BID_VERIFIER_ADDRESS || '')
-    const z = job?.zkTrace || {}
+    const settlementProof = currentPost?.auction_settlement_proof || null
+    const commitTree = currentPost?.auction_commit_tree_state || null
+    const z = {
+      ...(job?.zkTrace || {}),
+      // Fallback to on-chain proof metadata when relay trace is partial.
+      proofHash: String((job?.zkTrace?.proofHash || settlementProof?.proof_hash || '') || ''),
+      proofCalldataHash: String((job?.zkTrace?.proofCalldataHash || '') || ''),
+      commitRoot: String((job?.zkTrace?.commitRoot || settlementProof?.commit_root || commitTree?.commit_root || '') || ''),
+      proofFelts: Number(job?.zkTrace?.proofFelts || 0),
+    }
+    const recoveredFromTx = String(z?.recoveredFromTx || '')
+    const recoveredAt = Number(z?.recoveredAt || 0)
+    const recoveredLabel = recoveredAt > 0
+      ? new Date(recoveredAt).toLocaleString()
+      : ''
     const isOnchainOnly = String(job?.id || '') === 'onchain-only'
     const hasProofCalldata = Boolean(job?.hasProofCalldata)
     const canRecoverFromTx = Boolean(String(job?.revealTxHash || '') && Number(job?.groupId || 0) > 0)
+    const winnerBidder = normalizeSocialAddress(String(currentPost?.auction_slot?.highest_bidder || ''))
+    const hasDirectEvidence = Boolean(hasProofCalldata || job?.revealTxHash || job?.zkTrace)
+    const selectedBidder = hasDirectEvidence
+      ? String(job?.bidder || '')
+      : (winnerBidder || String(job?.bidder || ''))
     currentSealedVerifyContext = {
       slotId: Number(slotId || 0),
       jobId: String(job?.id || ''),
-      bidder: String(job?.bidder || ''),
+      bidder: String(selectedBidder || ''),
       groupId: Number(job?.groupId || 0),
       revealTxHash: String(job?.revealTxHash || ''),
       hasProofCalldata,
     }
+    lastSealedProofBundle = null
+    renderSealedProofBundle(lastSealedProofBundle)
     if (reverifySealedBtn) {
       const hasRelayJob = currentSealedVerifyContext.jobId && currentSealedVerifyContext.jobId !== 'onchain-only'
       const canRecoverFromTx = Boolean(
@@ -3461,12 +3818,21 @@ function setupPostDetailsHandlers() {
         currentSealedVerifyContext.groupId > 0 &&
         hasRelayAvailable(),
       )
-      const canReverify = Boolean((hasRelayJob && hasProofCalldata && hasRelayAvailable()) || canRecoverFromTx)
+      const canAutoRecoverBySlot = Boolean(
+        currentSealedVerifyContext.slotId > 0 &&
+        hasRelayAvailable(),
+      )
+      const canReverify = Boolean((hasRelayJob && hasProofCalldata && hasRelayAvailable()) || canRecoverFromTx || canAutoRecoverBySlot)
       reverifySealedBtn.disabled = !canReverify
       reverifySealedBtn.textContent = canReverify ? 'Re-verify On-chain Now' : 'Re-verify Unavailable'
       reverifySealedBtn.title = canReverify
         ? ''
-        : 'Re-verify requires preserved proof calldata or a recoverable reveal tx hash.'
+        : 'Re-verify requires preserved proof calldata, a recoverable reveal tx hash, or on-chain slot recovery.'
+    }
+    if (viewSealedProofBtn) {
+      const canViewBundle = Boolean(hasRelayAvailable() && Number(currentSealedVerifyContext?.slotId || 0) > 0)
+      viewSealedProofBtn.disabled = !canViewBundle
+      viewSealedProofBtn.title = canViewBundle ? '' : 'Relay unavailable or invalid slot context.'
     }
     const verdictColor = verdict.state === 'verified'
       ? '#4CAF50'
@@ -3493,7 +3859,7 @@ function setupPostDetailsHandlers() {
       <p><strong>Slot:</strong> ${escapeHtml(String(slotId))}</p>
       <p><strong>Job:</strong> ${escapeHtml(String(job?.id || 'n/a'))}</p>
       <p><strong>Verdict:</strong> <span style="color:${verdictColor}; font-weight: 600;">${escapeHtml(verdict.label)}</span></p>
-      <p><strong>Stages:</strong> reveal=${escapeHtml(relayStageLabel(relayRevealDisplayStatus(job), 'reveal'))} · finalize=${escapeHtml(relayStageLabel(job?.finalizeStatus, 'finalize'))} · refund=${escapeHtml(relayStageLabel(job?.refundStatus, 'refund'))}</p>
+      <p><strong>Stages:</strong> reveal=${escapeHtml(relayRevealStageLabelForJob(job))} · finalize=${escapeHtml(relayFinalizeStageLabelForJob(job))} · refund=${escapeHtml(relayRefundStageLabelForJob(job))}</p>
       <p><strong>Sepolia links:</strong> ${contractLinks || 'n/a'}</p>
       <p><strong>Transactions:</strong></p>
       <ul>${txRowsHtml || '<li>n/a</li>'}</ul>
@@ -3501,14 +3867,26 @@ function setupPostDetailsHandlers() {
       <ul>
         <li>proofFelts: ${escapeHtml(String(Number(z?.proofFelts || 0) || 'n/a'))}</li>
         <li>calldataHash: ${escapeHtml(String(z?.proofCalldataHash || 'n/a'))}</li>
+        <li>commitRoot: ${escapeHtml(String(z?.commitRoot || 'n/a'))}</li>
         <li>witnessHash: ${escapeHtml(String(z?.witnessHash || 'n/a'))}</li>
         <li>proofHash: ${escapeHtml(String(z?.proofHash || 'n/a'))}</li>
         <li>vkHash: ${escapeHtml(String(z?.vkHash || 'n/a'))}</li>
         <li>publicInputsHash: ${escapeHtml(String(z?.publicInputsHash || 'n/a'))}</li>
+        ${recoveredFromTx ? `<li>recoveredFromRevealTx: ${escapeHtml(shortTxHash(recoveredFromTx))}${recoveredLabel ? ` · ${escapeHtml(recoveredLabel)}` : ''}</li>` : ''}
       </ul>
-      ${(isOnchainOnly || !hasProofCalldata) && !canRecoverFromTx ? '<p><em>Re-verify is unavailable for this slot because relay proof calldata was not preserved.</em></p>' : ''}
+      ${recoveredFromTx ? '<p style="color:#4CAF50;"><strong>Recovery:</strong> proof calldata recovered from reveal tx and re-used for verification.</p>' : ''}
+      ${(isOnchainOnly || !hasProofCalldata) && !canRecoverFromTx && !hasRelayAvailable() ? '<p><em>Re-verify is unavailable because relay recovery is not configured.</em></p>' : ''}
       <p id="sealedReverifyStatus" style="margin-top:8px;color:#9ecbff;"></p>
+      <details style="margin-top:10px;">
+        <summary>Proof bundle (generated)</summary>
+        <pre id="sealedProofBundlePre" style="white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.35;max-height:220px;overflow:auto;background:#0f1118;border:1px solid #2a3350;border-radius:8px;padding:10px;">Not loaded yet.</pre>
+      </details>
+      <details style="margin-top:10px;">
+        <summary>Re-verify debug</summary>
+        <pre id="sealedReverifyDebugPre" style="white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.35;max-height:240px;overflow:auto;background:#0f1118;border:1px solid #2a3350;border-radius:8px;padding:10px;">n/a</pre>
+      </details>
     `
+    renderSealedReverifyDebug(lastSealedReverifyDebug)
     sealedVerifyModal.classList.add('active')
   }
 
@@ -3921,9 +4299,33 @@ function setupPostDetailsHandlers() {
       : `Commit sealed bid for slot #${slotId}: ${escrowAmount} STRK?`
     if (!confirm(confirmMessage)) return
     const salt = randomSaltFelt()
+    const protocolModeValue = Number(activePost?.auction_sealed_protocol?.mode || 0)
+    const protocolMode = protocolModeValue === 1
+      ? 'drand'
+      : (protocolModeValue === 2 ? 'drand_mpc' : 'classic')
+    const isTimelockMode = protocolMode === 'drand' || protocolMode === 'drand_mpc'
     try {
       postDetailsModal.classList.remove('active')
-      const commitResult = await dojoManager.commitAuctionBid(slotId, bid, salt, escrowAmount)
+      let timelockRound = 0
+      let timelockCiphertextHash = ''
+      let timelockPayload = ''
+      if (isTimelockMode) {
+        timelockPayload = buildTimelockPayloadBase64({ bidAmount: bid, salt })
+        timelockCiphertextHash = await sha256HexString(timelockPayload)
+        const configuredRound = Number(activePost?.auction_sealed_protocol?.drand_genesis_round || 0)
+        timelockRound = configuredRound > 0 ? configuredRound : 0
+      }
+      const commitResult = isTimelockMode
+        ? await dojoManager.commitAuctionBidTimelock(
+          slotId,
+          bid,
+          salt,
+          timelockRound || 1,
+          timelockCiphertextHash,
+          escrowAmount,
+          1,
+        )
+        : await dojoManager.commitAuctionBid(slotId, bid, salt, escrowAmount)
       saveSaltForSlot(slotId, salt)
       saveBidAmountForSlot(slotId, bid)
       const commitEndTime = Number(activePost?.auction_sealed_config?.commit_end_time || 0)
@@ -3934,17 +4336,29 @@ function setupPostDetailsHandlers() {
             slotPostId: commitResult?.slotId || slotId,
             groupId: commitResult?.groupId || activePost.auction_group_id || 0,
             bidder: currentAccount.address,
-            bidAmount: commitResult?.bidAmount || bid,
-            salt,
+            bidAmount: isTimelockMode ? 0 : (commitResult?.bidAmount || bid),
+            salt: isTimelockMode ? '' : salt,
             commitEndTime,
             revealEndTime,
+            protocolMode,
+            drandRound: isTimelockMode ? Number(commitResult?.drandRound || timelockRound || 0) : 0,
+            timelockCiphertextHash: isTimelockMode ? String(commitResult?.timelockCiphertextHash || timelockCiphertextHash || '') : '',
+            timelockPayload: isTimelockMode ? timelockPayload : '',
           })
           if (scheduled?.ok) {
-            showToast(`Sealed bid committed (${escrowAmount} STRK). Auto-reveal scheduled.`)
+            showToast(
+              isTimelockMode
+                ? `Sealed timelock bid committed (${escrowAmount} STRK). Auto-settlement scheduled.`
+                : `Sealed bid committed (${escrowAmount} STRK). Auto-reveal scheduled.`,
+            )
           }
         } catch (relayError) {
           console.warn('Auto-reveal schedule failed:', relayError)
-          showToast(`Sealed bid committed (${escrowAmount} STRK). Auto-reveal scheduling failed, retrying in background.`)
+          showToast(
+            isTimelockMode
+              ? `Sealed timelock bid committed (${escrowAmount} STRK). Auto-scheduling failed, retrying in background.`
+              : `Sealed bid committed (${escrowAmount} STRK). Auto-reveal scheduling failed, retrying in background.`,
+          )
         }
       }
       await new Promise((resolve) => setTimeout(resolve, 5000))
@@ -4035,8 +4449,23 @@ function setupPostDetailsHandlers() {
     if (!Number.isFinite(slotId) || slotId <= 0) return
     try {
       const jobs = hasRelayAvailable() ? await fetchSealedRelayJobs(true) : []
-      const job = getRelayJobForSlot(jobs, slotId, currentAccount?.address || '')
+      const job = getRelayVerificationJobForSlot(jobs, currentPost, currentAccount?.address || '')
       const slot = currentPost?.auction_slot || null
+      const commits = Array.isArray(currentPost?.auction_commits) ? currentPost.auction_commits : []
+      const winnerAddr = normalizeSocialAddress(String(slot?.highest_bidder || ''))
+      const winnerCommit = commits.find((c) =>
+        normalizeSocialAddress(String(c?.bidder || '')) === winnerAddr &&
+        Boolean(c?.revealed),
+      ) || null
+      const revealedCommitWithTx = commits.find((c) =>
+        Boolean(c?.revealed) &&
+        normalizeSocialAddress(String(c?.reveal_tx_hash || '')) !== '0x0',
+      ) || null
+      const revealTxHashFromCommit = String(
+        winnerCommit?.reveal_tx_hash ||
+        revealedCommitWithTx?.reveal_tx_hash ||
+        '',
+      ).trim()
       const hasWinnerOnchain = Boolean(slot?.has_bid)
       const isFinalizedOnchain = Boolean(slot?.finalized)
       const hasRelayEvidence = Boolean(
@@ -4057,7 +4486,9 @@ function setupPostDetailsHandlers() {
             status: hasWinnerOnchain ? 'submitted' : 'scheduled',
             finalizeStatus: isFinalizedOnchain ? 'submitted' : 'scheduled',
             refundStatus: 'scheduled',
+            groupId: Number(slot?.group_id || currentPost?.auction_group_id || 0),
             bidder: String(slot?.highest_bidder || ''),
+            revealTxHash: revealTxHashFromCommit,
             zkTrace: null,
           },
           txRows: [],
@@ -4083,7 +4514,18 @@ function setupPostDetailsHandlers() {
           receiptLabel: receiptMeta.label,
         }
       }))
-      const verdict = computeOnchainVerdict(txRows.filter((row) => row.hash))
+      const txRowsWithHash = txRows.filter((row) => row.hash)
+      let verdict = computeOnchainVerdict(txRowsWithHash)
+      // If this slot is already settled on-chain but historical tx hashes are missing,
+      // avoid a misleading "no tx hash" verdict.
+      if (!txRowsWithHash.length && (isFinalizedOnchain || hasWinnerOnchain)) {
+        verdict = {
+          state: isFinalizedOnchain ? 'verified' : 'pending',
+          label: isFinalizedOnchain
+            ? 'Finalized on-chain (tx hash unavailable in relay history)'
+            : 'Winner selected on-chain (tx hash unavailable in relay history)',
+        }
+      }
       renderSealedVerifyModal({
         slotId,
         job,
@@ -4099,7 +4541,7 @@ function setupPostDetailsHandlers() {
   if (closeSealedVerifyBtn) closeSealedVerifyBtn.addEventListener('click', () => {
     closeSealedVerifyModal()
   })
-  if (reverifySealedBtn) reverifySealedBtn.addEventListener('click', async () => {
+  if (viewSealedProofBtn) viewSealedProofBtn.addEventListener('click', async () => {
     const ctx = currentSealedVerifyContext || null
     if (!ctx?.slotId) return
     const statusEl = document.getElementById('sealedReverifyStatus')
@@ -4109,17 +4551,92 @@ function setupPostDetailsHandlers() {
       statusEl.style.color = color
     }
     if (!hasRelayAvailable()) {
+      setStatus('Relay not configured for proof bundle view.', '#f44336')
+      return
+    }
+    viewSealedProofBtn.disabled = true
+    const prevLabel = viewSealedProofBtn.textContent
+    viewSealedProofBtn.textContent = 'Loading proof...'
+    try {
+      const bundleRes = await requestSealedProofBundle({
+        slotPostId: Number(ctx.slotId || 0),
+        jobId: String(ctx.jobId || ''),
+        bidder: String(ctx.bidder || ''),
+      })
+      const bundle = bundleRes?.bundle || null
+      if (!bundle) {
+        setStatus('No stored proof bundle found for this slot/job.', '#f44336')
+        return
+      }
+      lastSealedProofBundle = bundle
+      renderSealedProofBundle(lastSealedProofBundle)
+      const recoveredTx = String(bundle?.zkTrace?.recoveredFromTx || '')
+      const proofFelts = Number(bundle?.proofFelts || 0)
+      if (!Number.isFinite(proofFelts) || proofFelts <= 0) {
+        setStatus(
+          'Proof bundle loaded without calldata. Raw artifacts are stored in relay trace for offline reconstruction.',
+          '#f6c26b',
+        )
+        return
+      }
+      if (recoveredTx) {
+        setStatus(`Recovered from reveal tx ${shortTxHash(recoveredTx)}. Verifying on-chain now...`, '#4CAF50')
+      }
+      const verifyRes = await requestSealedVerifyProofNow({
+        slotPostId: Number(ctx.slotId || 0),
+        jobId: String(ctx.jobId || ''),
+        bidder: String(ctx.bidder || ''),
+      })
+      const valid = Boolean(verifyRes?.valid)
+      setStatus(
+        `Verifier response: ${valid ? 'VALID' : 'INVALID'} · felts=${verifyRes?.proofFelts || 'n/a'} · calldataHash=${verifyRes?.proofCalldataHash || 'n/a'}`,
+        valid ? '#4CAF50' : '#f44336',
+      )
+      showToast(valid ? 'Proof bundle verified by on-chain verifier' : 'Verifier returned INVALID')
+    } catch (error) {
+      const msg = String(error?.message || error || 'Unknown proof bundle error')
+      setStatus(`Proof bundle error: ${msg}`, '#f44336')
+    } finally {
+      viewSealedProofBtn.disabled = false
+      viewSealedProofBtn.textContent = prevLabel || 'View Proof Bundle'
+    }
+  })
+  if (reverifySealedBtn) reverifySealedBtn.addEventListener('click', async () => {
+    const ctx = currentSealedVerifyContext || null
+    if (!ctx?.slotId) return
+    const statusEl = document.getElementById('sealedReverifyStatus')
+    const setStatus = (text, color = '#9ecbff') => {
+      if (!statusEl) return
+      statusEl.textContent = text
+      statusEl.style.color = color
+    }
+    const setDebug = (debugObj) => {
+      lastSealedReverifyDebug = debugObj && typeof debugObj === 'object' ? debugObj : null
+      renderSealedReverifyDebug(lastSealedReverifyDebug)
+    }
+    if (!hasRelayAvailable()) {
       setStatus('Relay not configured for re-verify.', '#f44336')
       return
     }
     const canRecoverFromTx = Boolean(ctx?.revealTxHash && Number(ctx?.groupId || 0) > 0)
-    if (!ctx?.hasProofCalldata && !canRecoverFromTx) {
-      setStatus('Re-verify unavailable: proof calldata not preserved and no reveal tx hash to recover from.', '#f44336')
+    const canAutoRecoverBySlot = Boolean(Number(ctx?.slotId || 0) > 0)
+    if (!ctx?.hasProofCalldata && !canRecoverFromTx && !canAutoRecoverBySlot) {
+      setStatus('Re-verify unavailable: missing proof calldata and recovery metadata.', '#f44336')
       return
     }
     reverifySealedBtn.disabled = true
     const prevLabel = reverifySealedBtn.textContent
     reverifySealedBtn.textContent = 'Re-verifying...'
+    setStatus('Sending re-verify request to relayer...', '#9ecbff')
+    setDebug({
+      phase: 'request',
+      slotPostId: Number(ctx.slotId || 0),
+      jobId: String(ctx.jobId || ''),
+      bidder: String(ctx.bidder || ''),
+      groupId: Number(ctx.groupId || 0),
+      revealTxHash: String(ctx.revealTxHash || ''),
+      at: new Date().toISOString(),
+    })
     try {
       const result = await requestSealedImmediateReverify({
         slotPostId: ctx.slotId,
@@ -4128,13 +4645,71 @@ function setupPostDetailsHandlers() {
         groupId: ctx.groupId,
         revealTxHash: ctx.revealTxHash,
       })
-      const okColor = result.valid ? '#4CAF50' : '#f44336'
-      const label = result.valid ? 'VALID' : 'INVALID'
-      setStatus(`Re-verify ${label} · felts=${result.proofFelts || 'n/a'} · calldataHash=${result.proofCalldataHash || 'n/a'}`, okColor)
-      showToast(result.valid ? 'ZK proof re-verified on-chain' : 'ZK proof re-verify failed')
+      if (result.status === 'unavailable' || result.valid === null) {
+        const reason = String(result.unavailableReason || 'No recoverable proof data for this slot.')
+        let fallbackVerified = false
+        try {
+          const fallback = await requestSealedVerifyProofNow({
+            slotPostId: ctx.slotId,
+            jobId: ctx.jobId,
+            bidder: ctx.bidder,
+          })
+          if (fallback?.ok) {
+            fallbackVerified = true
+            const okColor = fallback.valid ? '#4CAF50' : '#f44336'
+            setStatus(
+              `Re-verify ${fallback.valid ? 'VALID' : 'INVALID'} · felts=${fallback.proofFelts || 'n/a'} · calldataHash=${fallback.proofCalldataHash || 'n/a'}`,
+              okColor,
+            )
+            showToast(fallback.valid ? 'ZK proof re-verified on-chain' : 'ZK proof re-verify failed')
+          }
+        } catch {}
+        if (!fallbackVerified) {
+          const isSettledOnchain = Boolean(currentPost?.auction_slot?.finalized || currentPost?.auction_slot?.has_bid)
+          if (isSettledOnchain) {
+            setStatus(
+              `On-chain settlement confirmed. Cryptographic re-verify unavailable for this historical trace (${reason}).`,
+              '#f5c16c',
+            )
+          } else {
+            setStatus(`Re-verify unavailable: ${reason}`, '#f5c16c')
+          }
+        }
+      } else {
+        const okColor = result.valid ? '#4CAF50' : '#f44336'
+        const label = result.valid ? 'VALID' : 'INVALID'
+        if (result.valid && result.attestedByOnchainSettlement) {
+          setStatus(
+            `Re-verify VALID (on-chain attested historical slot) · felts=n/a · calldataHash=n/a`,
+            okColor,
+          )
+        } else {
+          setStatus(`Re-verify ${label} · felts=${result.proofFelts || 'n/a'} · calldataHash=${result.proofCalldataHash || 'n/a'}`, okColor)
+        }
+      }
+      setDebug(result?.debug || {
+        phase: 'response',
+        valid: result?.valid,
+        status: String(result?.status || ''),
+        unavailableReason: String(result?.unavailableReason || ''),
+        proofFelts: Number(result?.proofFelts || 0),
+        proofCalldataHash: String(result?.proofCalldataHash || ''),
+        at: new Date().toISOString(),
+      })
+      if (result.status === 'unavailable' || result.valid === null) {
+        showToast('Re-verify unavailable for this historical slot')
+      } else {
+        showToast(result.valid ? 'ZK proof re-verified on-chain' : 'ZK proof re-verify failed')
+      }
     } catch (error) {
       const msg = String(error?.message || error || 'Unknown re-verify error')
       setStatus(`Re-verify failed: ${msg}`, '#f44336')
+      setDebug(error?.relayDebug || {
+        phase: 'error',
+        message: msg,
+        relay: error?.relayMeta || null,
+        at: new Date().toISOString(),
+      })
     } finally {
       reverifySealedBtn.disabled = false
       reverifySealedBtn.textContent = prevLabel || 'Re-verify On-chain Now'
@@ -4374,6 +4949,13 @@ function showPostDetails(post, source = 'canvas') {
     const myAddr = normalizeSocialAddress(currentAccount?.address || '')
     const myCommit = (post.auction_commits || []).find((c) => normalizeSocialAddress(c.bidder) === myAddr) || null
 
+    // Ensure Verify button is always available for sealed slots once there is on-chain sealed state.
+    if (isSealed && verifyProofBtn) {
+      const canVerifyFromOnchain = Boolean(slot.has_bid || slot.finalized || ended)
+      verifyProofBtn.textContent = '🧪 Verify Sealed Result'
+      verifyProofBtn.style.display = canVerifyFromOnchain ? 'inline-block' : 'none'
+    }
+
     if (postAuctionInfo) {
       const endDate = new Date(endTs * 1000)
       const endLocal = endDate.toLocaleString()
@@ -4391,8 +4973,15 @@ function showPostDetails(post, source = 'canvas') {
         else if (now < revealEndTs) phaseLine = 'Mode: Sealed · Phase: Reveal'
         else phaseLine = 'Mode: Sealed · Phase: Finalize'
       }
+      const myCommitRevealLabel = (() => {
+        if (!myCommit) return 'No'
+        if (myCommit.revealed) return 'Yes'
+        // For non-winning refunded commits after settlement, reveal is intentionally not required.
+        if (isSealed && slot.finalized && myCommit.refunded) return 'Not required (privacy)'
+        return 'No'
+      })()
       const myCommitLine = isSealed && myCommit
-        ? `<br/>My sealed bid: committed · revealed: ${myCommit.revealed ? 'Yes' : 'No'} · refunded: ${myCommit.refunded ? 'Yes' : 'No'}`
+        ? `<br/>My sealed bid: committed · revealed: ${myCommitRevealLabel} · refunded: ${myCommit.refunded ? 'Yes' : 'No'}`
         : ''
       if (!isSealed) {
         const highest = Number(slot.highest_bid || 0)
@@ -4495,11 +5084,16 @@ function showPostDetails(post, source = 'canvas') {
             postSaleInfo.textContent = 'Sealed auction: reveal phase (commit closed; this wallet cannot place new bids now)'
           }
         } else {
-          postSaleInfo.textContent = 'Sealed auction ended. Settling reveals and finalizing automatically...'
-          postSaleInfo.style.color = '#9ecbff'
-          void tryAutoFinalizeAuctionSlot(post, 'post-details')
+          if (!slot.has_bid) {
+            postSaleInfo.textContent = 'Sealed auction ended with no bids. No winner to settle for this slot.'
+            postSaleInfo.style.color = '#9ecbff'
+          } else {
+            postSaleInfo.textContent = 'Sealed auction ended. Settling reveals and finalizing automatically...'
+            postSaleInfo.style.color = '#9ecbff'
+            void tryAutoFinalizeAuctionSlot(post, 'post-details')
+          }
           void (async () => {
-            const inferredFinalized = await probeSlotFinalizedOnchain(Number(post?.id || 0))
+            const inferredFinalized = await probeSlotFinalizedOnchainGlobal(Number(post?.id || 0))
             if (!inferredFinalized) return
             if (String(postDetailsModal?.dataset?.postId || '') !== String(post?.id || '')) return
             slot.finalized = true
@@ -5504,21 +6098,25 @@ async function updateWalletInfo() {
     walletInfo.innerHTML = `
       <div class="wallet-box">
         <div class="wallet-top-row">
-          <div class="wallet-stats">
-            <button id="following-count-btn" class="wallet-stat-btn" type="button">Following ${following.length}</button>
-            <button id="followers-count-btn" class="wallet-stat-btn" type="button">Followers ${followers.length}</button>
-          </div>
-          ${hasYieldInManifest ? `<div class="wallet-yield-stack">
-            ${renderYieldLine(stakedLabel, rewardsLabel, unpoolingLabel, unpoolAtLabel)}
-            ${renderYieldLine(btcStakedLabel, btcRewardsLabel, btcUnpoolingLabel, wbtcUnpoolAtLabel)}
-          </div>` : ''}
           <div class="wallet-main">
             <div class="wallet-user-row">
+              <div class="wallet-stats">
+                <button id="following-count-btn" class="wallet-stat-btn" type="button">Following ${following.length}</button>
+                <button id="followers-count-btn" class="wallet-stat-btn" type="button">Followers ${followers.length}</button>
+              </div>
               <button id="wallet-user-btn" class="wallet-user-btn" type="button" title="Open my feed">● ${currentUsername || shortAddr}</button>
               <button id="wallet-logout-btn" class="wallet-logout-btn" type="button" aria-label="Logout" title="Logout">⏻</button>
             </div>
-            <span class="wallet-balance">💰 ${balanceStr} STRK</span>
-            ${hasYieldInManifest ? `<span class="wallet-balance">₿ ${btcWalletBalance.toFixed(8)} ${btcSymbol}</span>` : ''}
+            <div class="wallet-balance-row">
+              ${hasYieldInManifest ? `<div class="wallet-yield-stack">
+                ${renderYieldLine(stakedLabel, rewardsLabel, unpoolingLabel, unpoolAtLabel)}
+                ${renderYieldLine(btcStakedLabel, btcRewardsLabel, btcUnpoolingLabel, wbtcUnpoolAtLabel)}
+              </div>` : ''}
+              <div class="wallet-balance-stack">
+                <span class="wallet-balance">💰 ${balanceStr} STRK</span>
+                ${hasYieldInManifest ? `<span class="wallet-balance">₿ ${btcWalletBalance.toFixed(8)} ${btcSymbol}</span>` : ''}
+              </div>
+            </div>
           </div>
         </div>
         ${hasYieldInManifest ? `<div class="wallet-yield-actions">
@@ -5815,17 +6413,30 @@ async function updateWalletInfo() {
             }
             const beforeState = await dojoManager.queryYieldState(currentAccount.address).catch(() => cachedYieldState || null)
             const beforePending = Number(beforeState?.pending_strk || 0)
+            let starkzapClaimable = false
+            if (starkzapManager && IS_SEPOLIA) {
+              try {
+                const livePos = await starkzapManager.getPoolPosition(activeSymbol)
+                const liveRewards = livePos?.position?.rewards
+                starkzapClaimable = Boolean(liveRewards && !liveRewards.isZero?.())
+              } catch {
+                starkzapClaimable = false
+              }
+            }
             console.info('[Claim] Start', {
               user: currentAccount.address,
               symbol: activeSymbol,
               beforePending,
+              starkzapClaimable,
               beforePrincipal: Number(beforeState?.principal_strk || 0),
             })
-            if (!Number.isFinite(beforePending) || beforePending <= 0) {
+            const dojoClaimable = Number.isFinite(beforePending) && beforePending > 0
+            if (!dojoClaimable && !starkzapClaimable) {
               console.info('[Claim] Skipped: no claimable rewards', {
                 user: currentAccount.address,
                 symbol: activeSymbol,
                 beforePending,
+                starkzapClaimable,
               })
               addActivityEvent({
                 actionType: 'claim',
@@ -5848,6 +6459,20 @@ async function updateWalletInfo() {
                 txHash = String(res?.tx?.hash || '')
                 providerPath = 'starkzap'
               } catch (starkzapError) {
+                const starkzapMsg = String(starkzapError?.message || starkzapError || '')
+                if (starkzapMsg.toLowerCase().includes('no claimable')) {
+                  showToast(`No claimable ${activeSymbol} rewards yet. No transaction sent.`)
+                  addActivityEvent({
+                    actionType: 'claim',
+                    token: activeSymbol,
+                    amount: 0,
+                    providerPath: 'starkzap',
+                    txHash: '',
+                    status: 'skipped',
+                    errorMessage: starkzapMsg,
+                  })
+                  return
+                }
                 console.error('[Claim] Starkzap failed message:', starkzapError?.message || String(starkzapError))
                 console.warn('Starkzap claim failed, falling back to Dojo claim:', starkzapError)
                 if (isControllerInitError(starkzapError)) {

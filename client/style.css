@@ -45,7 +45,7 @@
     display: flex;
     flex-direction: column;
     align-items: flex-end;
-    gap: 4px;
+    gap: 6px;
   }
 
   #wallet-info .wallet-user {
@@ -163,24 +163,25 @@
 }
 
 #wallet-info .wallet-top-row {
-    width: 100%;
+    width: auto;
     display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 12px;
+    justify-content: flex-end;
+    align-items: start;
+    gap: 10px;
   }
 
 #wallet-info .wallet-main {
     display: flex;
     flex-direction: column;
     align-items: flex-end;
-    gap: 4px;
+    gap: 2px;
   }
 
 #wallet-info .wallet-yield-stack {
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
+  align-items: flex-start;
+  text-align: left;
   gap: 2px;
 }
 
@@ -188,6 +189,8 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
 }
 
 #wallet-info .wallet-user-btn {
@@ -206,10 +209,24 @@
 
 #wallet-info .wallet-stats {
     display: flex;
-    flex-direction: column;
-    align-items: flex-start;
+    flex-direction: row;
+    align-items: center;
     gap: 4px;
   }
+
+#wallet-info .wallet-balance-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+#wallet-info .wallet-balance-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
 
 #controls .wallet-stat-btn {
     min-height: 0;
@@ -1046,10 +1063,8 @@
 
   #wallet-info .wallet-top-row {
     display: grid;
-    grid-template-columns: auto 1fr;
-    grid-template-areas:
-      "stats main"
-      "yield main";
+    grid-template-columns: 1fr;
+    grid-template-areas: "main";
     align-items: start;
     gap: 4px 8px;
   }
@@ -1073,16 +1088,26 @@
   }
 
   #wallet-info .wallet-stats {
-    grid-area: stats;
     flex-direction: row;
     align-items: center;
     gap: 4px;
   }
 
   #wallet-info .wallet-yield-stack {
-    grid-area: yield;
-    align-items: flex-start;
+    align-items: flex-end;
     width: 100%;
+  }
+
+  #wallet-info .wallet-balance-row {
+    width: 100%;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+  }
+
+  #wallet-info .wallet-balance-stack {
+    width: 100%;
+    align-items: flex-end;
   }
 
   #controls .wallet-stat-btn {

@@ -71,10 +71,98 @@ Source of truth: `client/config.js` and `contracts/src/systems/actions.cairo`
 
 ### Sealed verification UX
 
-- Per-slot verification modal.
-- Relay pipeline stage status.
-- Onchain verification links to Sepolia Voyager.
-- Re-verify action when relay proof calldata exists.
+- Per-slot verification modal with relay stage status.
+- Onchain tx links to Sepolia Voyager.
+- `View Proof Bundle` shows proof trace, hashes, and persisted raw artifacts when available.
+- `Re-verify On-chain Now` always returns a deterministic outcome:
+  - `VALID` (cryptographic): verifier call succeeded with stored/recovered `proofCalldata`.
+  - `INVALID`: verifier call returned false.
+  - `VALID (attested)`: onchain settlement is confirmed, but cryptographic replay of historical artifacts is not possible.
+
+## Sealed Auctions and Bids (Exact Current Flow)
+
+### User flow (product behavior)
+
+1. **Commit phase**
+   - bidder sends `commit_bid` with escrow.
+   - bid amount stays private.
+2. **Reveal/settlement phase**
+   - relayer generates proof and submits `reveal_bid`.
+   - contract verifies through sealed verifier.
+3. **Finalize phase**
+   - relayer submits `finalize_auction_slot`.
+   - winner ownership is locked in, and slot moves to publish stage.
+4. **Refund phase**
+   - non-winning commits are refunded by relayer (`claim_commit_refund`).
+
+### Internal proving pipeline (Noir + bb + Garaga)
+
+1. Noir witness built from `(slot, group, bidder, bid_amount, salt)`.
+2. `bb` generates `vk`, `proof`, `public_inputs`.
+3. Garaga converts artifacts to Starknet calldata felts.
+4. Relayer sends `reveal_bid(...proofFelts)`.
+
+### Traceability and storage (what is persisted)
+
+For each sealed job, Starkwall now persists:
+- pipeline hashes (`witnessHash`, `proofHash`, `vkHash`, `publicInputsHash`);
+- `proofCalldata` when parse succeeds;
+- raw proof artifacts (`witness`, `vk`, `proof`, `publicInputs`) in artifact bundles;
+- reverify debug steps and recovery attempts.
+
+Endpoints:
+- `GET /sealed/jobs`
+- `GET /sealed/proof-bundle`
+- `GET /sealed/proof-artifacts`
+- `GET /sealed/artifacts/<path>`
+- `POST /sealed/reverify-now`
+
+### Recovery strategy (to avoid dead-ends)
+
+- If `proofCalldata` is missing, relayer tries:
+  1. regenerate from current inputs,
+  2. recover from persisted raw artifacts,
+  3. recover from onchain `reveal_bid` transaction scan.
+- If none can produce usable calldata but slot is clearly settled onchain, verdict becomes:
+  - `VALID (attested by onchain settlement)` with explicit reason.
+
+### Known hard limitation (still explicit)
+
+Some historical artifacts can hit `bb -> garaga` legacy encoding mismatch and fail deterministic replay.
+In those cases:
+- settlement remains correct onchain,
+- UX still converges,
+- full raw artifacts are available for audit,
+- cryptographic replay may not be reconstructible with current parser/toolchain pair.
+
+## Hybrid Protocol Modes and Future Taceo Direction
+
+Current supported protocol modes:
+- `classic` (default)
+- `drand`
+- `drand_mpc`
+- `sealed_tree_v1`
+
+Starkwall's target direction is to use **Taceo-backed co-SNARK/MPC proving** for stronger trust assumptions:
+- no single prover seeing all sensitive bid context,
+- stronger multi-party attestations for settlement proofs,
+- eventual move from `shadow` mode to `strict` mode when blueprint + artifact compatibility is production-stable.
+
+### Taceo integration status (today)
+
+- wiring and worker hooks are integrated;
+- can run local/shadow/strict behavior by env;
+- remote proving depends on valid blueprint credentials and compatible artifact format.
+
+Key env flags:
+- `SEALED_RELAY_TACEO_MODE` = `off | shadow | strict`
+- `TACEO_ENABLE_REMOTE`, `TACEO_BASE_URL`, `TACEO_API_KEY`, `TACEO_BLUEPRINT_ID`
+- `TACEO_NOIR_PUBLIC_INPUTS`, `TACEO_WS_URL`, optional `TACEO_VOUCHER`
+
+Roadmap intent:
+1. keep sealed flow reliable today with deterministic fallback + full traceability,
+2. progressively increase Taceo usage in shadow mode,
+3. cut over specific groups/protocols to strict remote proving when compatibility is proven.
 
 ## Where Images Are Stored
 

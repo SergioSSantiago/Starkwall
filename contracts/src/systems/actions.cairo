@@ -43,6 +43,17 @@ pub trait IActions<T> {
         verifier: starknet::ContractAddress
     );
 
+    fn configure_auction_sealed_protocol(
+        ref self: T,
+        group_id: u64,
+        mode: u8,
+        drand_genesis_round: u64,
+        drand_period_secs: u32,
+        require_mpc_attestation: bool,
+        mpc_threshold: u8,
+        mpc_committee_root: felt252
+    );
+
     fn sync_occupancy_index(ref self: T, max_posts: u32) -> (u64, u64);
     fn occupancy_sync_progress(self: @T) -> (u64, u64);
 
@@ -59,6 +70,16 @@ pub trait IActions<T> {
         escrow_amount: u128
     );
 
+    fn commit_bid_timelock(
+        ref self: T,
+        slot_post_id: u64,
+        commitment: felt252,
+        escrow_amount: u128,
+        drand_round: u64,
+        timelock_scheme: u8,
+        ciphertext_hash: felt252
+    );
+
     fn reveal_bid(
         ref self: T,
         slot_post_id: u64,
@@ -66,6 +87,14 @@ pub trait IActions<T> {
         bid_amount: u128,
         salt: felt252,
         full_proof_with_hints: Span<felt252>
+    );
+
+    fn submit_mpc_settlement_attestation(
+        ref self: T,
+        slot_post_id: u64,
+        transcript_hash: felt252,
+        attestation_root: felt252,
+        signer_bitmap_hash: felt252
     );
 
     fn claim_commit_refund(
@@ -77,6 +106,17 @@ pub trait IActions<T> {
     fn finalize_auction_slot(
         ref self: T,
         slot_post_id: u64
+    );
+
+    fn finalize_auction_slot_with_settlement(
+        ref self: T,
+        slot_post_id: u64,
+        winner_bidder: starknet::ContractAddress,
+        winning_bid: u128,
+        clearing_price: u128,
+        commit_root: felt252,
+        proof_hash: felt252,
+        full_proof_with_hints: Span<felt252>
     );
 
     fn set_won_slot_content(
@@ -232,6 +272,17 @@ pub trait ISealedBidVerifier<T> {
         commitment: felt252,
         full_proof_with_hints: Span<felt252>
     ) -> bool;
+
+    fn verify_winner_settlement(
+        self: @T,
+        slot_post_id: u64,
+        group_id: u64,
+        winner_bidder: starknet::ContractAddress,
+        winning_bid: u128,
+        clearing_price: u128,
+        commit_root: felt252,
+        full_proof_with_hints: Span<felt252>
+    ) -> bool;
 }
 
 #[dojo::contract]
@@ -246,7 +297,9 @@ pub mod actions {
     use core::traits::TryInto;
     use starknet::{ContractAddress, get_block_timestamp, get_contract_address};
     use crate::models::{
-        AuctionCommit, AuctionGroup, AuctionRevealNullifier, AuctionSealedConfig, AuctionSlot,
+        AuctionCommit, AuctionCommitProofMeta, AuctionCommitTreeState, AuctionGroup, AuctionMpcSettlement, AuctionRevealNullifier, AuctionSealProtocolCfg, AuctionSealedConfig,
+        AuctionSettlementProof,
+        AuctionSlot, AuctionTimelockCommit,
         AuctionSlotPricing, OccupancySyncState, OccupiedCell,
         FollowRelation, FollowStats, Post, PostCounter, UserProfile, UsernameIndex, YieldAdminState,
         YieldExitQueue, YieldPoolState, YieldPosition, YieldRiskState, YieldStrategyState
@@ -258,6 +311,10 @@ pub mod actions {
     const POST_KIND_NORMAL: u8 = 0;
     const POST_KIND_AUCTION_CENTER: u8 = 1;
     const POST_KIND_AUCTION_SLOT: u8 = 2;
+    const SEALED_PROTOCOL_CLASSIC: u8 = 0;
+    const SEALED_PROTOCOL_DRAND: u8 = 1;
+    const SEALED_PROTOCOL_DRAND_MPC: u8 = 2;
+    const SEALED_PROTOCOL_TREE_V1: u8 = 3;
     const AUCTION_SLOT_COUNT: u8 = 8;
     const YIELD_POOL_STRK_ID: u8 = 0;
     const YIELD_POOL_BTC_ID: u8 = 1;
@@ -630,6 +687,24 @@ pub mod actions {
         }
     }
 
+    fn read_sealed_protocol_config_or_default(
+        ref world: dojo::world::WorldStorage, group_id: u64
+    ) -> AuctionSealProtocolCfg {
+        let config: AuctionSealProtocolCfg = world.read_model(group_id);
+        if config.group_id == group_id {
+            return config;
+        }
+        AuctionSealProtocolCfg {
+            group_id,
+            mode: SEALED_PROTOCOL_CLASSIC,
+            drand_genesis_round: 0,
+            drand_period_secs: 0,
+            require_mpc_attestation: false,
+            mpc_threshold: 0,
+            mpc_committee_root: 0,
+        }
+    }
+
     fn compute_bid_commitment(
         slot_post_id: u64,
         group_id: u64,
@@ -643,6 +718,44 @@ pub mod actions {
         inputs.append(bidder.into());
         inputs.append(bid_amount.into());
         inputs.append(salt);
+        poseidon_hash_span(inputs.span())
+    }
+
+    fn compute_commit_leaf(
+        slot_post_id: u64,
+        group_id: u64,
+        bidder: ContractAddress,
+        commitment: felt252,
+        commit_index: u64
+    ) -> felt252 {
+        let mut inputs = array![];
+        inputs.append(slot_post_id.into());
+        inputs.append(group_id.into());
+        inputs.append(bidder.into());
+        inputs.append(commitment);
+        inputs.append(commit_index.into());
+        poseidon_hash_span(inputs.span())
+    }
+
+    fn read_commit_tree_state_or_default(
+        ref world: dojo::world::WorldStorage, slot_post_id: u64
+    ) -> AuctionCommitTreeState {
+        let state: AuctionCommitTreeState = world.read_model(slot_post_id);
+        if state.slot_post_id == slot_post_id {
+            return state;
+        }
+        AuctionCommitTreeState {
+            slot_post_id,
+            commit_root: 0,
+            leaf_count: 0,
+            version: 1,
+        }
+    }
+
+    fn rollup_commit_root(current_root: felt252, leaf_hash: felt252) -> felt252 {
+        let mut inputs = array![];
+        inputs.append(current_root);
+        inputs.append(leaf_hash);
         poseidon_hash_span(inputs.span())
     }
 
@@ -1219,6 +1332,17 @@ pub mod actions {
                     verifier,
                 }
             );
+            world.write_model(
+                @AuctionSealProtocolCfg {
+                    group_id: center_post_id,
+                    mode: SEALED_PROTOCOL_CLASSIC,
+                    drand_genesis_round: 0,
+                    drand_period_secs: 0,
+                    require_mpc_attestation: false,
+                    mpc_threshold: 0,
+                    mpc_committee_root: 0,
+                }
+            );
 
             let mut slot_idx: u8 = 1;
             let offsets = array![
@@ -1312,6 +1436,217 @@ pub mod actions {
                     commit_end_time,
                     reveal_end_time,
                     verifier,
+                }
+            );
+            world.write_model(
+                @AuctionSealProtocolCfg {
+                    group_id,
+                    mode: SEALED_PROTOCOL_CLASSIC,
+                    drand_genesis_round: 0,
+                    drand_period_secs: 0,
+                    require_mpc_attestation: false,
+                    mpc_threshold: 0,
+                    mpc_committee_root: 0,
+                }
+            );
+        }
+
+        fn configure_auction_sealed_protocol(
+            ref self: ContractState,
+            group_id: u64,
+            mode: u8,
+            drand_genesis_round: u64,
+            drand_period_secs: u32,
+            require_mpc_attestation: bool,
+            mpc_threshold: u8,
+            mpc_committee_root: felt252
+        ) {
+            let mut world = self.world_default();
+            let caller = starknet::get_caller_address();
+
+            assert!(
+                mode == SEALED_PROTOCOL_CLASSIC || mode == SEALED_PROTOCOL_DRAND ||
+                mode == SEALED_PROTOCOL_DRAND_MPC || mode == SEALED_PROTOCOL_TREE_V1,
+                "Invalid sealed protocol mode"
+            );
+
+            let group: AuctionGroup = world.read_model(group_id);
+            assert!(group.group_id == group_id, "Auction group not found");
+            assert!(group.creator == caller, "Only creator can configure sealed protocol");
+            assert!(group.active, "Auction group inactive");
+
+            let sealed_cfg = read_sealed_config_or_default(ref world, group_id, group.end_time);
+            assert!(sealed_cfg.sealed_mode, "Not a sealed auction group");
+
+            if mode == SEALED_PROTOCOL_DRAND || mode == SEALED_PROTOCOL_DRAND_MPC {
+                assert!(drand_genesis_round > 0, "drand genesis round required");
+                assert!(drand_period_secs > 0, "drand period required");
+            }
+            if mode == SEALED_PROTOCOL_DRAND_MPC || require_mpc_attestation {
+                assert!(mpc_threshold > 0, "MPC threshold required");
+                assert!(mpc_committee_root != 0, "MPC committee root required");
+            }
+
+            world.write_model(
+                @AuctionSealProtocolCfg {
+                    group_id,
+                    mode,
+                    drand_genesis_round,
+                    drand_period_secs,
+                    require_mpc_attestation,
+                    mpc_threshold,
+                    mpc_committee_root,
+                }
+            );
+        }
+
+        fn commit_bid_timelock(
+            ref self: ContractState,
+            slot_post_id: u64,
+            commitment: felt252,
+            escrow_amount: u128,
+            drand_round: u64,
+            timelock_scheme: u8,
+            ciphertext_hash: felt252
+        ) {
+            let mut world = self.world_default();
+            let bidder = starknet::get_caller_address();
+            let now = get_block_timestamp();
+            assert!(escrow_amount > 0, "Escrow must be > 0");
+            assert!(commitment != 0, "Commitment required");
+            assert!(drand_round > 0, "drand round required");
+            assert!(ciphertext_hash != 0, "Ciphertext hash required");
+
+            let mut slot: AuctionSlot = world.read_model(slot_post_id);
+            assert!(!slot.finalized, "Auction slot already finalized");
+            let group: AuctionGroup = world.read_model(slot.group_id);
+            assert!(group.active, "Auction group inactive");
+            assert!(bidder != group.creator, "Creator cannot bid in own auction");
+
+            let sealed_cfg = read_sealed_config_or_default(ref world, slot.group_id, group.end_time);
+            assert!(sealed_cfg.sealed_mode, "Not a sealed auction");
+            assert!(now < sealed_cfg.commit_end_time, "Commit phase closed");
+            let protocol_cfg = read_sealed_protocol_config_or_default(ref world, slot.group_id);
+            assert!(
+                protocol_cfg.mode == SEALED_PROTOCOL_DRAND || protocol_cfg.mode == SEALED_PROTOCOL_DRAND_MPC,
+                "Group is not configured for timelock commits"
+            );
+
+            let existing: AuctionCommit = world.read_model((slot_post_id, bidder));
+            let mut tree_state = read_commit_tree_state_or_default(ref world, slot_post_id);
+            let commit_index = if existing.commitment == 0 {
+                tree_state.leaf_count + 1
+            } else {
+                existing.commit_index
+            };
+            let post: Post = world.read_model(slot_post_id);
+            assert!(post.post_kind == POST_KIND_AUCTION_SLOT, "Not an auction slot");
+            assert!(post.current_owner != bidder, "Owner cannot bid on this slot");
+
+            let token = IERC20Dispatcher { contract_address: payment_token(YIELD_POOL_STRK_ID) };
+            if existing.commitment == 0 {
+                let escrow_low: u128 = escrow_amount * STRK_DECIMALS_FACTOR;
+                let paid = token.transfer_from(
+                    bidder,
+                    get_contract_address(),
+                    u256 { low: escrow_low, high: 0 },
+                );
+                assert!(paid, "Commit escrow payment failed");
+            } else {
+                assert!(!existing.revealed, "Bid already revealed");
+                assert!(!existing.refunded, "Commit already refunded");
+                assert!(escrow_amount > existing.escrow_amount, "New sealed bid must increase escrow");
+                let additional_escrow = escrow_amount - existing.escrow_amount;
+                let additional_low: u128 = additional_escrow * STRK_DECIMALS_FACTOR;
+                let paid_more = token.transfer_from(
+                    bidder,
+                    get_contract_address(),
+                    u256 { low: additional_low, high: 0 },
+                );
+                assert!(paid_more, "Additional commit escrow payment failed");
+            }
+
+            world.write_model(
+                @AuctionCommit {
+                    slot_post_id,
+                    bidder,
+                    commitment,
+                    escrow_amount,
+                    committed_at: now,
+                    revealed: false,
+                    revealed_bid: 0,
+                    refunded: false,
+                    commit_index,
+                }
+            );
+            world.write_model(
+                @AuctionTimelockCommit {
+                    slot_post_id,
+                    bidder,
+                    drand_round,
+                    timelock_scheme,
+                    ciphertext_hash,
+                }
+            );
+            if existing.commitment == 0 {
+                let leaf_hash = compute_commit_leaf(
+                    slot_post_id, slot.group_id, bidder, commitment, commit_index
+                );
+                tree_state.leaf_count = commit_index;
+                tree_state.commit_root = rollup_commit_root(tree_state.commit_root, leaf_hash);
+                world.write_model(@tree_state);
+            }
+
+            let mut pricing: AuctionSlotPricing = world.read_model(slot_post_id);
+            if !slot.has_bid {
+                slot.highest_bid = escrow_amount;
+                slot.highest_bidder = bidder;
+                slot.has_bid = true;
+                pricing.second_highest_bid = 0;
+            } else if bidder == slot.highest_bidder {
+                if escrow_amount > slot.highest_bid {
+                    slot.highest_bid = escrow_amount;
+                }
+            } else if escrow_amount > slot.highest_bid {
+                pricing.second_highest_bid = slot.highest_bid;
+                slot.highest_bid = escrow_amount;
+                slot.highest_bidder = bidder;
+            } else if escrow_amount > pricing.second_highest_bid {
+                pricing.second_highest_bid = escrow_amount;
+            }
+            world.write_model(@pricing);
+            world.write_model(@slot);
+        }
+
+        fn submit_mpc_settlement_attestation(
+            ref self: ContractState,
+            slot_post_id: u64,
+            transcript_hash: felt252,
+            attestation_root: felt252,
+            signer_bitmap_hash: felt252
+        ) {
+            let mut world = self.world_default();
+            let caller = starknet::get_caller_address();
+            let now = get_block_timestamp();
+            let slot: AuctionSlot = world.read_model(slot_post_id);
+            let group: AuctionGroup = world.read_model(slot.group_id);
+            let protocol_cfg = read_sealed_protocol_config_or_default(ref world, slot.group_id);
+
+            assert!(group.group_id != 0, "Auction group not found");
+            assert!(group.creator == caller, "Only creator can submit MPC attestation");
+            assert!(protocol_cfg.mode == SEALED_PROTOCOL_DRAND_MPC, "Slot not in drand+MPC mode");
+            assert!(transcript_hash != 0, "MPC transcript hash required");
+            assert!(attestation_root != 0, "MPC attestation root required");
+            assert!(signer_bitmap_hash != 0, "MPC signer bitmap hash required");
+
+            world.write_model(
+                @AuctionMpcSettlement {
+                    slot_post_id,
+                    attested: true,
+                    attested_at: now,
+                    transcript_hash,
+                    attestation_root,
+                    signer_bitmap_hash,
                 }
             );
         }
@@ -1413,6 +1748,12 @@ pub mod actions {
             assert!(now < sealed_cfg.commit_end_time, "Commit phase closed");
 
             let existing: AuctionCommit = world.read_model((slot_post_id, bidder));
+            let mut tree_state = read_commit_tree_state_or_default(ref world, slot_post_id);
+            let commit_index = if existing.commitment == 0 {
+                tree_state.leaf_count + 1
+            } else {
+                existing.commit_index
+            };
 
             let post: Post = world.read_model(slot_post_id);
             assert!(post.post_kind == POST_KIND_AUCTION_SLOT, "Not an auction slot");
@@ -1451,8 +1792,17 @@ pub mod actions {
                     revealed: false,
                     revealed_bid: 0,
                     refunded: false,
+                    commit_index,
                 }
             );
+            if existing.commitment == 0 {
+                let leaf_hash = compute_commit_leaf(
+                    slot_post_id, slot.group_id, bidder, commitment, commit_index
+                );
+                tree_state.leaf_count = commit_index;
+                tree_state.commit_root = rollup_commit_root(tree_state.commit_root, leaf_hash);
+                world.write_model(@tree_state);
+            }
 
             // Hard invariant for sealed slots:
             // once there is at least one commit, keep a valid deterministic winner
@@ -1499,6 +1849,11 @@ pub mod actions {
             assert!(sealed_cfg.sealed_mode, "Not a sealed auction");
             assert!(now >= sealed_cfg.commit_end_time, "Reveal phase not started");
             assert!(now < sealed_cfg.reveal_end_time, "Reveal phase closed");
+            let protocol_cfg = read_sealed_protocol_config_or_default(ref world, slot.group_id);
+            assert!(
+                protocol_cfg.mode == SEALED_PROTOCOL_CLASSIC,
+                "Classic reveal disabled for this sealed protocol mode"
+            );
 
             let mut commit: AuctionCommit = world.read_model((slot_post_id, bidder));
             assert!(commit.commitment != 0, "No commit found");
@@ -1530,6 +1885,13 @@ pub mod actions {
             commit.revealed = true;
             commit.revealed_bid = bid_amount;
             world.write_model(@commit);
+            world.write_model(
+                @AuctionCommitProofMeta {
+                    slot_post_id,
+                    bidder,
+                    reveal_tx_hash: starknet::get_tx_info().unbox().transaction_hash,
+                }
+            );
 
             if !slot.has_bid {
                 slot.highest_bid = bid_amount;
@@ -1605,6 +1967,7 @@ pub mod actions {
 
             let group: AuctionGroup = world.read_model(slot.group_id);
             let sealed_cfg = read_sealed_config_or_default(ref world, slot.group_id, group.end_time);
+            let protocol_cfg = read_sealed_protocol_config_or_default(ref world, slot.group_id);
             assert!(group.active, "Auction group inactive");
             if sealed_cfg.sealed_mode {
                 assert!(now >= sealed_cfg.reveal_end_time, "Reveal phase not ended");
@@ -1616,13 +1979,29 @@ pub mod actions {
             assert!(post.post_kind == POST_KIND_AUCTION_SLOT, "Not an auction slot");
 
             if slot.has_bid {
+                if protocol_cfg.mode == SEALED_PROTOCOL_DRAND_MPC && protocol_cfg.require_mpc_attestation {
+                    let attestation: AuctionMpcSettlement = world.read_model(slot_post_id);
+                    assert!(attestation.attested, "Missing MPC settlement attestation");
+                }
                 let token = IERC20Dispatcher { contract_address: payment_token(YIELD_POOL_STRK_ID) };
                 let mut clearing_price = slot.highest_bid;
                 if sealed_cfg.sealed_mode {
-                    let pricing: AuctionSlotPricing = world.read_model(slot_post_id);
-                    let second_plus_one = pricing.second_highest_bid + 1;
-                    if second_plus_one < clearing_price {
-                        clearing_price = second_plus_one;
+                    if protocol_cfg.mode == SEALED_PROTOCOL_TREE_V1 {
+                        let settlement: AuctionSettlementProof = world.read_model(slot_post_id);
+                        assert!(settlement.verified, "Missing sealed tree settlement proof");
+                        assert!(settlement.winner_bidder == slot.highest_bidder, "Settlement winner mismatch");
+                        assert!(settlement.winning_bid == slot.highest_bid, "Settlement winning bid mismatch");
+                        assert!(
+                            settlement.clearing_price > 0 && settlement.clearing_price <= settlement.winning_bid,
+                            "Invalid settlement clearing price"
+                        );
+                        clearing_price = settlement.clearing_price;
+                    } else {
+                        let pricing: AuctionSlotPricing = world.read_model(slot_post_id);
+                        let second_plus_one = pricing.second_highest_bid + 1;
+                        if second_plus_one < clearing_price {
+                            clearing_price = second_plus_one;
+                        }
                     }
                 }
 
@@ -1685,6 +2064,77 @@ pub mod actions {
                 };
                 world.write_model(@finalized_slot);
             }
+        }
+
+        fn finalize_auction_slot_with_settlement(
+            ref self: ContractState,
+            slot_post_id: u64,
+            winner_bidder: ContractAddress,
+            winning_bid: u128,
+            clearing_price: u128,
+            commit_root: felt252,
+            proof_hash: felt252,
+            full_proof_with_hints: Span<felt252>
+        ) {
+            let mut world = self.world_default();
+            let now = get_block_timestamp();
+
+            assert!(winner_bidder != zero_address(), "Winner bidder required");
+            assert!(winning_bid > 0, "Winning bid required");
+            assert!(clearing_price > 0, "Clearing price required");
+            assert!(clearing_price <= winning_bid, "Clearing price cannot exceed winning bid");
+            assert!(commit_root != 0, "Commit root required");
+            assert!(proof_hash != 0, "Proof hash required");
+            assert!(full_proof_with_hints.len() > 0, "Settlement proof required");
+
+            let mut slot: AuctionSlot = world.read_model(slot_post_id);
+            assert!(!slot.finalized, "Auction slot already finalized");
+            let group: AuctionGroup = world.read_model(slot.group_id);
+            assert!(group.active, "Auction group inactive");
+
+            let sealed_cfg = read_sealed_config_or_default(ref world, slot.group_id, group.end_time);
+            assert!(sealed_cfg.sealed_mode, "Not a sealed auction");
+            assert!(now >= sealed_cfg.reveal_end_time, "Reveal phase not ended");
+            let protocol_cfg = read_sealed_protocol_config_or_default(ref world, slot.group_id);
+            assert!(protocol_cfg.mode == SEALED_PROTOCOL_TREE_V1, "Group is not sealed_tree_v1");
+
+            let tree_state = read_commit_tree_state_or_default(ref world, slot_post_id);
+            assert!(tree_state.leaf_count > 0, "No commits recorded for slot");
+            assert!(tree_state.commit_root == commit_root, "Commit root mismatch");
+
+            let verifier = ISealedBidVerifierDispatcher { contract_address: sealed_cfg.verifier };
+            let verified = verifier.verify_winner_settlement(
+                slot_post_id,
+                slot.group_id,
+                winner_bidder,
+                winning_bid,
+                clearing_price,
+                commit_root,
+                full_proof_with_hints,
+            );
+            assert!(verified, "Invalid winner settlement proof");
+
+            world.write_model(
+                @AuctionSettlementProof {
+                    slot_post_id,
+                    verified: true,
+                    settled_at: now,
+                    winner_bidder,
+                    winning_bid,
+                    clearing_price,
+                    commit_root,
+                    proof_hash,
+                    protocol_version: 1,
+                }
+            );
+
+            slot.has_bid = true;
+            slot.highest_bid = winning_bid;
+            slot.highest_bidder = winner_bidder;
+            world.write_model(@slot);
+
+            let second_hint = if clearing_price > 0 { clearing_price - 1 } else { 0 };
+            world.write_model(@AuctionSlotPricing { slot_post_id, second_highest_bid: second_hint });
         }
 
         fn set_won_slot_content(

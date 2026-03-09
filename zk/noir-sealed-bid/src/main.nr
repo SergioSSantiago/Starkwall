@@ -7,6 +7,9 @@ fn main(
     bid_amount: Field,
     salt: Field,
 ) -> pub Field {
+    assert(slot_post_id != 0);
+    assert(group_id != 0);
+    assert(bidder != 0);
     let commitment = bn254::hash_5([
         slot_post_id,
         group_id,
@@ -15,5 +18,6 @@ fn main(
         salt,
     ]);
     assert(bid_amount != 0);
+    assert(salt != 0);
     commitment
 }
